@@ -90,8 +90,8 @@ func (c *WSClient) Run() {
 	}
 }
 
-// Send writes PTY output to the remote server. Safe to call from any
-// goroutine. Silently drops data if not connected or if mode is read-only.
+// Send writes PTY output to the remote server as a binary frame. Safe to call
+// from any goroutine. Silently drops data if not connected or if mode is read-only.
 func (c *WSClient) Send(data []byte) {
 	if c.mode == WSModeR {
 		return
@@ -109,6 +109,27 @@ func (c *WSClient) Send(data []byte) {
 	defer cancel()
 
 	conn.Write(ctx, websocket.MessageBinary, data)
+}
+
+// SendText writes a text frame to the remote server. Used for JSON messages
+// (e.g. transcript data). Safe to call from any goroutine.
+func (c *WSClient) SendText(data []byte) {
+	if c.mode == WSModeR {
+		return
+	}
+
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+
+	if conn == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn.Write(ctx, websocket.MessageText, data)
 }
 
 // Close signals the client to stop and waits for it to exit.
