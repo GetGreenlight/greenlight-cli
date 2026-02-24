@@ -90,3 +90,7 @@ project=my-project
 ## Learn More
 
 Visit [aigreenlight.app](https://aigreenlight.app) to get started.
+
+## License
+
+Licensed under the Functional Source License, see LICENSE.txt.
