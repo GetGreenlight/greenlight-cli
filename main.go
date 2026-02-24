@@ -35,6 +35,10 @@ func main() {
 	switch os.Args[1] {
 	case "connect":
 		runConnect(os.Args[2:])
+	case "hook":
+		runHook(os.Args[2:])
+	case "stream":
+		runStream(os.Args[2:])
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -49,6 +53,7 @@ func printUsage() {
 
 Commands:
   connect    Start Claude Code with a remote relay to the Greenlight app
+  hook       Handle Claude Code hook events (used by hooks, not called directly)
 
 Run 'greenlight <command> --help' for details on a command.
 `)
