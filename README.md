@@ -25,7 +25,7 @@ mv greenlight-darwin-arm64 /usr/local/bin/greenlight  # example for Apple Silico
 ### Build from Source
 
 ```bash
-go build -ldflags "-X main.wsURL=wss://permit.dnmfarrell.com/ws" -o greenlight .
+go build -ldflags "-X main.wsURL=wss://permit.dnmfarrell.com/ws/relay" -o greenlight .
 ```
 
 Requires Go 1.24+. macOS and Linux only.
