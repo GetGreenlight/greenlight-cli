@@ -193,6 +193,10 @@ func (r *Relay) cleanup() {
 	if r.slave != nil {
 		r.slave.Close()
 	}
+}
+
+// CloseWS shuts down the WebSocket client. Call after draining the bridge.
+func (r *Relay) CloseWS() {
 	if r.ws != nil {
 		r.ws.Close()
 	}

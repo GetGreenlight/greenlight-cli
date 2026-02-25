@@ -112,13 +112,29 @@ func runConnect(args []string) {
 	}
 
 	// Start bridge tailer — sends transcript lines from bridge file over WebSocket
+	var bridgeDone chan struct{}
+	var bridgeFinished chan struct{}
 	if r.ws != nil {
-		bridgeDone := make(chan struct{})
-		go tailBridge(bridgePath, r.ws, bridgeDone)
-		defer close(bridgeDone)
+		bridgeDone = make(chan struct{})
+		bridgeFinished = make(chan struct{})
+		go func() {
+			tailBridge(bridgePath, r.ws, bridgeDone)
+			close(bridgeFinished)
+		}()
 	}
 
-	if err := r.Run(); err != nil {
+	runErr := r.Run()
+
+	// Signal bridge tailer to drain remaining lines and wait for it
+	// to finish. This must happen before closing the WebSocket.
+	if bridgeDone != nil {
+		close(bridgeDone)
+		<-bridgeFinished
+	}
+
+	r.CloseWS()
+
+	if runErr != nil {
 		os.Exit(1)
 	}
 }

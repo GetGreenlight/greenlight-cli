@@ -13,6 +13,7 @@ import (
 
 // tailBridge tails the bridge file and sends each line over the WebSocket
 // as a JSON transcript message. Blocks until done is closed or an error occurs.
+// After done is closed, drains any remaining lines before returning.
 func tailBridge(path string, ws *WSClient, done <-chan struct{}) {
 	// Wait for the bridge file to appear (hook creates it)
 	var f *os.File
@@ -35,21 +36,53 @@ func tailBridge(path string, ws *WSClient, done <-chan struct{}) {
 	f.Seek(0, io.SeekEnd)
 
 	reader := bufio.NewReader(f)
+	var partial string
+	stopping := false
 	for {
+		if stopping {
+			// Drain pass: give the streamer a moment to finish writing,
+			// then read and send all remaining complete lines.
+			time.Sleep(500 * time.Millisecond)
+			for {
+				line, err := reader.ReadString('\n')
+				if err == nil {
+					// Complete line (delimiter found)
+					fullLine := trimNewline(partial + line)
+					partial = ""
+					if fullLine != "" {
+						msg := fmt.Sprintf(`{"type":"transcript","data":%s}`, fullLine)
+						ws.SendText([]byte(msg))
+					}
+				} else {
+					// EOF or error — send any remaining buffered partial
+					if partial != "" {
+						msg := fmt.Sprintf(`{"type":"transcript","data":%s}`, partial)
+						ws.SendText([]byte(msg))
+					}
+					return
+				}
+			}
+		}
+
 		select {
 		case <-done:
-			return
+			stopping = true
+			continue
 		default:
 		}
 
 		line, err := reader.ReadString('\n')
-		if line != "" {
-			line = trimNewline(line)
-			if line != "" {
-				// Wrap in transcript message: {"type":"transcript","data":<raw JSONL>}
-				msg := fmt.Sprintf(`{"type":"transcript","data":%s}`, line)
+		if err == nil {
+			// Complete line (delimiter found) — safe to send
+			fullLine := trimNewline(partial + line)
+			partial = ""
+			if fullLine != "" {
+				msg := fmt.Sprintf(`{"type":"transcript","data":%s}`, fullLine)
 				ws.SendText([]byte(msg))
 			}
+		} else if line != "" {
+			// Partial line (no newline yet) — buffer it
+			partial += line
 		}
 
 		if err != nil {

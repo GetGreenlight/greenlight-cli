@@ -78,30 +78,29 @@ func streamToBridge(transcriptPath, sessionID, bridgePath string) {
 	defer bridge.Close()
 
 	reader := bufio.NewReader(f)
-	idleTimeout := 5 * time.Minute
-	lastActivity := time.Now()
+	var partial string
 
 	for {
 		line, err := reader.ReadString('\n')
-		if line != "" {
-			line = trimNewline(line)
-			if line != "" {
-				lastActivity = time.Now()
+		if err == nil {
+			// Complete line (delimiter found) — safe to write
+			fullLine := trimNewline(partial + line)
+			partial = ""
+			if fullLine != "" {
 				// Write the raw JSONL line to the bridge file (one line per entry)
-				if _, werr := fmt.Fprintln(bridge, line); werr != nil {
+				if _, werr := fmt.Fprintln(bridge, fullLine); werr != nil {
 					log.Printf("Bridge write error: %v", werr)
 					return
 				}
 			}
+		} else if line != "" {
+			// Partial line (no newline yet) — buffer it
+			partial += line
 		}
 
 		if err != nil {
 			if err != io.EOF {
 				log.Printf("Transcript read error: %v", err)
-				return
-			}
-			if time.Since(lastActivity) > idleTimeout {
-				log.Printf("Transcript streamer idle timeout")
 				return
 			}
 			time.Sleep(100 * time.Millisecond)
@@ -131,29 +130,27 @@ func streamTranscript(path, sessionID, deviceID, project, relayID, server string
 	seekToLastLines(f, 50)
 
 	reader := bufio.NewReader(f)
-	idleTimeout := 5 * time.Minute
-	lastActivity := time.Now()
+	var partial string
 
 	for {
 		line, err := reader.ReadString('\n')
-		if line != "" {
-			line = trimNewline(line)
-			if line != "" {
-				lastActivity = time.Now()
-				if !sendTranscriptLine(line, sessionID, deviceID, project, relayID, server) {
+		if err == nil {
+			// Complete line (delimiter found) — safe to send
+			fullLine := trimNewline(partial + line)
+			partial = ""
+			if fullLine != "" {
+				if !sendTranscriptLine(fullLine, sessionID, deviceID, project, relayID, server) {
 					return // fatal error
 				}
 			}
+		} else if line != "" {
+			// Partial line (no newline yet) — buffer it
+			partial += line
 		}
 
 		if err != nil {
 			if err != io.EOF {
 				log.Printf("Transcript read error: %v", err)
-				return
-			}
-			// EOF — wait for more data
-			if time.Since(lastActivity) > idleTimeout {
-				log.Printf("Transcript streamer idle timeout")
 				return
 			}
 			time.Sleep(100 * time.Millisecond)
