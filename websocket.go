@@ -66,10 +66,17 @@ func (c *WSClient) Run() {
 		default:
 		}
 
+		connStart := time.Now()
 		err := c.connectAndRead()
 		if err == nil {
 			// Clean shutdown via Close()
 			return
+		}
+
+		// Reset backoff if the connection lasted more than 60s,
+		// so transient failures after a long session start fresh.
+		if time.Since(connStart) > 60*time.Second {
+			attempt = 0
 		}
 
 		select {
@@ -225,8 +232,11 @@ func (c *WSClient) connectAndRead() error {
 // backoff returns a duration for the given attempt number.
 // Exponential: 1s, 2s, 4s, 8s, 16s, 30s (capped) with ±25% jitter.
 func backoff(attempt int) time.Duration {
-	base := time.Second * time.Duration(1<<uint(attempt))
 	const maxDelay = 30 * time.Second
+	if attempt > 30 {
+		attempt = 30 // prevent integer overflow in shift
+	}
+	base := time.Second * time.Duration(1<<uint(attempt))
 	if base > maxDelay {
 		base = maxDelay
 	}
