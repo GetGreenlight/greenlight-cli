@@ -161,7 +161,11 @@ func isGreenlightHookEntry(entry map[string]interface{}) bool {
 			continue
 		}
 		cmd, _ := hm["command"].(string)
-		if strings.Contains(cmd, "greenlight hook") || strings.Contains(cmd, "greenlight-hook") || strings.Contains(cmd, "greenlight-hook-dev") {
+		bin := cmd
+		if i := strings.IndexByte(cmd, ' '); i >= 0 {
+			bin = cmd[:i]
+		}
+		if strings.Contains(filepath.Base(bin), "greenlight") {
 			return true
 		}
 	}
