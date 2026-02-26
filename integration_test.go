@@ -867,6 +867,154 @@ func TestIntegration_Connect_TranscriptRelay(t *testing.T) {
 	}
 }
 
+// ---------- connect — incremental transcript relay with disconnection ----------
+
+func TestIntegration_Connect_TranscriptRelayIncremental(t *testing.T) {
+	testServerURL.clearHandlers()
+
+	workDir, err := os.MkdirTemp("", "greenlight-transcript-incr-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(workDir)
+
+	transcriptPath := filepath.Join(workDir, "transcript.jsonl")
+
+	const totalLines = 10
+
+	// Collect text frames from the WebSocket across multiple connections.
+	// The server will close the first connection after a few frames to
+	// simulate a brief disconnection. The client should reconnect and
+	// re-deliver any messages that failed during the gap.
+	var wsTextFrames []string
+	var wsTextMu sync.Mutex
+	var connCount int32
+	wsDone := make(chan struct{})
+
+	testServerURL.setWSHandler(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+		})
+		if err != nil {
+			t.Logf("ws accept error: %v", err)
+			return
+		}
+
+		wsTextMu.Lock()
+		connCount++
+		thisConn := connCount
+		wsTextMu.Unlock()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+
+		frameCount := 0
+		for {
+			msgType, data, err := conn.Read(ctx)
+			if err != nil {
+				conn.CloseNow()
+				if thisConn == 1 {
+					// First connection was intentionally closed; continue
+					// accepting reconnections by returning (the HTTP
+					// handler will be called again for the next WS dial).
+					return
+				}
+				// Final connection: signal done
+				close(wsDone)
+				return
+			}
+			if msgType == websocket.MessageText {
+				wsTextMu.Lock()
+				wsTextFrames = append(wsTextFrames, string(data))
+				wsTextMu.Unlock()
+
+				frameCount++
+				// After receiving 3 text frames on the first connection,
+				// close it abruptly to simulate a network disruption.
+				// The client should reconnect and the queued messages
+				// from the gap should eventually arrive.
+				if thisConn == 1 && frameCount >= 3 {
+					conn.Close(websocket.StatusGoingAway, "simulated disruption")
+					return
+				}
+			}
+		}
+	})
+	defer testServerURL.clearHandlers()
+
+	// Allocate a PTY for the greenlight process
+	master, slave, err := openPTY()
+	if err != nil {
+		t.Fatalf("openPTY: %v", err)
+	}
+	defer master.Close()
+	setWinsize(slave.Fd(), &Winsize{Row: 24, Col: 80})
+
+	pathWithMock := filepath.Dir(mockClaudeBin) + ":" + os.Getenv("PATH")
+
+	cmd := exec.Command(greenlightBin, "connect", "--device-id", "test-dev", "--project", "test-proj")
+	cmd.Dir = workDir
+	cmd.Env = []string{
+		"HOME=" + os.Getenv("HOME"),
+		"PATH=" + pathWithMock,
+		"TMPDIR=" + os.TempDir(),
+		"TERM=xterm-256color",
+		"MOCK_CLAUDE_TRANSCRIPT_INCREMENTAL=" + transcriptPath,
+	}
+	cmd.Stdin = slave
+	cmd.Stdout = slave
+	cmd.Stderr = slave
+
+	done := make(chan error, 1)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	slave.Close()
+	go func() { done <- cmd.Wait() }()
+
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		cmd.Process.Kill()
+		t.Fatal("connect timed out")
+	}
+
+	// Wait for WS handler to finish
+	select {
+	case <-wsDone:
+	case <-time.After(5 * time.Second):
+		t.Log("WS handler did not finish in time")
+	}
+
+	// Verify that ALL incremental transcript lines were received,
+	// even those sent during/after the disconnection.
+	wsTextMu.Lock()
+	frames := make([]string, len(wsTextFrames))
+	copy(frames, wsTextFrames)
+	wsTextMu.Unlock()
+
+	for i := 1; i <= totalLines; i++ {
+		marker := fmt.Sprintf("INCREMENTAL_LINE_%d", i)
+		found := false
+		for _, frame := range frames {
+			if strings.Contains(frame, marker) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing transcript line %q in %d received frames", marker, len(frames))
+		}
+	}
+
+	if t.Failed() {
+		t.Logf("Received %d text frames:", len(frames))
+		for i, f := range frames {
+			t.Logf("  frame[%d]: %s", i, f)
+		}
+	}
+}
+
 // ---------- hook — SessionStart ----------
 
 func TestIntegration_Hook_SessionStart(t *testing.T) {

@@ -23,6 +23,9 @@ const (
 	WSModeW                // write output to server only
 )
 
+// textQueueSize is the max number of text messages buffered during disconnection.
+const textQueueSize = 1024
+
 // WSClient connects to a remote WebSocket server and injects received
 // messages into the PTY via the provided inject function. When connected,
 // it also sends PTY output back to the server.
@@ -38,6 +41,12 @@ type WSClient struct {
 	// Connection for sending output. Protected by connMu.
 	connMu sync.Mutex
 	conn   *websocket.Conn
+
+	// Buffered text messages (transcript data) that failed to send.
+	// Protected by textMu. Messages are queued when conn is nil or
+	// a write fails, and drained on reconnection.
+	textMu    sync.Mutex
+	textQueue [][]byte
 }
 
 // NewWSClient creates a new WebSocket client. Call Run to start connecting.
@@ -115,11 +124,14 @@ func (c *WSClient) Send(data []byte) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	conn.Write(ctx, websocket.MessageBinary, data)
+	if err := conn.Write(ctx, websocket.MessageBinary, data); err != nil {
+		log.Printf("ws: binary write error: %v", err)
+	}
 }
 
 // SendText writes a text frame to the remote server. Used for JSON messages
-// (e.g. transcript data). Safe to call from any goroutine.
+// (e.g. transcript data). Safe to call from any goroutine. If the connection
+// is down or the write fails, the message is queued for retry on reconnection.
 func (c *WSClient) SendText(data []byte) {
 	if c.mode == WSModeR {
 		return
@@ -130,13 +142,67 @@ func (c *WSClient) SendText(data []byte) {
 	c.connMu.Unlock()
 
 	if conn == nil {
+		c.enqueueText(data)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	conn.Write(ctx, websocket.MessageText, data)
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		log.Printf("ws: text write error: %v", err)
+		c.enqueueText(data)
+	}
+}
+
+// enqueueText adds a text message to the retry queue. If the queue is full,
+// the oldest message is dropped.
+func (c *WSClient) enqueueText(data []byte) {
+	cp := make([]byte, len(data))
+	copy(cp, data)
+
+	c.textMu.Lock()
+	defer c.textMu.Unlock()
+
+	if len(c.textQueue) >= textQueueSize {
+		// Drop the oldest message to make room.
+		log.Printf("ws: text queue full (%d), dropping oldest message", textQueueSize)
+		c.textQueue = c.textQueue[1:]
+	}
+	c.textQueue = append(c.textQueue, cp)
+}
+
+// drainTextQueue sends all queued text messages over the connection.
+// Called after a new connection is established.
+func (c *WSClient) drainTextQueue(conn *websocket.Conn) {
+	c.textMu.Lock()
+	queue := c.textQueue
+	c.textQueue = nil
+	c.textMu.Unlock()
+
+	if len(queue) == 0 {
+		return
+	}
+
+	log.Printf("ws: draining %d queued text messages", len(queue))
+	for i, msg := range queue {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := conn.Write(ctx, websocket.MessageText, msg)
+		cancel()
+		if err != nil {
+			log.Printf("ws: drain write error: %v", err)
+			// Re-queue unsent messages (from index i onward).
+			unsent := queue[i:]
+			c.textMu.Lock()
+			// Prepend unsent to any messages that arrived while draining.
+			c.textQueue = append(unsent, c.textQueue...)
+			if len(c.textQueue) > textQueueSize {
+				c.textQueue = c.textQueue[:textQueueSize]
+			}
+			c.textMu.Unlock()
+			return
+		}
+	}
 }
 
 // Close signals the client to stop and waits for it to exit.
@@ -186,6 +252,9 @@ func (c *WSClient) connectAndRead() error {
 
 	c.setConn(conn)
 	log.Printf("ws: connected to %s", c.url)
+
+	// Drain any text messages that were queued during disconnection.
+	c.drainTextQueue(conn)
 
 	// Read loop: each message is raw bytes to inject
 	for {
