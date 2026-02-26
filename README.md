@@ -25,7 +25,13 @@ mv greenlight-darwin-arm64 /usr/local/bin/greenlight  # example for Apple Silico
 ### Build from Source
 
 ```bash
-go build -ldflags "-X main.wsURL=wss://permit.dnmfarrell.com/ws/relay" -o greenlight .
+go build -ldflags "-X main.version=1.0.0 -X main.wsURL=wss://permit.dnmfarrell.com/ws/relay" -o greenlight .
+```
+
+Or use `build.sh` which auto-detects the version from git tags and builds for all platforms:
+
+```bash
+./build.sh
 ```
 
 Requires Go 1.24+. macOS and Linux only.
@@ -50,6 +56,14 @@ Your device ID can be found on the "About" tab in the Greenlight app.
 
 ```
 greenlight <command> [flags]
+```
+
+### `version`
+
+Print the version number and build settings:
+
+```bash
+greenlight version
 ```
 
 ### `connect`
@@ -86,6 +100,16 @@ Create `~/.greenlight/config` with key=value pairs:
 device_id=your-device-id
 project=my-project
 ```
+
+## Testing
+
+Run the integration tests:
+
+```bash
+go test -tags integration -v -timeout 120s
+```
+
+The tests compile greenlight with a local test server and exercise CLI basics, hook events, streaming, and the full connect flow.
 
 ## Learn More
 

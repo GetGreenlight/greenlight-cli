@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 )
 
+// version is set at build time via -ldflags "-X main.version=..."
+var version string
+
 // wsURL is the relay server URL, set at build time via:
 //
 //	go build -ldflags "-X main.wsURL=wss://permit.dnmfarrell.com/ws/relay" -o greenlight .
@@ -39,6 +42,8 @@ func main() {
 		runHook(os.Args[2:])
 	case "stream":
 		runStream(os.Args[2:])
+	case "version", "--version", "-v":
+		printVersion()
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -48,13 +53,28 @@ func main() {
 	}
 }
 
+func printVersion() {
+	v := version
+	if v == "" {
+		v = "dev"
+	}
+	fmt.Fprintf(os.Stderr, "greenlight %s (relay: %s)\n", v, wsURL)
+}
+
 func printUsage() {
-	fmt.Fprintf(os.Stderr, `Usage: greenlight <command> [flags]
+	v := version
+	if v == "" {
+		v = "dev"
+	}
+	fmt.Fprintf(os.Stderr, `greenlight %s (relay: %s)
+
+Usage: greenlight <command> [flags]
 
 Commands:
   connect    Start Claude Code with a remote relay to the Greenlight app
   hook       Handle Claude Code hook events (used by hooks, not called directly)
+  version    Print version and build settings
 
 Run 'greenlight <command> --help' for details on a command.
-`)
+`, v, wsURL)
 }
