@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"os"
@@ -150,9 +151,23 @@ func (r *Relay) Run() error {
 		for {
 			n, err := os.Stdin.Read(buf)
 			if n > 0 {
-				r.mu.Lock()
-				r.master.Write(buf[:n])
-				r.mu.Unlock()
+				data := buf[:n]
+				for len(data) > 0 {
+					idx := bytes.IndexByte(data, 0x1a) // Ctrl-Z
+					if idx == -1 {
+						r.mu.Lock()
+						r.master.Write(data)
+						r.mu.Unlock()
+						break
+					}
+					if idx > 0 {
+						r.mu.Lock()
+						r.master.Write(data[:idx])
+						r.mu.Unlock()
+					}
+					r.suspend()
+					data = data[idx+1:]
+				}
 			}
 			if err != nil {
 				done <- err
@@ -174,6 +189,24 @@ func (r *Relay) Run() error {
 	<-done
 
 	return waitErr
+}
+
+// suspend stops the relay and suspends the process for shell job control.
+// When the user resumes (e.g. via "fg"), it re-enters raw mode and continues.
+func (r *Relay) suspend() {
+	r.restoreTermios()
+
+	// Reset SIGTSTP to default so the kill actually stops us
+	signal.Reset(syscall.SIGTSTP)
+	syscall.Kill(0, syscall.SIGTSTP)
+	// Execution resumes here after SIGCONT (e.g. "fg")
+
+	if err := r.setRaw(); err != nil {
+		log.Printf("warn: setRaw after resume: %v", err)
+	}
+	if err := r.syncWinsize(); err != nil {
+		log.Printf("warn: syncWinsize after resume: %v", err)
+	}
 }
 
 // Inject writes data directly to the PTY master as if it were typed.

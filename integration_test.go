@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -643,6 +644,95 @@ func TestIntegration_Connect_WSInputInjection(t *testing.T) {
 	}
 	if !strings.Contains(wsOutput, "MOCK_CLAUDE_STARTED") {
 		t.Errorf("expected 'MOCK_CLAUDE_STARTED' in WS output, got %q", wsOutput)
+	}
+}
+
+// ---------- connect — suspend/resume (Ctrl-Z) ----------
+
+func TestIntegration_Connect_SuspendResume(t *testing.T) {
+	testServerURL.clearHandlers()
+
+	workDir, err := os.MkdirTemp("", "greenlight-suspend-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(workDir)
+
+	// File where mock claude writes the input it received
+	outputFile := filepath.Join(workDir, "claude-received.txt")
+
+	// Allocate a PTY for greenlight's stdin/stdout
+	master, slave, err := openPTY()
+	if err != nil {
+		t.Fatalf("openPTY: %v", err)
+	}
+	defer master.Close()
+	setWinsize(slave.Fd(), &Winsize{Row: 24, Col: 80})
+
+	pathWithMock := filepath.Dir(mockClaudeBin) + ":" + os.Getenv("PATH")
+
+	cmd := exec.Command(greenlightBin, "connect", "--device-id", "test-dev", "--project", "test-proj")
+	cmd.Dir = workDir
+	cmd.Env = []string{
+		"HOME=" + os.Getenv("HOME"),
+		"PATH=" + pathWithMock,
+		"TMPDIR=" + os.TempDir(),
+		"TERM=xterm-256color",
+		"MOCK_CLAUDE_OUTPUT=" + outputFile,
+	}
+	cmd.Stdin = slave
+	cmd.Stdout = slave
+	cmd.Stderr = slave
+	// Put greenlight in its own process group so that its
+	// Kill(0, SIGTSTP) doesn't stop the test runner.
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
+	done := make(chan error, 1)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	slave.Close()
+	go func() { done <- cmd.Wait() }()
+
+	// Wait for mock claude to start up inside the PTY
+	time.Sleep(1 * time.Second)
+
+	// Send Ctrl-Z — greenlight should intercept and suspend itself
+	if _, err := master.Write([]byte{0x1a}); err != nil {
+		t.Fatalf("write Ctrl-Z: %v", err)
+	}
+
+	// Give greenlight time to stop
+	time.Sleep(500 * time.Millisecond)
+
+	// Resume greenlight (simulates shell "fg")
+	syscall.Kill(cmd.Process.Pid, syscall.SIGCONT)
+
+	// Give greenlight time to re-enter raw mode
+	time.Sleep(500 * time.Millisecond)
+
+	// Send input after resume — mock claude should receive this
+	if _, err := master.Write([]byte("AFTER_RESUME\n")); err != nil {
+		t.Fatalf("write after resume: %v", err)
+	}
+
+	select {
+	case <-done:
+		// process exited
+	case <-time.After(15 * time.Second):
+		cmd.Process.Kill()
+		t.Fatal("connect timed out")
+	}
+
+	// Verify mock claude received input after the suspend/resume cycle
+	data, err := os.ReadFile(outputFile)
+	if err != nil {
+		t.Fatalf("mock claude output file not created: %v", err)
+	}
+	if !strings.Contains(string(data), "AFTER_RESUME") {
+		t.Errorf("expected 'AFTER_RESUME' after suspend/resume, got %q", string(data))
 	}
 }
 
