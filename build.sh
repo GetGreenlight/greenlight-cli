@@ -39,6 +39,11 @@ for platform in "${platforms[@]}"; do
   fi
   go build -ldflags "-X main.version=$VERSION -X main.wsURL=$WS_URL" -o "$output" .
 
+  if [[ "$os" == "darwin" && "$SIGN_ENABLED" == "false" ]]; then
+    echo "Ad-hoc signing $output ..."
+    codesign -s - -f "$output"
+  fi
+
   if [[ "$os" == "darwin" && "$SIGN_ENABLED" == "true" ]]; then
     echo "Signing $output ..."
     codesign --sign "$DEVELOPER_ID_APPLICATION" --options runtime --timestamp "$output"
