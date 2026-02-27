@@ -58,8 +58,14 @@ func runConnect(args []string) {
 		os.Exit(1)
 	}
 
-	// Generate a relay ID and build the WebSocket URL
-	relayID := generateUUID()
+	// Reuse relay ID for resumed conversations so the phone sees the same session
+	var relayID string
+	if *resume != "" {
+		relayID = lookupRelayID(*resume)
+	}
+	if relayID == "" {
+		relayID = generateUUID()
+	}
 	dialURL := wsURL
 	u, err := url.Parse(dialURL)
 	if err != nil {

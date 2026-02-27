@@ -131,6 +131,11 @@ func handleSessionStart(baseURL, deviceID, project, relayID string, input hookIn
 		postJSON(baseURL+"/activity", payload, 10*time.Second)
 	}()
 
+	// Persist conversation → relay mapping so resumed sessions reuse the same relay ID
+	if input.SessionID != "" && relayID != "" {
+		saveRelayID(input.SessionID, relayID)
+	}
+
 	// Start transcript streamer if transcript path is available
 	sessionID := input.SessionID
 	if sessionID == "" {
