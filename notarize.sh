@@ -23,12 +23,6 @@ done
 echo "Signing $BINARY ..."
 codesign --sign "$DEVELOPER_ID_APPLICATION" --options runtime --timestamp "$BINARY"
 
-echo "Notarizing $BINARY ..."
-zip -j "${BINARY}.zip" "$BINARY"
-xcrun notarytool submit "${BINARY}.zip" \
-  --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_PASSWORD" --wait
-rm "${BINARY}.zip"
-
 echo "Creating DMG for $BINARY ..."
 dmg_path="${BINARY}.dmg"
 staging_dir=$(mktemp -d)
@@ -37,7 +31,6 @@ hdiutil create -volname "Greenlight" -srcfolder "$staging_dir" \
   -ov -format UDZO "$dmg_path"
 rm -rf "$staging_dir"
 
-codesign --sign "$DEVELOPER_ID_APPLICATION" --timestamp "$dmg_path"
 echo "Notarizing $dmg_path ..."
 xcrun notarytool submit "$dmg_path" \
   --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_PASSWORD" --wait
