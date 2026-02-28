@@ -20,8 +20,16 @@ for var in DEVELOPER_ID_APPLICATION APPLE_ID TEAM_ID APP_PASSWORD; do
   fi
 done
 
-echo "Signing $BINARY ..."
-codesign --sign "$DEVELOPER_ID_APPLICATION" --options runtime --timestamp "$BINARY"
+if codesign -dvv "$BINARY" 2>&1 | grep -q "Authority=$DEVELOPER_ID_APPLICATION"; then
+  echo "Skipping signing (already signed): $BINARY"
+else
+  echo "Signing $BINARY ..."
+  codesign --force --sign "$DEVELOPER_ID_APPLICATION" --options runtime --timestamp \
+    -i "com.dnmfarrell.greenlight" "$BINARY"
+fi
+
+echo "Verifying signature ..."
+codesign --verify --deep --strict "$BINARY"
 
 echo "Creating DMG for $BINARY ..."
 dmg_path="${BINARY}.dmg"
