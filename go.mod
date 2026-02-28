@@ -1,5 +1,5 @@
 module greenlight
 
-go 1.24.0
+go 1.19
 
 require nhooyr.io/websocket v1.8.17
