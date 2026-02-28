@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 )
@@ -35,15 +34,7 @@ func New(command string, args []string, wsURL, wsToken string, wsMode WSMode, ex
 
 	cmd := exec.Command(command, args...)
 
-	// Strip GREENLIGHT_* vars inherited from the parent, then add
-	// the explicit exportEnvs (which may include GREENLIGHT_* keys).
-	env := os.Environ()
-	cmd.Env = make([]string, 0, len(env)+len(exportEnvs))
-	for _, e := range env {
-		if !strings.HasPrefix(e, "GREENLIGHT_") {
-			cmd.Env = append(cmd.Env, e)
-		}
-	}
+	cmd.Env = os.Environ()
 	for k, v := range exportEnvs {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
