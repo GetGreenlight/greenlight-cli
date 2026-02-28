@@ -28,29 +28,37 @@ mv greenlight-darwin-arm64 /usr/local/bin/greenlight  # example for Apple Silico
 go build -ldflags "-X main.version=1.0.0 -X main.wsURL=wss://permit.dnmfarrell.com/ws/relay" -o greenlight .
 ```
 
-Or use `build.sh` which auto-detects the version from git tags and builds for all platforms:
+Or use `scripts/build.sh` which auto-detects the version from git tags and builds for all platforms:
 
 ```bash
-./build.sh
+scripts/build.sh
 ```
 
-Requires Go 1.24+. macOS and Linux only.
+Requires Go 1.19+. macOS and Linux only.
+
+### Install Script
+
+If you have Go 1.19+ installed, you can build from source with a single command:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/GetGreenlight/greenlight-cli/main/scripts/install.sh | bash
+```
 
 ## Quick Start
 
+Register your device ID (found on the "About" tab in the Greenlight app):
+
 ```bash
-greenlight connect --device-id your-device-id
+greenlight register your-device-id
+```
+
+Then start a session:
+
+```bash
+greenlight connect
 ```
 
 This launches Claude Code and connects to the Greenlight relay server. Approve the session on your phone to begin.
-
-To avoid typing your device ID every time, save it to `~/.greenlight/config`:
-
-```
-device_id=your-device-id
-```
-
-Your device ID can be found on the "About" tab in the Greenlight app.
 
 ## Usage
 
@@ -65,6 +73,16 @@ Print the version number and build settings:
 ```bash
 greenlight version
 ```
+
+### `register`
+
+Register a device ID for the Greenlight app:
+
+```bash
+greenlight register <device-id>
+```
+
+Writes the device ID to `~/.greenlight/config`.
 
 ### `connect`
 
@@ -94,11 +112,10 @@ Settings can be provided via flags, environment variables, or a config file. Pri
 
 ### Config File
 
-Create `~/.greenlight/config` with key=value pairs:
+The config file at `~/.greenlight/config` is managed by `greenlight register`:
 
 ```
 device_id=your-device-id
-project=my-project
 ```
 
 ## Testing
