@@ -42,6 +42,8 @@ func main() {
 		runHook(os.Args[2:])
 	case "stream":
 		runStream(os.Args[2:])
+	case "register":
+		runRegister(os.Args[2:])
 	case "version", "--version", "-v":
 		printVersion()
 	case "help", "--help", "-h":
@@ -72,6 +74,7 @@ Usage: greenlight <command> [flags]
 
 Commands:
   connect    Start Claude Code with a remote relay to the Greenlight app
+  register   Register a device ID for the Greenlight app
   hook       Handle Claude Code hook events (used by hooks, not called directly)
   version    Print version and build settings
 
