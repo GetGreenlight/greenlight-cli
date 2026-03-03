@@ -17,15 +17,23 @@ Download a binary from the [releases](https://github.com/dnmfarrell/greenlight-c
 | `greenlight-linux-amd64` | Linux (x86_64) |
 | `greenlight-linux-arm64` | Linux (ARM64) |
 
+macOS binaries are codesigned and notarized by Apple, so they work out of the box without Gatekeeper warnings.
+
 ```bash
 chmod +x greenlight-*
 mv greenlight-darwin-arm64 /usr/local/bin/greenlight  # example for Apple Silicon
 ```
 
+### Install Script
+
+```bash
+curl -sSL https://aigreenlight.app/install.sh | bash
+```
+
 ### Build from Source
 
 ```bash
-go build -ldflags "-X main.version=1.0.0 -X main.wsURL=wss://permit.dnmfarrell.com/ws/relay" -o greenlight .
+go build -ldflags "-X main.version=VERSION -X main.wsURL=wss://permit.dnmfarrell.com/ws/relay" -o greenlight .
 ```
 
 Or use `scripts/build.sh` which auto-detects the version from git tags and builds for all platforms:
@@ -35,14 +43,6 @@ scripts/build.sh
 ```
 
 Requires Go 1.19+. macOS and Linux only.
-
-### Install Script
-
-If you have Go 1.19+ installed, you can build from source with a single command:
-
-```bash
-curl -sSL https://raw.githubusercontent.com/GetGreenlight/greenlight-cli/main/scripts/install.sh | bash
-```
 
 ## Quick Start
 
@@ -94,9 +94,17 @@ greenlight connect [flags]
 
 | Flag | Description |
 |------|-------------|
-| `--device-id` | Your device ID (required) |
-| `--project` | Project name |
+| `--device-id` | Device ID (overrides env and config file) |
+| `--project` | Project name (overrides env and config file) |
 | `--resume` | Resume a previous Claude Code session by ID |
+
+### Remote Session Kill
+
+The Greenlight app can remotely terminate a running session. When a session is killed, greenlight restores your terminal and prints resume instructions:
+
+```
+To resume this conversation use --resume <session-id>
+```
 
 ## Configuration
 
@@ -112,10 +120,11 @@ Settings can be provided via flags, environment variables, or a config file. Pri
 
 ### Config File
 
-The config file at `~/.greenlight/config` is managed by `greenlight register`:
+The config file at `~/.greenlight/config` is a key=value file. `device_id` is set by `greenlight register`; `project` can be added manually:
 
 ```
 device_id=your-device-id
+project=my-project
 ```
 
 ## Testing
