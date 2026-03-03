@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 func runConnect(args []string) {
@@ -75,6 +76,9 @@ func runConnect(args []string) {
 	q := u.Query()
 	q.Set("relay_id", relayID)
 	q.Set("project", proj)
+	if version != "" {
+		q.Set("version", version)
+	}
 	u.RawQuery = q.Encode()
 	dialURL = u.String()
 
@@ -115,6 +119,15 @@ func runConnect(args []string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Set kill function for remote "pull the plug"
+	if r.ws != nil {
+		r.ws.killFunc = func() {
+			if r.cmd.Process != nil {
+				syscall.Kill(-r.cmd.Process.Pid, syscall.SIGKILL)
+			}
+		}
 	}
 
 	// Start bridge tailer — sends transcript lines from bridge file over WebSocket

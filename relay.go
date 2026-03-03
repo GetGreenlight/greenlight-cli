@@ -211,6 +211,11 @@ func (r *Relay) Inject(data []byte) error {
 
 func (r *Relay) cleanup() {
 	r.restoreTermios()
+	// Reset terminal state that the child may not have cleaned up
+	// (e.g. if it was killed). These are idempotent — harmless if
+	// the child already sent them on normal exit.
+	os.Stdout.WriteString("\033[?1049l") // leave alternate screen buffer
+	os.Stdout.WriteString("\033[?25h")   // show cursor
 	if r.master != nil {
 		r.master.Close()
 	}

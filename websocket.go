@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log"
 	"math/rand"
 	"net/http"
@@ -30,10 +31,11 @@ const textQueueSize = 1024
 // messages into the PTY via the provided inject function. When connected,
 // it also sends PTY output back to the server.
 type WSClient struct {
-	url    string
-	token  string
-	mode   WSMode
-	inject func([]byte) error
+	url      string
+	token    string
+	mode     WSMode
+	inject   func([]byte) error
+	killFunc func()
 
 	done chan struct{}
 	wg   sync.WaitGroup
@@ -256,9 +258,10 @@ func (c *WSClient) connectAndRead() error {
 	// Drain any text messages that were queued during disconnection.
 	c.drainTextQueue(conn)
 
-	// Read loop: each message is raw bytes to inject
+	// Read loop: text frames are relay input (PTY injection),
+	// binary frames are control messages from the server.
 	for {
-		_, data, err := conn.Read(ctx)
+		msgType, data, err := conn.Read(ctx)
 		if err != nil {
 			// If we're shutting down, report clean exit
 			select {
@@ -268,6 +271,19 @@ func (c *WSClient) connectAndRead() error {
 			default:
 			}
 			return err
+		}
+
+		// Binary frames are control messages
+		if msgType == websocket.MessageBinary && len(data) > 0 {
+			var msg struct{ Type string `json:"type"` }
+			if json.Unmarshal(data, &msg) == nil && msg.Type == "kill" {
+				log.Printf("ws: received kill command")
+				if c.killFunc != nil {
+					c.killFunc()
+				}
+				return nil
+			}
+			continue
 		}
 
 		if len(data) > 0 && c.mode != WSModeW {
