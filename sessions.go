@@ -43,6 +43,17 @@ func lookupRelayID(conversationID string) string {
 	return m[conversationID]
 }
 
+// lookupConversationID returns the conversation_id for a given relay_id, or "".
+func lookupConversationID(relayID string) string {
+	m := loadSessions()
+	for convID, rID := range m {
+		if rID == relayID {
+			return convID
+		}
+	}
+	return ""
+}
+
 // saveRelayID persists a conversation_id → relay_id mapping.
 func saveRelayID(conversationID, relayID string) {
 	path := sessionsFilePath()

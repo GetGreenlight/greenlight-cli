@@ -125,6 +125,7 @@ func runConnect(args []string) {
 	if r.ws != nil {
 		r.ws.killFunc = func() {
 			if r.cmd.Process != nil {
+				r.killed = true
 				syscall.Kill(-r.cmd.Process.Pid, syscall.SIGKILL)
 			}
 		}
@@ -152,6 +153,13 @@ func runConnect(args []string) {
 	}
 
 	r.CloseWS()
+
+	// If the session was killed remotely, print resume instructions
+	if r.killed {
+		if convID := lookupConversationID(relayID); convID != "" {
+			fmt.Fprintf(os.Stderr, "\nTo resume this conversation use --resume %s\n", convID)
+		}
+	}
 
 	if runErr != nil {
 		os.Exit(1)
