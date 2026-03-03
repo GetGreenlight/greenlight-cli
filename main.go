@@ -55,20 +55,23 @@ func main() {
 	}
 }
 
-func printVersion() {
+func versionString() string {
 	v := version
 	if v == "" {
 		v = "dev"
 	}
-	fmt.Fprintf(os.Stderr, "greenlight %s (relay: %s)\n", v, wsURL)
+	if v == "dev" && wsURL != "" {
+		return fmt.Sprintf("greenlight %s (relay: %s)", v, wsURL)
+	}
+	return fmt.Sprintf("greenlight %s", v)
+}
+
+func printVersion() {
+	fmt.Fprintln(os.Stderr, versionString())
 }
 
 func printUsage() {
-	v := version
-	if v == "" {
-		v = "dev"
-	}
-	fmt.Fprintf(os.Stderr, `greenlight %s (relay: %s)
+	fmt.Fprintf(os.Stderr, `%s
 
 Usage: greenlight <command> [flags]
 
@@ -79,5 +82,5 @@ Commands:
   version    Print version and build settings
 
 Run 'greenlight <command> --help' for details on a command.
-`, v, wsURL)
+`, versionString())
 }
