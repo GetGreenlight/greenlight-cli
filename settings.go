@@ -92,6 +92,38 @@ func installHooks(agent string) error {
 	}
 
 	log.Printf("Installed hooks in %s", settingsPath)
+
+	// Gemini: install policy to auto-approve tools so the CLI doesn't
+	// double-prompt (greenlight's BeforeTool hook handles permissions).
+	if agent == "gemini" {
+		if err := installGeminiPolicy(); err != nil {
+			log.Printf("Warning: failed to install gemini policy: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// installGeminiPolicy creates a policy file that auto-approves all tools,
+// letting the BeforeTool hook handle permissions via greenlight instead of
+// the gemini CLI's built-in prompt.
+func installGeminiPolicy() error {
+	policyDir := filepath.Join(".gemini", "policies")
+	if err := os.MkdirAll(policyDir, 0755); err != nil {
+		return fmt.Errorf("create policies dir: %w", err)
+	}
+
+	policyPath := filepath.Join(policyDir, "greenlight.toml")
+	if _, err := os.Stat(policyPath); err == nil {
+		return nil // already exists
+	}
+
+	policy := "# Greenlight: auto-approve tools so the BeforeTool hook handles permissions\n[[rule]]\ndecision = \"allow\"\npriority = 1000\n"
+	if err := os.WriteFile(policyPath, []byte(policy), 0644); err != nil {
+		return fmt.Errorf("write %s: %w", policyPath, err)
+	}
+
+	log.Printf("Installed gemini policy in %s", policyPath)
 	return nil
 }
 

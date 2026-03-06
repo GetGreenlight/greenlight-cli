@@ -9,7 +9,9 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -109,6 +111,14 @@ func runConnect(args []string) {
 		log.Printf("Warning: failed to install hooks: %v", err)
 	}
 
+	// Write connect PID file for session tracking
+	cwd, _ := os.Getwd()
+	connectPidFile := writeConnectPid(relayID, agent, cwd)
+	defer func() {
+		os.Remove(connectPidFile)
+		cleanupAgentFiles(agent, cwd)
+	}()
+
 	// Create bridge file for transcript relay
 	bridgePath := filepath.Join(os.TempDir(), "greenlight-bridge-"+relayID)
 	if f, err := os.Create(bridgePath); err == nil {
@@ -174,6 +184,81 @@ func runConnect(args []string) {
 	if runErr != nil {
 		os.Exit(1)
 	}
+}
+
+// writeConnectPid writes a PID file for this connect session.
+// Format: <pid> <agent> <cwd>
+func writeConnectPid(relayID, agent, cwd string) string {
+	p := filepath.Join(os.TempDir(), "greenlight-connect-"+relayID+".pid")
+	os.WriteFile(p, []byte(fmt.Sprintf("%d %s %s", os.Getpid(), agent, cwd)), 0644)
+	return p
+}
+
+// cleanupAgentFiles removes agent-specific files (e.g. gemini policy) if no
+// other greenlight connect sessions are active for the same agent and project dir.
+func cleanupAgentFiles(agent, cwd string) {
+	if hasOtherSessions(agent, cwd) {
+		return
+	}
+	switch agent {
+	case "gemini":
+		policyPath := filepath.Join(cwd, ".gemini", "policies", "greenlight.toml")
+		if err := os.Remove(policyPath); err == nil {
+			log.Printf("Removed gemini policy %s", policyPath)
+		}
+	}
+}
+
+// hasOtherSessions checks if any other greenlight connect processes are alive
+// for the same agent and working directory.
+func hasOtherSessions(agent, cwd string) bool {
+	pattern := filepath.Join(os.TempDir(), "greenlight-connect-*.pid")
+	matches, _ := filepath.Glob(pattern)
+	myPid := os.Getpid()
+	for _, p := range matches {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		parts := strings.SplitN(string(data), " ", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		var pid int
+		fmt.Sscanf(parts[0], "%d", &pid)
+		if pid == myPid || pid == 0 {
+			continue
+		}
+		pAgent := parts[1]
+		pCwd := parts[2]
+		if pAgent != agent || pCwd != cwd {
+			continue
+		}
+		// Check if the process is still alive and is a greenlight process
+		if isGreenlightProcess(pid) {
+			return true
+		}
+		// Stale PID file — clean it up
+		os.Remove(p)
+	}
+	return false
+}
+
+// isGreenlightProcess checks if a PID is alive and belongs to a greenlight process.
+func isGreenlightProcess(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	if proc.Signal(nil) != nil {
+		return false
+	}
+	// Verify it's actually a greenlight process (PIDs can be recycled)
+	out, err := exec.Command("ps", "-p", fmt.Sprintf("%d", pid), "-o", "comm=").Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "greenlight")
 }
 
 func generateUUID() string {
