@@ -15,9 +15,10 @@ import (
 
 func runConnect(args []string) {
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
-	resume := fs.String("resume", "", "Resume a previous Claude Code session by ID")
+	resume := fs.String("resume", "", "Resume a previous session by ID")
 	deviceID := fs.String("device-id", "", "Device ID (overrides GREENLIGHT_DEVICE_ID env and config file)")
 	project := fs.String("project", "", "Project name (overrides GREENLIGHT_PROJECT env and config file)")
+	agentFlag := fs.String("agent", "", "Agent runtime: claude or cursor (overrides GREENLIGHT_AGENT env and config file)")
 	fs.Parse(args)
 
 	if wsURL == "" {
@@ -25,8 +26,15 @@ func runConnect(args []string) {
 		os.Exit(1)
 	}
 
-	// Build the claude command
-	command := "claude"
+	// Resolve agent runtime: flag > env > config > default
+	agent := resolveAgent(*agentFlag)
+	if !knownAgents[agent] {
+		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, cursor)\n", agent)
+		os.Exit(1)
+	}
+
+	// Build the agent command
+	command := agentBinary(agent)
 	var cmdArgs []string
 	if *resume != "" {
 		cmdArgs = append(cmdArgs, "--resume", *resume)
@@ -76,6 +84,7 @@ func runConnect(args []string) {
 	q := u.Query()
 	q.Set("relay_id", relayID)
 	q.Set("project", proj)
+	q.Set("agent", agentServerName(agent))
 	if version != "" {
 		q.Set("version", version)
 	}
@@ -113,6 +122,7 @@ func runConnect(args []string) {
 		"GREENLIGHT_SESSION_ID": relayID,
 		"GREENLIGHT_PROJECT":    proj,
 		"GREENLIGHT_BRIDGE":     bridgePath,
+		"GREENLIGHT_AGENT":      agent,
 	}
 
 	r, err := New(command, cmdArgs, dialURL, devID, WSModeRW, exportEnvs)
