@@ -44,6 +44,8 @@ func main() {
 		runStream(os.Args[2:])
 	case "register":
 		runRegister(os.Args[2:])
+	case "agent":
+		runAgent(os.Args[2:])
 	case "version", "--version", "-v":
 		printVersion()
 	case "help", "--help", "-h":
@@ -76,9 +78,10 @@ func printUsage() {
 Usage: greenlight <command> [flags]
 
 Commands:
-  connect    Start Claude Code with a remote relay to the Greenlight app
+  connect    Start an agent session with a remote relay to the Greenlight app
   register   Register a device ID for the Greenlight app
-  hook       Handle Claude Code hook events (used by hooks, not called directly)
+  agent      Get or set the default agent runtime (claude, cursor)
+  hook       Handle agent hook events (used by hooks, not called directly)
   version    Print version and build settings
 
 Run 'greenlight <command> --help' for details on a command.

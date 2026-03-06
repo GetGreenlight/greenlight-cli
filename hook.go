@@ -48,6 +48,8 @@ func runHook(args []string) {
 		denyAndExit("Greenlight project not configured. Run: greenlight connect --project PROJECT_NAME")
 	}
 
+	agent := agentServerName(resolveAgent(""))
+
 	relayID := os.Getenv("GREENLIGHT_SESSION_ID")
 
 	// Read hook input from stdin
@@ -75,18 +77,18 @@ func runHook(args []string) {
 
 	switch input.HookEventName {
 	case "SessionStart":
-		handleSessionStart(baseURL, deviceID, project, relayID, input)
+		handleSessionStart(baseURL, deviceID, project, relayID, agent, input)
 	case "PermissionRequest":
-		handlePermissionRequest(baseURL, deviceID, project, relayID, input, inputData)
+		handlePermissionRequest(baseURL, deviceID, project, relayID, agent, input, inputData)
 	case "Notification":
-		handleNotification(baseURL, deviceID, project, relayID, input)
+		handleNotification(baseURL, deviceID, project, relayID, agent, input)
 	default:
 		// Unknown event — exit silently
 		os.Exit(0)
 	}
 }
 
-func handleSessionStart(baseURL, deviceID, project, relayID string, input hookInput) {
+func handleSessionStart(baseURL, deviceID, project, relayID, agent string, input hookInput) {
 	// Export env vars to CLAUDE_ENV_FILE so subprocesses inherit them
 	if envFile := os.Getenv("CLAUDE_ENV_FILE"); envFile != "" {
 		var lines []string
@@ -125,7 +127,7 @@ func handleSessionStart(baseURL, deviceID, project, relayID string, input hookIn
 		"tool_input": map[string]interface{}{},
 		"project":    project,
 		"relay_id":   relayID,
-		"agent":      "claude-code",
+		"agent":      agent,
 	}
 	go func() {
 		postJSON(baseURL+"/activity", payload, 10*time.Second)
@@ -142,6 +144,9 @@ func handleSessionStart(baseURL, deviceID, project, relayID string, input hookIn
 		sessionID = relayID
 	}
 	transcriptPath := input.TranscriptPath
+	if transcriptPath == "" {
+		transcriptPath = deriveTranscriptPath(agent, sessionID)
+	}
 	if transcriptPath != "" {
 		maybeStartStreamer(baseURL, deviceID, project, relayID, sessionID, transcriptPath)
 	}
@@ -149,11 +154,15 @@ func handleSessionStart(baseURL, deviceID, project, relayID string, input hookIn
 	os.Exit(0)
 }
 
-func handlePermissionRequest(baseURL, deviceID, project, relayID string, input hookInput, rawInput []byte) {
+func handlePermissionRequest(baseURL, deviceID, project, relayID, agent string, input hookInput, rawInput []byte) {
 	// Start transcript streamer if not already running
-	if relayID != "" && input.TranscriptPath != "" {
+	transcriptPath := input.TranscriptPath
+	if transcriptPath == "" {
+		transcriptPath = deriveTranscriptPath(agent, input.SessionID)
+	}
+	if relayID != "" && transcriptPath != "" {
 		enrollSessionWithMarker(baseURL, deviceID, relayID, project)
-		maybeStartStreamer(baseURL, deviceID, project, relayID, input.SessionID, input.TranscriptPath)
+		maybeStartStreamer(baseURL, deviceID, project, relayID, input.SessionID, transcriptPath)
 	}
 
 	// Build payload: merge original input with our metadata
@@ -164,7 +173,7 @@ func handlePermissionRequest(baseURL, deviceID, project, relayID string, input h
 	payload["device_id"] = deviceID
 	payload["project"] = project
 	payload["relay_id"] = relayID
-	payload["agent"] = "claude-code"
+	payload["agent"] = agent
 
 	// Send to server (long-poll)
 	resp, err := postJSON(baseURL+"/request", payload, 595*time.Second)
@@ -228,7 +237,7 @@ func handlePermissionRequest(baseURL, deviceID, project, relayID string, input h
 	}
 }
 
-func handleNotification(baseURL, deviceID, project, relayID string, input hookInput) {
+func handleNotification(baseURL, deviceID, project, relayID, agent string, input hookInput) {
 	toolInput := map[string]string{
 		"notification_type": input.NotificationType,
 		"message":           input.Message,
@@ -240,7 +249,7 @@ func handleNotification(baseURL, deviceID, project, relayID string, input hookIn
 		"tool_name":  input.NotificationType,
 		"tool_input": toolInput,
 		"relay_id":   relayID,
-		"agent":      "claude-code",
+		"agent":      agent,
 	}
 	if project != "" {
 		payload["project"] = project

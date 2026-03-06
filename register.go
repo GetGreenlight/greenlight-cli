@@ -5,7 +5,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 )
 
@@ -23,21 +22,8 @@ func runRegister(args []string) {
 		os.Exit(1)
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: cannot determine home directory: %v\n", err)
-		os.Exit(1)
-	}
-
-	configDir := filepath.Join(home, ".greenlight")
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: cannot create %s: %v\n", configDir, err)
-		os.Exit(1)
-	}
-
-	configPath := filepath.Join(configDir, "config")
-	if err := os.WriteFile(configPath, []byte("device_id="+deviceID+"\n"), 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: cannot write %s: %v\n", configPath, err)
+	if err := writeConfigValue("device_id", deviceID); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
