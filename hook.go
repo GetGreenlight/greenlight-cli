@@ -40,17 +40,19 @@ func runHook(args []string) {
 	}
 
 	// Resolve device ID: env > config file
+	// If not configured, allow immediately — the hook is installed but
+	// greenlight is not actively managing this session.
 	deviceID := os.Getenv("GREENLIGHT_DEVICE_ID")
 	if deviceID == "" {
 		deviceID = readConfigValue("device_id")
 	}
 	if deviceID == "" {
-		denyAndExit("Greenlight device ID not configured. See https://getgreenlight.github.io/support.html")
+		allowAndExit()
 	}
 
 	project := os.Getenv("GREENLIGHT_PROJECT")
 	if project == "" {
-		denyAndExit("Greenlight project not configured. Run: greenlight connect --project PROJECT_NAME")
+		allowAndExit()
 	}
 
 	rawAgent := resolveAgent("")
