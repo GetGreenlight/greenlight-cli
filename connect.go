@@ -104,7 +104,7 @@ func runConnect(args []string) {
 		os.Exit(1)
 	}
 
-	// Install Claude Code hooks
+	// Install hooks
 	if err := installHooks(agent); err != nil {
 		log.Printf("Warning: failed to install hooks: %v", err)
 	}
