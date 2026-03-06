@@ -13,6 +13,7 @@ import (
 var knownAgents = map[string]bool{
 	"claude": true,
 	"cursor": true,
+	"gemini": true,
 }
 
 const defaultAgent = "claude"
@@ -36,6 +37,8 @@ func agentBinary(agent string) string {
 	switch agent {
 	case "cursor":
 		return "agent"
+	case "gemini":
+		return "gemini"
 	default:
 		return "claude"
 	}
@@ -46,8 +49,51 @@ func agentServerName(agent string) string {
 	switch agent {
 	case "cursor":
 		return "cursor"
+	case "gemini":
+		return "gemini"
 	default:
 		return "claude-code"
+	}
+}
+
+// agentSettingsPath returns the path to the agent's local settings file
+// relative to the project directory.
+func agentSettingsPath(agent string) string {
+	switch agent {
+	case "gemini":
+		return filepath.Join(".gemini", "settings.json")
+	default:
+		return filepath.Join(".claude", "settings.local.json")
+	}
+}
+
+// agentSettingsDir returns the settings directory name for the agent.
+func agentSettingsDir(agent string) string {
+	switch agent {
+	case "gemini":
+		return ".gemini"
+	default:
+		return ".claude"
+	}
+}
+
+// agentHookEvents returns the hook event names to register for the agent.
+func agentHookEvents(agent string) []string {
+	switch agent {
+	case "gemini":
+		return []string{"SessionStart", "BeforeTool", "Notification"}
+	default:
+		return []string{"SessionStart", "PermissionRequest"}
+	}
+}
+
+// agentOldHookEvents returns hook events that should be cleaned up for the agent.
+func agentOldHookEvents(agent string) []string {
+	switch agent {
+	case "gemini":
+		return nil
+	default:
+		return []string{"UserPromptSubmit"}
 	}
 }
 
@@ -89,13 +135,13 @@ func runAgent(args []string) {
 		fmt.Fprintf(os.Stderr, "Usage: greenlight agent [name]\n\n")
 		fmt.Fprintf(os.Stderr, "Without arguments, prints the current default agent.\n")
 		fmt.Fprintf(os.Stderr, "With a name, sets the default agent in ~/.greenlight/config.\n\n")
-		fmt.Fprintf(os.Stderr, "Supported agents: claude, cursor\n")
+		fmt.Fprintf(os.Stderr, "Supported agents: claude, cursor, gemini\n")
 		os.Exit(0)
 	}
 
 	name := args[0]
 	if !knownAgents[name] {
-		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, cursor)\n", name)
+		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, cursor, gemini)\n", name)
 		os.Exit(1)
 	}
 

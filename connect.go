@@ -29,7 +29,7 @@ func runConnect(args []string) {
 	// Resolve agent runtime: flag > env > config > default
 	agent := resolveAgent(*agentFlag)
 	if !knownAgents[agent] {
-		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, cursor)\n", agent)
+		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, cursor, gemini)\n", agent)
 		os.Exit(1)
 	}
 
@@ -105,7 +105,7 @@ func runConnect(args []string) {
 	}
 
 	// Install Claude Code hooks
-	if err := installHooks(); err != nil {
+	if err := installHooks(agent); err != nil {
 		log.Printf("Warning: failed to install hooks: %v", err)
 	}
 

@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// hookInput is the JSON structure received from Claude Code on stdin.
+// hookInput is the JSON structure received from the agent CLI on stdin.
 type hookInput struct {
 	HookEventName    string          `json:"hook_event_name"`
 	ToolName         string          `json:"tool_name"`
@@ -26,9 +26,14 @@ type hookInput struct {
 	NotificationType string          `json:"notification_type"`
 	Message          string          `json:"message"`
 	Title            string          `json:"title"`
+	// Gemini-specific fields
+	Details string `json:"details"`
 }
 
 func runHook(args []string) {
+	// Set output format early so error helpers use the right format
+	hookOutputAgent = resolveAgent("")
+
 	baseURL, err := serverBaseURL()
 	if err != nil {
 		denyAndExit("Greenlight server not configured: " + err.Error())
@@ -48,7 +53,8 @@ func runHook(args []string) {
 		denyAndExit("Greenlight project not configured. Run: greenlight connect --project PROJECT_NAME")
 	}
 
-	agent := agentServerName(resolveAgent(""))
+	rawAgent := resolveAgent("")
+	agent := agentServerName(rawAgent)
 
 	relayID := os.Getenv("GREENLIGHT_SESSION_ID")
 
@@ -68,18 +74,18 @@ func runHook(args []string) {
 		input.HookEventName = "PermissionRequest"
 	}
 
-	log.Printf("hook: event=%s session=%s relay=%s", input.HookEventName, input.SessionID, relayID)
+	log.Printf("hook: event=%s session=%s relay=%s agent=%s", input.HookEventName, input.SessionID, relayID, agent)
 
-	// Fall back to Claude's session_id if no relay ID from env
+	// Fall back to agent's session_id if no relay ID from env
 	if relayID == "" {
 		relayID = input.SessionID
 	}
 
 	switch input.HookEventName {
 	case "SessionStart":
-		handleSessionStart(baseURL, deviceID, project, relayID, agent, input)
-	case "PermissionRequest":
-		handlePermissionRequest(baseURL, deviceID, project, relayID, agent, input, inputData)
+		handleSessionStart(baseURL, deviceID, project, relayID, agent, rawAgent, input)
+	case "PermissionRequest", "BeforeTool":
+		handlePermissionRequest(baseURL, deviceID, project, relayID, agent, rawAgent, input, inputData)
 	case "Notification":
 		handleNotification(baseURL, deviceID, project, relayID, agent, input)
 	default:
@@ -88,7 +94,7 @@ func runHook(args []string) {
 	}
 }
 
-func handleSessionStart(baseURL, deviceID, project, relayID, agent string, input hookInput) {
+func handleSessionStart(baseURL, deviceID, project, relayID, agent, rawAgent string, input hookInput) {
 	// Export env vars to CLAUDE_ENV_FILE so subprocesses inherit them
 	if envFile := os.Getenv("CLAUDE_ENV_FILE"); envFile != "" {
 		var lines []string
@@ -148,13 +154,13 @@ func handleSessionStart(baseURL, deviceID, project, relayID, agent string, input
 		transcriptPath = deriveTranscriptPath(agent, sessionID)
 	}
 	if transcriptPath != "" {
-		maybeStartStreamer(baseURL, deviceID, project, relayID, sessionID, transcriptPath)
+		maybeStartStreamer(baseURL, deviceID, project, relayID, sessionID, transcriptPath, rawAgent)
 	}
 
 	os.Exit(0)
 }
 
-func handlePermissionRequest(baseURL, deviceID, project, relayID, agent string, input hookInput, rawInput []byte) {
+func handlePermissionRequest(baseURL, deviceID, project, relayID, agent, rawAgent string, input hookInput, rawInput []byte) {
 	// Start transcript streamer if not already running
 	transcriptPath := input.TranscriptPath
 	if transcriptPath == "" {
@@ -162,7 +168,7 @@ func handlePermissionRequest(baseURL, deviceID, project, relayID, agent string, 
 	}
 	if relayID != "" && transcriptPath != "" {
 		enrollSessionWithMarker(baseURL, deviceID, relayID, project)
-		maybeStartStreamer(baseURL, deviceID, project, relayID, input.SessionID, transcriptPath)
+		maybeStartStreamer(baseURL, deviceID, project, relayID, input.SessionID, transcriptPath, rawAgent)
 	}
 
 	// Build payload: merge original input with our metadata
@@ -282,7 +288,7 @@ func clearEnrollmentMarker(relayID string) {
 }
 
 // maybeStartStreamer starts the transcript streamer subprocess if not already running.
-func maybeStartStreamer(baseURL, deviceID, project, relayID, sessionID, transcriptPath string) {
+func maybeStartStreamer(baseURL, deviceID, project, relayID, sessionID, transcriptPath, agent string) {
 	if transcriptPath == "" || sessionID == "" {
 		return
 	}
@@ -335,6 +341,7 @@ func maybeStartStreamer(baseURL, deviceID, project, relayID, sessionID, transcri
 			"--session-id", sessionID,
 			"--relay-id", relayID,
 			"--bridge", bridgePath,
+			"--agent", agent,
 		}
 	} else {
 		cmdArgs = []string{"stream",
@@ -344,6 +351,7 @@ func maybeStartStreamer(baseURL, deviceID, project, relayID, sessionID, transcri
 			"--project", project,
 			"--relay-id", relayID,
 			"--server", baseURL,
+			"--agent", agent,
 		}
 	}
 	cmd := exec.Command(exePath, cmdArgs...)
@@ -365,58 +373,98 @@ func maybeStartStreamer(baseURL, deviceID, project, relayID, sessionID, transcri
 }
 
 // Hook output helpers
+//
+// hookOutputAgent controls the output format. Set before calling any
+// output helper. Defaults to "claude" (Claude Code format). For "gemini",
+// uses top-level decision/reason fields.
+var hookOutputAgent = "claude"
 
 func denyAndExit(message string) {
-	output := map[string]interface{}{
-		"hookSpecificOutput": map[string]interface{}{
-			"hookEventName": "PermissionRequest",
-			"decision": map[string]interface{}{
-				"behavior": "deny",
-				"message":  message,
+	var output interface{}
+	if hookOutputAgent == "gemini" {
+		output = map[string]interface{}{
+			"decision": "deny",
+			"reason":   message,
+		}
+	} else {
+		output = map[string]interface{}{
+			"hookSpecificOutput": map[string]interface{}{
+				"hookEventName": "PermissionRequest",
+				"decision": map[string]interface{}{
+					"behavior": "deny",
+					"message":  message,
+				},
 			},
-		},
+		}
 	}
 	json.NewEncoder(os.Stdout).Encode(output)
 	os.Exit(0)
 }
 
 func denyInterruptAndExit(message string) {
-	output := map[string]interface{}{
-		"hookSpecificOutput": map[string]interface{}{
-			"hookEventName": "PermissionRequest",
-			"decision": map[string]interface{}{
-				"behavior":  "deny",
-				"message":   message,
-				"interrupt": true,
+	var output interface{}
+	if hookOutputAgent == "gemini" {
+		output = map[string]interface{}{
+			"decision":   "deny",
+			"reason":     message,
+			"continue":   false,
+			"stopReason": message,
+		}
+	} else {
+		output = map[string]interface{}{
+			"hookSpecificOutput": map[string]interface{}{
+				"hookEventName": "PermissionRequest",
+				"decision": map[string]interface{}{
+					"behavior":  "deny",
+					"message":   message,
+					"interrupt": true,
+				},
 			},
-		},
+		}
 	}
 	json.NewEncoder(os.Stdout).Encode(output)
 	os.Exit(0)
 }
 
 func allowAndExit() {
-	output := map[string]interface{}{
-		"hookSpecificOutput": map[string]interface{}{
-			"hookEventName": "PermissionRequest",
-			"decision": map[string]interface{}{
-				"behavior": "allow",
+	var output interface{}
+	if hookOutputAgent == "gemini" {
+		output = map[string]interface{}{
+			"decision": "allow",
+		}
+	} else {
+		output = map[string]interface{}{
+			"hookSpecificOutput": map[string]interface{}{
+				"hookEventName": "PermissionRequest",
+				"decision": map[string]interface{}{
+					"behavior": "allow",
+				},
 			},
-		},
+		}
 	}
 	json.NewEncoder(os.Stdout).Encode(output)
 	os.Exit(0)
 }
 
 func allowWithUpdatedInput(updatedInput map[string]interface{}) {
-	output := map[string]interface{}{
-		"hookSpecificOutput": map[string]interface{}{
-			"hookEventName": "PermissionRequest",
-			"decision": map[string]interface{}{
-				"behavior":     "allow",
-				"updatedInput": updatedInput,
+	var output interface{}
+	if hookOutputAgent == "gemini" {
+		output = map[string]interface{}{
+			"decision": "allow",
+			"hookSpecificOutput": map[string]interface{}{
+				"tool_input": updatedInput,
 			},
-		},
+		}
+	} else {
+		output = map[string]interface{}{
+			"hookSpecificOutput": map[string]interface{}{
+				"hookEventName": "PermissionRequest",
+				"decision": map[string]interface{}{
+					"behavior":     "allow",
+					"updatedInput": updatedInput,
+				},
+			},
+		}
 	}
 	json.NewEncoder(os.Stdout).Encode(output)
 	os.Exit(0)

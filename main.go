@@ -80,7 +80,7 @@ Usage: greenlight <command> [flags]
 Commands:
   connect    Start an agent session with a remote relay to the Greenlight app
   register   Register a device ID for the Greenlight app
-  agent      Get or set the default agent runtime (claude, cursor)
+  agent      Get or set the default agent runtime (claude, cursor, gemini)
   hook       Handle agent hook events (used by hooks, not called directly)
   version    Print version and build settings
 
