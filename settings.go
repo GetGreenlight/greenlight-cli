@@ -11,10 +11,9 @@ import (
 	"strings"
 )
 
-// installHooks upserts .claude/settings.local.json in the current working
-// directory to register the greenlight hook for SessionStart and
-// PermissionRequest events.
-func installHooks() error {
+// installHooks upserts the agent's settings file in the current working
+// directory to register the greenlight hook for the appropriate events.
+func installHooks(agent string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve executable path: %w", err)
@@ -26,12 +25,12 @@ func installHooks() error {
 
 	hookCmd := exe + " hook"
 
-	dir := ".claude"
+	dir := agentSettingsDir(agent)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("create .claude dir: %w", err)
+		return fmt.Errorf("create %s dir: %w", dir, err)
 	}
 
-	settingsPath := filepath.Join(dir, "settings.local.json")
+	settingsPath := agentSettingsPath(agent)
 
 	// Read existing settings or start fresh
 	var settings map[string]interface{}
@@ -65,12 +64,12 @@ func installHooks() error {
 
 	// Upsert our hook entries, replacing any existing greenlight hooks
 	// but preserving non-greenlight hooks on the same event
-	for _, event := range []string{"SessionStart", "PermissionRequest"} {
+	for _, event := range agentHookEvents(agent) {
 		hooks[event] = upsertGreenlightHook(hooks[event], hookEntry, hookCmd)
 	}
 
-	// Remove old greenlight hooks from events we no longer use (e.g. UserPromptSubmit)
-	for _, oldEvent := range []string{"UserPromptSubmit"} {
+	// Remove old greenlight hooks from events we no longer use
+	for _, oldEvent := range agentOldHookEvents(agent) {
 		if existing, ok := hooks[oldEvent]; ok {
 			cleaned := removeGreenlightHooks(existing)
 			if len(cleaned) == 0 {
