@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -24,6 +25,11 @@ func installHooks(agent string) error {
 	}
 
 	hookCmd := exe + " hook"
+
+	// Copilot uses a completely different hook file format
+	if agent == "copilot" {
+		return installCopilotHooks(exe)
+	}
 
 	dir := agentSettingsDir(agent)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -125,6 +131,119 @@ func installHooks(agent string) error {
 	}
 
 	return nil
+}
+
+// installCopilotHooks creates the .github/hooks/greenlight.json hook file
+// for copilot-cli. Copilot loads hooks from the git root's .github/hooks/
+// directory, so we detect the git root and install there.
+// Existing non-greenlight hooks in the file are preserved.
+func installCopilotHooks(exe string) error {
+	// Copilot looks for hooks at the git root, not CWD
+	root := gitRoot()
+	dir := filepath.Join(root, agentSettingsDir("copilot"))
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create %s dir: %w", dir, err)
+	}
+
+	settingsPath := filepath.Join(root, agentSettingsPath("copilot"))
+
+	// Read existing file or start fresh
+	var config map[string]interface{}
+	data, err := os.ReadFile(settingsPath)
+	if err == nil {
+		if err := json.Unmarshal(data, &config); err != nil {
+			return fmt.Errorf("parse %s: %w", settingsPath, err)
+		}
+	} else {
+		config = make(map[string]interface{})
+	}
+
+	config["version"] = 1
+
+	hooks, _ := config["hooks"].(map[string]interface{})
+	if hooks == nil {
+		hooks = make(map[string]interface{})
+	}
+
+	for _, event := range agentHookEvents("copilot") {
+		hookCmd := exe + " hook " + event
+		entry := map[string]interface{}{
+			"type": "command",
+			"bash": hookCmd,
+		}
+		// preToolUse needs a long timeout for phone approval long-poll
+		if event == "preToolUse" {
+			entry["timeoutSec"] = 600
+		}
+
+		hooks[event] = upsertCopilotHook(hooks[event], entry)
+	}
+
+	config["hooks"] = hooks
+
+	out, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+
+	if err := os.WriteFile(settingsPath, append(out, '\n'), 0644); err != nil {
+		return fmt.Errorf("write %s: %w", settingsPath, err)
+	}
+
+	log.Printf("Installed copilot hooks in %s", settingsPath)
+	return nil
+}
+
+// upsertCopilotHook replaces or appends a greenlight hook in a copilot hook array.
+func upsertCopilotHook(existing interface{}, newEntry map[string]interface{}) []interface{} {
+	arr, ok := existing.([]interface{})
+	if !ok || len(arr) == 0 {
+		return []interface{}{newEntry}
+	}
+
+	found := false
+	result := make([]interface{}, 0, len(arr))
+	for _, entry := range arr {
+		m, ok := entry.(map[string]interface{})
+		if !ok {
+			result = append(result, entry)
+			continue
+		}
+		if isCopilotGreenlightHook(m) {
+			if !found {
+				result = append(result, newEntry)
+				found = true
+			}
+		} else {
+			result = append(result, entry)
+		}
+	}
+	if !found {
+		result = append(result, newEntry)
+	}
+	return result
+}
+
+// isCopilotGreenlightHook checks if a copilot hook entry belongs to greenlight.
+func isCopilotGreenlightHook(entry map[string]interface{}) bool {
+	bash, _ := entry["bash"].(string)
+	if bash == "" {
+		return false
+	}
+	bin := bash
+	if i := strings.IndexByte(bash, ' '); i >= 0 {
+		bin = bash[:i]
+	}
+	return strings.Contains(filepath.Base(bin), "greenlight")
+}
+
+// gitRoot returns the root of the current git repository, or "." if not in one.
+func gitRoot() string {
+	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "."
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // installGeminiPolicy creates a policy file that auto-approves all tools,

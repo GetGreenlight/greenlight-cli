@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // knownAgents lists the valid agent runtime values.
 var knownAgents = map[string]bool{
-	"claude": true,
-	"gemini": true,
+	"claude":  true,
+	"gemini":  true,
+	"copilot": true,
 }
 
 const defaultAgent = "claude"
@@ -35,6 +37,8 @@ func agentBinary(agent string) string {
 	switch agent {
 	case "gemini":
 		return "gemini"
+	case "copilot":
+		return "copilot"
 	default:
 		return "claude"
 	}
@@ -45,6 +49,8 @@ func agentServerName(agent string) string {
 	switch agent {
 	case "gemini":
 		return "gemini"
+	case "copilot":
+		return "copilot"
 	default:
 		return "claude-code"
 	}
@@ -56,6 +62,8 @@ func agentSettingsPath(agent string) string {
 	switch agent {
 	case "gemini":
 		return filepath.Join(".gemini", "settings.json")
+	case "copilot":
+		return filepath.Join(".github", "hooks", "greenlight.json")
 	default:
 		return filepath.Join(".claude", "settings.local.json")
 	}
@@ -66,6 +74,8 @@ func agentSettingsDir(agent string) string {
 	switch agent {
 	case "gemini":
 		return ".gemini"
+	case "copilot":
+		return filepath.Join(".github", "hooks")
 	default:
 		return ".claude"
 	}
@@ -76,6 +86,8 @@ func agentHookEvents(agent string) []string {
 	switch agent {
 	case "gemini":
 		return []string{"SessionStart", "BeforeTool", "Notification"}
+	case "copilot":
+		return []string{"sessionStart", "preToolUse"}
 	default:
 		return []string{"SessionStart", "PermissionRequest"}
 	}
@@ -86,6 +98,8 @@ func agentOldHookEvents(agent string) []string {
 	switch agent {
 	case "gemini":
 		return nil
+	case "copilot":
+		return nil
 	default:
 		return []string{"UserPromptSubmit"}
 	}
@@ -94,6 +108,37 @@ func agentOldHookEvents(agent string) []string {
 // deriveTranscriptPath constructs the transcript file path for agents that
 // don't include it in hook input. Returns "" if it can't be determined.
 func deriveTranscriptPath(agent, sessionID string) string {
+	if agent != "copilot" {
+		return ""
+	}
+	// Copilot stores sessions at $COPILOT_HOME/session-state/{id}/events.jsonl
+	home := os.Getenv("COPILOT_HOME")
+	if home == "" {
+		home = filepath.Join(os.Getenv("HOME"), ".copilot")
+	}
+	stateDir := filepath.Join(home, "session-state")
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		return ""
+	}
+	var newest string
+	var newestTime time.Time
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(newestTime) {
+			newestTime = info.ModTime()
+			newest = e.Name()
+		}
+	}
+	if newest != "" {
+		return filepath.Join(stateDir, newest, "events.jsonl")
+	}
 	return ""
 }
 
@@ -109,13 +154,13 @@ func runAgent(args []string) {
 		fmt.Fprintf(os.Stderr, "Usage: greenlight agent [name]\n\n")
 		fmt.Fprintf(os.Stderr, "Without arguments, prints the current default agent.\n")
 		fmt.Fprintf(os.Stderr, "With a name, sets the default agent in ~/.greenlight/config.\n\n")
-		fmt.Fprintf(os.Stderr, "Supported agents: claude, gemini\n")
+		fmt.Fprintf(os.Stderr, "Supported agents: claude, copilot, gemini\n")
 		os.Exit(0)
 	}
 
 	name := args[0]
 	if !knownAgents[name] {
-		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, gemini)\n", name)
+		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, copilot, gemini)\n", name)
 		os.Exit(1)
 	}
 

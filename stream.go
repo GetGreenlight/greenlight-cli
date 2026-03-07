@@ -49,9 +49,12 @@ func runStream(args []string) {
 	}
 
 	if *bridge != "" {
-		if agent == "gemini" {
+		switch agent {
+		case "gemini":
 			streamGeminiBridge(*transcriptPath, *bridge)
-		} else {
+		case "copilot":
+			streamCopilotBridge(*transcriptPath, *bridge)
+		default:
 			streamToBridge(*transcriptPath, *sessionID, *bridge)
 		}
 	} else {
@@ -455,6 +458,137 @@ func transformGeminiMessage(raw json.RawMessage, sessionID string) map[string]in
 			"message":   content,
 		}
 	}
+}
+
+// streamCopilotBridge tails a copilot events.jsonl file, transforms each event
+// to Claude transcript format, and writes the result to the bridge file.
+// Copilot events have the structure:
+//
+//	{"type":"event.type","data":{...},"id":"uuid","timestamp":"ISO-8601","parentId":"uuid"}
+func streamCopilotBridge(transcriptPath, bridgePath string) {
+	// Wait for transcript file to appear
+	var f *os.File
+	for i := 0; i < 300; i++ {
+		var err error
+		f, err = os.Open(transcriptPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if f == nil {
+		log.Printf("Transcript file never appeared: %s", transcriptPath)
+		return
+	}
+	defer f.Close()
+
+	bridge, err := os.OpenFile(bridgePath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("Failed to open bridge file: %v", err)
+		return
+	}
+	defer bridge.Close()
+
+	reader := bufio.NewReader(f)
+	var partial string
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err == nil {
+			fullLine := trimNewline(partial + line)
+			partial = ""
+			if fullLine != "" {
+				transformed := transformCopilotEvent(fullLine)
+				if transformed != "" {
+					if _, werr := fmt.Fprintln(bridge, transformed); werr != nil {
+						log.Printf("Bridge write error: %v", werr)
+						return
+					}
+				}
+			}
+		} else if line != "" {
+			partial += line
+		}
+
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("Transcript read error: %v", err)
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
+// transformCopilotEvent converts a copilot events.jsonl line to Claude transcript format.
+func transformCopilotEvent(line string) string {
+	var event struct {
+		Type      string          `json:"type"`
+		Data      json.RawMessage `json:"data"`
+		ID        string          `json:"id"`
+		Timestamp string          `json:"timestamp"`
+	}
+	if err := json.Unmarshal([]byte(line), &event); err != nil {
+		return ""
+	}
+
+	var entry map[string]interface{}
+
+	switch event.Type {
+	case "user.message":
+		var data struct {
+			Content string `json:"content"`
+		}
+		json.Unmarshal(event.Data, &data)
+		entry = map[string]interface{}{
+			"type":      "user",
+			"uuid":      event.ID,
+			"timestamp": event.Timestamp,
+			"message": map[string]interface{}{
+				"role":    "user",
+				"content": data.Content,
+			},
+		}
+
+	case "assistant.message":
+		var data struct {
+			Content string `json:"content"`
+			Model   string `json:"model"`
+		}
+		json.Unmarshal(event.Data, &data)
+		entry = map[string]interface{}{
+			"type":      "assistant",
+			"uuid":      event.ID,
+			"timestamp": event.Timestamp,
+			"message": map[string]interface{}{
+				"role": "assistant",
+				"content": []map[string]interface{}{
+					{"type": "text", "text": data.Content},
+				},
+				"model": data.Model,
+			},
+		}
+
+	case "tool.execution_start", "tool.execution_complete":
+		// Pass through with wrapping
+		var content interface{}
+		json.Unmarshal([]byte(line), &content)
+		entry = map[string]interface{}{
+			"type":      event.Type,
+			"uuid":      event.ID,
+			"timestamp": event.Timestamp,
+			"message":   content,
+		}
+
+	default:
+		return ""
+	}
+
+	out, err := json.Marshal(entry)
+	if err != nil {
+		return ""
+	}
+	return string(out)
 }
 
 // streamTranscript tails a JSONL transcript file and POSTs each line to the server.
