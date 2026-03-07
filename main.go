@@ -62,7 +62,7 @@ func versionString() string {
 	if v == "" {
 		v = "dev"
 	}
-	if v == "dev" && wsURL != "" {
+	if wsURL != "" {
 		return fmt.Sprintf("greenlight %s (relay: %s)", v, wsURL)
 	}
 	return fmt.Sprintf("greenlight %s", v)
