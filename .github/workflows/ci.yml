@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+          - os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binary
+        run: go build -o greenlight-test .
+
+      - name: Smoke test
+        run: ./greenlight-test version
+
+      - name: Run integration tests
+        run: go test -tags integration -v -timeout 120s
+
+  wsl-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Vampire/setup-wsl@v5
+        with:
+          distribution: Ubuntu-22.04
+
+      - name: Install Go
+        shell: wsl-bash {0}
+        run: |
+          curl -fsSL https://go.dev/dl/go1.23.6.linux-amd64.tar.gz -o /tmp/go.tar.gz
+          sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+
+      - name: Build binary
+        shell: wsl-bash {0}
+        run: |
+          export PATH=/usr/local/go/bin:$PATH
+          go build -o greenlight-test .
+
+      - name: Smoke test
+        shell: wsl-bash {0}
+        run: ./greenlight-test version
+
+      - name: Run integration tests
+        shell: wsl-bash {0}
+        run: |
+          export PATH=/usr/local/go/bin:$PATH
+          go test -tags integration -v -timeout 120s
