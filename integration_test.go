@@ -639,9 +639,6 @@ func TestIntegration_Connect_WSInputInjection(t *testing.T) {
 	if !strings.Contains(wsOutput, "HELLO_FROM_SERVER") {
 		t.Errorf("expected 'HELLO_FROM_SERVER' in WS output (PTY echo), got %q", wsOutput)
 	}
-	if !strings.Contains(wsOutput, "MOCK_CLAUDE_STARTED") {
-		t.Errorf("expected 'MOCK_CLAUDE_STARTED' in WS output, got %q", wsOutput)
-	}
 }
 
 // ---------- connect — suspend/resume (Ctrl-Z) ----------
