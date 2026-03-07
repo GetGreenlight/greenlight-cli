@@ -82,6 +82,29 @@ func installHooks(agent string) error {
 
 	settings["hooks"] = hooks
 
+	if agent == "gemini" {
+		// Enable plan mode so enter_plan_mode/exit_plan_mode tools are available
+		exp, _ := settings["experimental"].(map[string]interface{})
+		if exp == nil {
+			exp = map[string]interface{}{}
+		}
+		exp["plan"] = true
+		settings["experimental"] = exp
+
+		// Enable folder trust so workspace-level policies are loaded
+		sec, _ := settings["security"].(map[string]interface{})
+		if sec == nil {
+			sec = map[string]interface{}{}
+		}
+		ft, _ := sec["folderTrust"].(map[string]interface{})
+		if ft == nil {
+			ft = map[string]interface{}{}
+		}
+		ft["enabled"] = true
+		sec["folderTrust"] = ft
+		settings["security"] = sec
+	}
+
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal settings: %w", err)
@@ -114,11 +137,13 @@ func installGeminiPolicy() error {
 	}
 
 	policyPath := filepath.Join(policyDir, "greenlight.toml")
-	if _, err := os.Stat(policyPath); err == nil {
-		return nil // already exists
-	}
 
-	policy := "# Greenlight: auto-approve tools so the BeforeTool hook handles permissions\n[[rule]]\ndecision = \"allow\"\npriority = 1000\n"
+	policy := `# Greenlight: auto-approve tools so the BeforeTool hook handles permissions
+[[rule]]
+toolName = "*"
+decision = "allow"
+priority = 999
+`
 	if err := os.WriteFile(policyPath, []byte(policy), 0644); err != nil {
 		return fmt.Errorf("write %s: %w", policyPath, err)
 	}
