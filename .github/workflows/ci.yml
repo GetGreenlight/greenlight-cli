@@ -42,7 +42,7 @@ jobs:
       - name: Install Go
         shell: wsl-bash {0}
         run: |
-          curl -fsSL https://go.dev/dl/go1.23.6.linux-amd64.tar.gz -o /tmp/go.tar.gz
+          curl -fsSL https://go.dev/dl/go1.20.14.linux-amd64.tar.gz -o /tmp/go.tar.gz
           sudo tar -C /usr/local -xzf /tmp/go.tar.gz
 
       - name: Build binary
