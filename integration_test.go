@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -243,12 +244,11 @@ func TestMain(m *testing.M) {
 		"-o", greenlightBin,
 		".",
 	)
-	buildCmd.Env = append(os.Environ(),
-		"GOOS=darwin",
-		"GOARCH=arm64",
-		"CGO_ENABLED=0",
-		"MACOSX_DEPLOYMENT_TARGET=12.0",
-	)
+	buildEnv := []string{"CGO_ENABLED=0"}
+	if runtime.GOOS == "darwin" {
+		buildEnv = append(buildEnv, "MACOSX_DEPLOYMENT_TARGET=12.0")
+	}
+	buildCmd.Env = append(os.Environ(), buildEnv...)
 	buildCmd.Dir = sourceDir()
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to build greenlight:\n%s\n%v\n", out, err)
@@ -259,8 +259,6 @@ func TestMain(m *testing.M) {
 	mockClaudeBin = filepath.Join(tmpDir, "claude")
 	mockCmd := exec.Command("go", "build", "-o", mockClaudeBin, "./testdata/mock_claude.go")
 	mockCmd.Env = append(os.Environ(),
-		"GOOS=darwin",
-		"GOARCH=arm64",
 		"CGO_ENABLED=0",
 	)
 	mockCmd.Dir = sourceDir()
