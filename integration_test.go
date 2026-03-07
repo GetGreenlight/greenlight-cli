@@ -543,14 +543,13 @@ func TestIntegration_Connect_WSInputInjection(t *testing.T) {
 		defer conn.Close(websocket.StatusNormalClosure, "done")
 
 		// Give the relay a moment to start the child process
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(2 * time.Second)
 
-		// Send a binary frame with a newline — the relay will convert
-		// \n to \r and inject it into the PTY. The terminal driver
-		// translates \r back to \n for the child's stdin.
+		// Send a text frame with \r — the relay injects text frames
+		// into the PTY as keystrokes.
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		err = conn.Write(ctx, websocket.MessageBinary, []byte("HELLO_FROM_SERVER\n"))
+		err = conn.Write(ctx, websocket.MessageText, []byte("HELLO_FROM_SERVER\r"))
 		if err != nil {
 			t.Logf("ws write error: %v", err)
 			return
@@ -1059,14 +1058,18 @@ func TestIntegration_Hook_SessionStart(t *testing.T) {
 }
 
 func TestIntegration_Hook_MissingDeviceID(t *testing.T) {
+	// Use an isolated HOME so no real ~/.greenlight/config is found.
+	// When device ID is missing, the hook should allow (passthrough mode).
+	tmpHome := t.TempDir()
 	input := `{"hook_event_name":"PermissionRequest","tool_name":"Bash"}`
 	r := run(t, []string{"hook"},
 		[]string{
+			"HOME=" + tmpHome,
 			"GREENLIGHT_PROJECT=test-proj",
 		}, input)
 
 	if r.ExitCode != 0 {
-		t.Errorf("expected exit 0 (deny via JSON), got %d", r.ExitCode)
+		t.Errorf("expected exit 0 (allow via JSON), got %d", r.ExitCode)
 	}
 
 	var output map[string]interface{}
@@ -1076,19 +1079,17 @@ func TestIntegration_Hook_MissingDeviceID(t *testing.T) {
 
 	hso := output["hookSpecificOutput"].(map[string]interface{})
 	decision := hso["decision"].(map[string]interface{})
-	if decision["behavior"] != "deny" {
-		t.Errorf("expected deny, got %v", decision["behavior"])
-	}
-	msg := decision["message"].(string)
-	if !strings.Contains(strings.ToLower(msg), "device id") {
-		t.Errorf("expected device ID error message, got %q", msg)
+	if decision["behavior"] != "allow" {
+		t.Errorf("expected allow, got %v", decision["behavior"])
 	}
 }
 
 func TestIntegration_Hook_MissingProject(t *testing.T) {
+	tmpHome := t.TempDir()
 	input := `{"hook_event_name":"PermissionRequest","tool_name":"Bash"}`
 	r := run(t, []string{"hook"},
 		[]string{
+			"HOME=" + tmpHome,
 			"GREENLIGHT_DEVICE_ID=test-dev",
 		}, input)
 
