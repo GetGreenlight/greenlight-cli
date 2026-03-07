@@ -31,7 +31,7 @@ func runConnect(args []string) {
 	// Resolve agent runtime: flag > env > config > default
 	agent := resolveAgent(*agentFlag)
 	if !knownAgents[agent] {
-		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, gemini)\n", agent)
+		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, copilot, gemini)\n", agent)
 		os.Exit(1)
 	}
 
@@ -40,6 +40,10 @@ func runConnect(args []string) {
 	var cmdArgs []string
 	if *resume != "" {
 		cmdArgs = append(cmdArgs, "--resume", *resume)
+	}
+	// Copilot: bypass built-in prompts so the preToolUse hook handles permissions
+	if agent == "copilot" {
+		cmdArgs = append(cmdArgs, "--allow-all")
 	}
 
 	// Resolve device ID: flag > env > config file
@@ -205,6 +209,13 @@ func cleanupAgentFiles(agent, cwd string) {
 		policyPath := filepath.Join(cwd, ".gemini", "policies", "greenlight.toml")
 		if err := os.Remove(policyPath); err == nil {
 			log.Printf("Removed gemini policy %s", policyPath)
+		}
+	case "copilot":
+		// Hooks are installed at git root, not necessarily CWD
+		root := gitRoot()
+		hookPath := filepath.Join(root, ".github", "hooks", "greenlight.json")
+		if err := os.Remove(hookPath); err == nil {
+			log.Printf("Removed copilot hook %s", hookPath)
 		}
 	}
 }

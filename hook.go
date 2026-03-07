@@ -30,6 +30,16 @@ type hookInput struct {
 	Details string `json:"details"`
 }
 
+// copilotHookInput is the JSON structure received from copilot-cli on stdin.
+type copilotHookInput struct {
+	Timestamp     int64           `json:"timestamp"`
+	Cwd           string          `json:"cwd"`
+	ToolName      string          `json:"toolName"`
+	ToolArgs      json.RawMessage `json:"toolArgs"` // JSON string or object
+	Source        string          `json:"source"`
+	InitialPrompt string         `json:"initialPrompt"`
+}
+
 func runHook(args []string) {
 	// Set output format early so error helpers use the right format
 	hookOutputAgent = resolveAgent("")
@@ -67,8 +77,16 @@ func runHook(args []string) {
 	}
 
 	var input hookInput
-	if err := json.Unmarshal(inputData, &input); err != nil {
-		denyAndExit("Failed to parse hook input: " + err.Error())
+
+	// Copilot passes the event type as a CLI argument (sessionStart, preToolUse)
+	// and uses a different stdin JSON format.
+	if rawAgent == "copilot" && len(args) > 0 {
+		copilotEvent := args[0]
+		input = parseCopilotInput(inputData, copilotEvent)
+	} else {
+		if err := json.Unmarshal(inputData, &input); err != nil {
+			denyAndExit("Failed to parse hook input: " + err.Error())
+		}
 	}
 
 	// Default event type
@@ -81,6 +99,18 @@ func runHook(args []string) {
 	// Fall back to agent's session_id if no relay ID from env
 	if relayID == "" {
 		relayID = input.SessionID
+	}
+
+	// Re-serialize inputData for copilot so handlePermissionRequest
+	// sends the normalized payload to the server
+	if rawAgent == "copilot" {
+		if normalized, err := json.Marshal(map[string]interface{}{
+			"hook_event_name": input.HookEventName,
+			"tool_name":       input.ToolName,
+			"tool_input":      json.RawMessage(input.ToolInput),
+		}); err == nil {
+			inputData = normalized
+		}
 	}
 
 	switch input.HookEventName {
@@ -199,6 +229,32 @@ func handlePermissionRequest(baseURL, deviceID, project, relayID, agent, rawAgen
 				} else {
 					payload["tool_name"] = "Generic"
 				}
+			}
+		}
+	}
+
+	// Normalize Copilot tool names and args to Claude equivalents
+	if agent == "copilot" {
+		if toolName, ok := payload["tool_name"].(string); ok {
+			if mapped, found := copilotToolNameMap[toolName]; found {
+				// Known tool — rename and normalize args
+				payload["tool_name"] = mapped
+				if ti, ok := payload["tool_input"].(map[string]interface{}); ok {
+					payload["tool_input"] = normalizeCopilotArgs(mapped, ti)
+				}
+			} else if copilotSafeToolSet[toolName] {
+				payload["tool_input"] = map[string]interface{}{
+					"toolName": toolName,
+					"args":     payload["tool_input"],
+				}
+				payload["tool_name"] = "GenericSafe"
+			} else {
+				// Unknown tool — wrap as Generic
+				payload["tool_input"] = map[string]interface{}{
+					"toolName": toolName,
+					"args":     payload["tool_input"],
+				}
+				payload["tool_name"] = "Generic"
 			}
 		}
 	}
@@ -414,6 +470,85 @@ var geminiSafeToolSet = map[string]bool{
 	"cli_help": true,
 }
 
+// copilotToolNameMap translates Copilot CLI tool names to their Claude equivalents.
+// Copilot sends lowercase names in hook stdin; these map to PascalCase Claude names.
+var copilotToolNameMap = map[string]string{
+	"bash":       "Bash",
+	"shell":      "Bash",
+	"edit":       "Edit",
+	"view":       "Read",
+	"read":       "Read",
+	"create":     "Write",
+	"write":      "Write",
+	"grep":       "Grep",
+	"rg":         "Grep",
+	"glob":       "Glob",
+	"web_fetch":  "WebFetch",
+	"web_search": "WebSearch",
+}
+
+// copilotSafeToolSet lists copilot tools that are safe (no side effects).
+var copilotSafeToolSet = map[string]bool{
+	"ReportIntent": true,
+	"AskUser":      true,
+}
+
+// normalizeCopilotArgs renames copilot tool_input keys to Claude equivalents
+// so the phone app can display arguments correctly.
+func normalizeCopilotArgs(toolName string, toolInput map[string]interface{}) map[string]interface{} {
+	switch toolName {
+	case "Read", "Grep", "Glob":
+		renameKey(toolInput, "path", "file_path")
+	case "Edit":
+		renameKey(toolInput, "path", "file_path")
+		renameKey(toolInput, "old_str", "old_string")
+		renameKey(toolInput, "new_str", "new_string")
+	case "Write":
+		renameKey(toolInput, "path", "file_path")
+		renameKey(toolInput, "file_text", "content")
+	}
+	return toolInput
+}
+
+func renameKey(m map[string]interface{}, old, new string) {
+	if v, ok := m[old]; ok {
+		m[new] = v
+		delete(m, old)
+	}
+}
+
+// parseCopilotInput converts copilot-cli's hook stdin JSON into our internal hookInput.
+func parseCopilotInput(data []byte, event string) hookInput {
+	var ci copilotHookInput
+	json.Unmarshal(data, &ci)
+
+	var input hookInput
+	switch event {
+	case "sessionStart":
+		input.HookEventName = "SessionStart"
+	case "preToolUse":
+		input.HookEventName = "PermissionRequest"
+		input.ToolName = ci.ToolName
+		// toolArgs may be a JSON string (quoted) or a JSON object
+		if len(ci.ToolArgs) > 0 {
+			if ci.ToolArgs[0] == '"' {
+				// JSON string — unwrap the quotes to get the inner JSON
+				var s string
+				if json.Unmarshal(ci.ToolArgs, &s) == nil {
+					input.ToolInput = json.RawMessage(s)
+				}
+			} else {
+				// JSON object — use directly
+				input.ToolInput = ci.ToolArgs
+			}
+		}
+	default:
+		input.HookEventName = event
+	}
+
+	return input
+}
+
 // Hook output helpers
 //
 // hookOutputAgent controls the output format. Set before calling any
@@ -423,12 +558,18 @@ var hookOutputAgent = "claude"
 
 func denyAndExit(message string) {
 	var output interface{}
-	if hookOutputAgent == "gemini" {
+	switch hookOutputAgent {
+	case "gemini":
 		output = map[string]interface{}{
 			"decision": "deny",
 			"reason":   message,
 		}
-	} else {
+	case "copilot":
+		output = map[string]interface{}{
+			"permissionDecision":       "deny",
+			"permissionDecisionReason": message,
+		}
+	default:
 		output = map[string]interface{}{
 			"hookSpecificOutput": map[string]interface{}{
 				"hookEventName": "PermissionRequest",
@@ -445,14 +586,21 @@ func denyAndExit(message string) {
 
 func denyInterruptAndExit(message string) {
 	var output interface{}
-	if hookOutputAgent == "gemini" {
+	switch hookOutputAgent {
+	case "gemini":
 		output = map[string]interface{}{
 			"decision":   "deny",
 			"reason":     message,
 			"continue":   false,
 			"stopReason": message,
 		}
-	} else {
+	case "copilot":
+		// Copilot has no interrupt concept — deny is the strongest signal
+		output = map[string]interface{}{
+			"permissionDecision":       "deny",
+			"permissionDecisionReason": message,
+		}
+	default:
 		output = map[string]interface{}{
 			"hookSpecificOutput": map[string]interface{}{
 				"hookEventName": "PermissionRequest",
@@ -470,11 +618,17 @@ func denyInterruptAndExit(message string) {
 
 func allowAndExit() {
 	var output interface{}
-	if hookOutputAgent == "gemini" {
+	switch hookOutputAgent {
+	case "gemini":
 		output = map[string]interface{}{
 			"decision": "allow",
 		}
-	} else {
+	case "copilot":
+		// Copilot treats no output as allow; output explicitly for consistency
+		output = map[string]interface{}{
+			"permissionDecision": "allow",
+		}
+	default:
 		output = map[string]interface{}{
 			"hookSpecificOutput": map[string]interface{}{
 				"hookEventName": "PermissionRequest",
@@ -490,14 +644,20 @@ func allowAndExit() {
 
 func allowWithUpdatedInput(updatedInput map[string]interface{}) {
 	var output interface{}
-	if hookOutputAgent == "gemini" {
+	switch hookOutputAgent {
+	case "gemini":
 		output = map[string]interface{}{
 			"decision": "allow",
 			"hookSpecificOutput": map[string]interface{}{
 				"tool_input": updatedInput,
 			},
 		}
-	} else {
+	case "copilot":
+		// Copilot doesn't support updated input — just allow
+		output = map[string]interface{}{
+			"permissionDecision": "allow",
+		}
+	default:
 		output = map[string]interface{}{
 			"hookSpecificOutput": map[string]interface{}{
 				"hookEventName": "PermissionRequest",
