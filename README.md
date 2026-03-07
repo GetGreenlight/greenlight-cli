@@ -17,6 +17,8 @@ Download a binary from the [releases](https://github.com/dnmfarrell/greenlight-c
 | `greenlight-linux-amd64` | Linux (x86_64) |
 | `greenlight-linux-arm64` | Linux (ARM64) |
 
+The Linux binaries also work under WSL2 (Windows Subsystem for Linux).
+
 macOS binaries are codesigned and notarized by Apple, so they work out of the box without Gatekeeper warnings.
 
 ```bash
@@ -42,7 +44,7 @@ Or use `scripts/build.sh` which auto-detects the version from git tags and build
 scripts/build.sh
 ```
 
-Requires Go 1.19+. macOS and Linux only.
+Requires Go 1.20+. macOS, Linux, and WSL2.
 
 ## Quick Start
 
