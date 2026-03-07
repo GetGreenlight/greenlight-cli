@@ -1085,6 +1085,8 @@ func TestIntegration_Hook_MissingDeviceID(t *testing.T) {
 }
 
 func TestIntegration_Hook_MissingProject(t *testing.T) {
+	// Use an isolated HOME so no real ~/.greenlight/config is found.
+	// When project is missing, the hook should allow (passthrough mode).
 	tmpHome := t.TempDir()
 	input := `{"hook_event_name":"PermissionRequest","tool_name":"Bash"}`
 	r := run(t, []string{"hook"},
@@ -1094,19 +1096,15 @@ func TestIntegration_Hook_MissingProject(t *testing.T) {
 		}, input)
 
 	if r.ExitCode != 0 {
-		t.Errorf("expected exit 0, got %d", r.ExitCode)
+		t.Errorf("expected exit 0 (allow via JSON), got %d", r.ExitCode)
 	}
 
 	var output map[string]interface{}
 	json.Unmarshal([]byte(r.Stdout), &output)
 	hso := output["hookSpecificOutput"].(map[string]interface{})
 	decision := hso["decision"].(map[string]interface{})
-	if decision["behavior"] != "deny" {
-		t.Errorf("expected deny, got %v", decision["behavior"])
-	}
-	msg := decision["message"].(string)
-	if !strings.Contains(strings.ToLower(msg), "project") {
-		t.Errorf("expected project error message, got %q", msg)
+	if decision["behavior"] != "allow" {
+		t.Errorf("expected allow, got %v", decision["behavior"])
 	}
 }
 
