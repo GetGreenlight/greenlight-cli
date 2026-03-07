@@ -183,6 +183,26 @@ func handlePermissionRequest(baseURL, deviceID, project, relayID, agent, rawAgen
 	payload["relay_id"] = relayID
 	payload["agent"] = agent
 
+	// Normalize Gemini tool names to Claude equivalents
+	if agent == "gemini" {
+		if toolName, ok := payload["tool_name"].(string); ok {
+			if mapped, found := geminiToolNameMap[toolName]; found {
+				payload["tool_name"] = mapped
+			} else {
+				// Wrap unrecognized tools as Generic/GenericSafe
+				payload["tool_input"] = map[string]interface{}{
+					"toolName": toolName,
+					"args":     payload["tool_input"],
+				}
+				if geminiSafeToolSet[toolName] {
+					payload["tool_name"] = "GenericSafe"
+				} else {
+					payload["tool_name"] = "Generic"
+				}
+			}
+		}
+	}
+
 	// Send to server (long-poll)
 	resp, err := postJSON(baseURL+"/request", payload, 595*time.Second)
 	if err != nil {
@@ -372,6 +392,26 @@ func maybeStartStreamer(baseURL, deviceID, project, relayID, sessionID, transcri
 
 	// Don't wait for the child — it's detached
 	cmd.Process.Release()
+}
+
+// geminiToolNameMap translates Gemini tool names to their Claude equivalents
+// so the server and client can use a single set of tool name display logic.
+// Unmapped tools are sent as "Generic" with the original name in tool_input.
+// Tools in geminiSafeToolSet use "GenericSafe" (server converts args to globs).
+var geminiToolNameMap = map[string]string{
+	"read_file":         "Read",
+	"write_file":        "Write",
+	"replace":           "Edit",
+	"run_shell_command": "Bash",
+	"grep_search":       "Grep",
+	"list_directory":    "ListDirectory",
+	"web_fetch":         "WebFetch",
+	"google_web_search": "WebSearch",
+	"get_internal_docs": "Read",
+}
+
+var geminiSafeToolSet = map[string]bool{
+	"cli_help": true,
 }
 
 // Hook output helpers
