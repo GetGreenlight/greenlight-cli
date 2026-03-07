@@ -1,0 +1,30 @@
+name: WSL Integration Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  wsl-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Vampire/setup-wsl@v5
+        with:
+          distribution: Ubuntu-22.04
+
+      - name: Install Go
+        shell: wsl-bash {0}
+        run: |
+          curl -fsSL https://go.dev/dl/go1.23.6.linux-amd64.tar.gz -o /tmp/go.tar.gz
+          sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+          echo 'export PATH=/usr/local/go/bin:$PATH' >> ~/.bashrc
+
+      - name: Run integration tests
+        shell: wsl-bash {0}
+        run: |
+          export PATH=/usr/local/go/bin:$PATH
+          go test -tags integration -v -timeout 120s
