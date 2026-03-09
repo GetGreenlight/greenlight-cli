@@ -171,11 +171,6 @@ func handleSessionStart(baseURL, deviceID, project, relayID, agent, rawAgent str
 		postJSON(baseURL+"/activity", payload, 10*time.Second)
 	}()
 
-	// Persist conversation → relay mapping so resumed sessions reuse the same relay ID
-	if input.SessionID != "" && relayID != "" {
-		saveRelayID(input.SessionID, relayID)
-	}
-
 	// Start transcript streamer if transcript path is available
 	sessionID := input.SessionID
 	if sessionID == "" {
@@ -460,7 +455,7 @@ var geminiToolNameMap = map[string]string{
 	"replace":           "Edit",
 	"run_shell_command": "Bash",
 	"grep_search":       "Grep",
-	"list_directory":    "ListDirectory",
+	"list_directory":    "Bash",
 	"web_fetch":         "WebFetch",
 	"google_web_search": "WebSearch",
 	"get_internal_docs": "Read",

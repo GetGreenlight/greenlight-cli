@@ -11,6 +11,17 @@ OUTDIR="dist"
 
 mkdir -p "$OUTDIR"
 
+# Build interpose libraries from the greenlight-interpose repo
+INTERPOSE_DIR="${INTERPOSE_DIR:-$(cd "$(dirname "$0")/../.." && pwd)/greenlight-interpose}"
+if [[ ! -d "$INTERPOSE_DIR" ]]; then
+  echo "Error: interpose repo not found at $INTERPOSE_DIR" >&2
+  echo "Set INTERPOSE_DIR to the greenlight-interpose checkout." >&2
+  exit 1
+fi
+echo "Building interpose libraries from $INTERPOSE_DIR..."
+(cd "$INTERPOSE_DIR" && make clean && ./build-all.sh)
+cp "$INTERPOSE_DIR"/libhook-*.gz interpose/
+
 platforms=(
   "darwin amd64"
   "darwin arm64"
@@ -24,7 +35,7 @@ for platform in "${platforms[@]}"; do
   echo "Building $output ..."
   export GOOS="$os" GOARCH="$arch" CGO_ENABLED=0
   if [[ "$os" == "darwin" ]]; then
-    export MACOSX_DEPLOYMENT_TARGET=12.0
+    export MACOSX_DEPLOYMENT_TARGET=13.0
   else
     unset MACOSX_DEPLOYMENT_TARGET
   fi

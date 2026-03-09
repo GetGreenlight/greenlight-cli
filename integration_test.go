@@ -246,7 +246,7 @@ func TestMain(m *testing.M) {
 	)
 	buildEnv := []string{"CGO_ENABLED=0"}
 	if runtime.GOOS == "darwin" {
-		buildEnv = append(buildEnv, "MACOSX_DEPLOYMENT_TARGET=12.0")
+		buildEnv = append(buildEnv, "MACOSX_DEPLOYMENT_TARGET=13.0")
 	}
 	buildCmd.Env = append(os.Environ(), buildEnv...)
 	buildCmd.Dir = sourceDir()
@@ -344,7 +344,9 @@ func TestIntegration_Version(t *testing.T) {
 // ---------- connect arg validation ----------
 
 func TestIntegration_Connect_MissingDeviceID(t *testing.T) {
-	r := run(t, []string{"connect"}, nil, "")
+	// Use a temp HOME so ~/.greenlight/config doesn't supply a device_id
+	tmpHome := t.TempDir()
+	r := run(t, []string{"connect"}, []string{"HOME=" + tmpHome}, "")
 	if r.ExitCode == 0 {
 		t.Error("expected non-zero exit code")
 	}
@@ -1583,5 +1585,24 @@ func TestIntegration_Hook_DefaultEventType(t *testing.T) {
 	decision := hso["decision"].(map[string]interface{})
 	if decision["behavior"] != "allow" {
 		t.Errorf("expected allow (default PermissionRequest), got %v; stdout=%q", decision["behavior"], r.Stdout)
+	}
+}
+
+// ---------- embedded library extraction ----------
+
+func TestIntegration_EmbeddedLib(t *testing.T) {
+	p := extractEmbeddedLib()
+	if p == "" {
+		t.Fatal("extractEmbeddedLib returned empty path")
+	}
+	defer os.Remove(p)
+
+	info, err := os.Stat(p)
+	if err != nil {
+		t.Fatalf("extracted file does not exist at %s: %v", p, err)
+	}
+
+	if info.Size() == 0 {
+		t.Error("extracted library is empty")
 	}
 }
