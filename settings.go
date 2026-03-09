@@ -49,10 +49,17 @@ func installHooks(agent string) error {
 		settings = make(map[string]interface{})
 	}
 
-	// Build the hook entry
+	// Build the hook entry.
+	// For Claude, only match intent-style requests (questions, plan mode)
+	// that aren't tool calls interpose can intercept.
+	matcher := ""
+	if agent == "claude" {
+		matcher = "AskUser|ExitPlanMode"
+	}
+
 	hookEntry := []interface{}{
 		map[string]interface{}{
-			"matcher": "",
+			"matcher": matcher,
 			"hooks": []interface{}{
 				map[string]interface{}{
 					"type":    "command",
@@ -269,6 +276,64 @@ priority = 999
 
 	log.Printf("Installed gemini policy in %s", policyPath)
 	return nil
+}
+
+// installGreenlightInstructions creates an agent-specific instruction file
+// that teaches the agent how to interpret [GREENLIGHT] permission denial messages.
+// For Gemini: GEMINI.md in the project root.
+// For Copilot: .github/copilot-instructions.md in the project root.
+func installGreenlightInstructions(agent string) error {
+	var instrPath string
+	switch agent {
+	case "gemini":
+		instrPath = "GEMINI.md"
+	case "copilot":
+		if err := os.MkdirAll(".github", 0755); err != nil {
+			return fmt.Errorf("create .github dir: %w", err)
+		}
+		instrPath = filepath.Join(".github", "copilot-instructions.md")
+	case "cursor":
+		if err := os.MkdirAll(filepath.Join(".cursor", "rules"), 0755); err != nil {
+			return fmt.Errorf("create .cursor/rules dir: %w", err)
+		}
+		instrPath = filepath.Join(".cursor", "rules", "greenlight.mdc")
+	case "codex":
+		instrPath = "AGENTS.md"
+	default:
+		return nil
+	}
+
+	// Don't overwrite an existing file that the user created
+	if _, err := os.Stat(instrPath); err == nil {
+		existing, err := os.ReadFile(instrPath)
+		if err == nil && !strings.Contains(string(existing), "[GREENLIGHT]") {
+			// User's own file — don't touch it
+			log.Printf("Skipping %s — user file exists", instrPath)
+			return nil
+		}
+		// File exists with our marker — we'll overwrite it
+	}
+
+	content := "<!-- Greenlight -->\n" + greenlightSystemPrompt + "\n"
+	if err := os.WriteFile(instrPath, []byte(content), 0644); err != nil {
+		return fmt.Errorf("write %s: %w", instrPath, err)
+	}
+	log.Printf("Installed greenlight instructions in %s", instrPath)
+	return nil
+}
+
+// removeGreenlightInstructions removes the instruction file only if it was
+// created by greenlight (contains our marker).
+func removeGreenlightInstructions(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	if strings.Contains(string(data), "<!-- Greenlight -->") {
+		if err := os.Remove(path); err == nil {
+			log.Printf("Removed greenlight instructions %s", path)
+		}
+	}
 }
 
 // upsertGreenlightHook takes the existing hook array for an event and either
