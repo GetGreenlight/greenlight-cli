@@ -6,7 +6,7 @@ if [[ "$VERSION" == *-dirty ]]; then
   echo "Error: uncommitted changes detected (version: $VERSION). Commit or stash before building." >&2
   exit 1
 fi
-WS_URL="${WS_URL:-wss://permit.dnmfarrell.com/ws/relay}"
+WS_URL="${WS_URL:-wss://api.aigreenlight.app/ws/relay}"
 OUTDIR="dist"
 
 mkdir -p "$OUTDIR"

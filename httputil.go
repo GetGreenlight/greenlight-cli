@@ -12,7 +12,7 @@ import (
 )
 
 // serverBaseURL derives the HTTPS base URL from the build-time wsURL.
-// e.g. "wss://permit.dnmfarrell.com/ws/relay" → "https://permit.dnmfarrell.com"
+// e.g. "wss://api.aigreenlight.app/ws/relay" → "https://api.aigreenlight.app"
 func serverBaseURL() (string, error) {
 	if wsURL == "" {
 		return "", fmt.Errorf("no relay server URL configured")

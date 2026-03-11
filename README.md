@@ -8,7 +8,7 @@ Greenlight CLI connects [Claude Code](https://claude.ai/code) to the Greenlight 
 
 ### Prebuilt Binaries
 
-Download a binary from the [releases](https://github.com/dnmfarrell/greenlight-cli/releases) page:
+Download a binary from the [releases](https://github.com/get-greenlight/greenlight-cli/releases) page:
 
 | File | Platform |
 |------|----------|
@@ -35,7 +35,7 @@ curl -sSL https://aigreenlight.app/install.sh | bash
 ### Build from Source
 
 ```bash
-go build -ldflags "-X main.version=VERSION -X main.wsURL=wss://permit.dnmfarrell.com/ws/relay" -o greenlight .
+go build -ldflags "-X main.version=VERSION -X main.wsURL=wss://api.aigreenlight.app/ws/relay" -o greenlight .
 ```
 
 Or use `scripts/build.sh` which auto-detects the version from git tags and builds for all platforms:

@@ -14,7 +14,7 @@ var version string
 
 // wsURL is the relay server URL, set at build time via:
 //
-//	go build -ldflags "-X main.wsURL=wss://permit.dnmfarrell.com/ws/relay" -o greenlight .
+//	go build -ldflags "-X main.wsURL=wss://api.aigreenlight.app/ws/relay" -o greenlight .
 var wsURL string
 
 func main() {
