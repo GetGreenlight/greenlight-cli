@@ -133,7 +133,8 @@ func handleInterposeConn(conn net.Conn, baseURL, deviceID, project, relayID, age
 		// Handle 401 — re-enroll and retry
 		if resp.StatusCode == 401 && relayID != "" {
 			clearEnrollmentMarker(relayID)
-			if err := enrollSessionWithMarker(baseURL, deviceID, relayID, project); err != nil {
+			interpCwd, _ := os.Getwd()
+			if err := enrollSessionWithMarker(baseURL, deviceID, relayID, project, agent, interpCwd); err != nil {
 				resp.Body.Close()
 				respond(conn, interposeResponse{Allow: false})
 				return

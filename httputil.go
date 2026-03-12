@@ -30,13 +30,19 @@ func serverBaseURL() (string, error) {
 
 // enrollSession registers a session with the server and blocks until the user
 // approves it on their phone. Returns an error if rejected or timed out.
-func enrollSession(baseURL, deviceID, sessionID, project string) error {
+func enrollSession(baseURL, deviceID, sessionID, project, agent, cwd string) error {
 	payload := map[string]string{
 		"device_id":  deviceID,
 		"session_id": sessionID,
 	}
 	if project != "" {
 		payload["project"] = project
+	}
+	if agent != "" {
+		payload["agent"] = agent
+	}
+	if cwd != "" {
+		payload["cwd"] = cwd
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
