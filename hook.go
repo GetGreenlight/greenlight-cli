@@ -127,6 +127,7 @@ func runHook(args []string) {
 }
 
 func handleSessionStart(baseURL, deviceID, project, relayID, agent, rawAgent string, input hookInput) {
+	hookCwd, _ := os.Getwd()
 	// Export env vars to CLAUDE_ENV_FILE so subprocesses inherit them
 	if envFile := os.Getenv("CLAUDE_ENV_FILE"); envFile != "" {
 		var lines []string
@@ -152,7 +153,7 @@ func handleSessionStart(baseURL, deviceID, project, relayID, agent, rawAgent str
 	}
 
 	// Eagerly enroll session
-	if err := enrollSessionWithMarker(baseURL, deviceID, relayID, project); err != nil {
+	if err := enrollSessionWithMarker(baseURL, deviceID, relayID, project, agent, hookCwd); err != nil {
 		log.Printf("Session enrollment failed: %v", err)
 		os.Exit(0)
 	}
@@ -188,13 +189,15 @@ func handleSessionStart(baseURL, deviceID, project, relayID, agent, rawAgent str
 }
 
 func handlePermissionRequest(baseURL, deviceID, project, relayID, agent, rawAgent string, input hookInput, rawInput []byte) {
+	hookCwd, _ := os.Getwd()
+
 	// Start transcript streamer if not already running
 	transcriptPath := input.TranscriptPath
 	if transcriptPath == "" {
 		transcriptPath = deriveTranscriptPath(agent, input.SessionID)
 	}
 	if relayID != "" && transcriptPath != "" {
-		enrollSessionWithMarker(baseURL, deviceID, relayID, project)
+		enrollSessionWithMarker(baseURL, deviceID, relayID, project, agent, hookCwd)
 		maybeStartStreamer(baseURL, deviceID, project, relayID, input.SessionID, transcriptPath, rawAgent)
 	}
 
@@ -264,7 +267,7 @@ func handlePermissionRequest(baseURL, deviceID, project, relayID, agent, rawAgen
 	// Handle 401 — enroll and retry
 	if resp.StatusCode == 401 && relayID != "" {
 		clearEnrollmentMarker(relayID)
-		if err := enrollSessionWithMarker(baseURL, deviceID, relayID, project); err != nil {
+		if err := enrollSessionWithMarker(baseURL, deviceID, relayID, project, agent, hookCwd); err != nil {
 			denyAndExit("Greenlight session enrollment was rejected")
 		}
 		// Retry
@@ -343,12 +346,12 @@ func handleNotification(baseURL, deviceID, project, relayID, agent string, input
 }
 
 // enrollSessionWithMarker enrolls the session if not already enrolled (marker file check).
-func enrollSessionWithMarker(baseURL, deviceID, relayID, project string) error {
+func enrollSessionWithMarker(baseURL, deviceID, relayID, project, agent, cwd string) error {
 	marker := filepath.Join(os.TempDir(), "greenlight-enrolled-"+relayID)
 	if _, err := os.Stat(marker); err == nil {
 		return nil // already enrolled
 	}
-	if err := enrollSession(baseURL, deviceID, relayID, project); err != nil {
+	if err := enrollSession(baseURL, deviceID, relayID, project, agent, cwd); err != nil {
 		return err
 	}
 	os.WriteFile(marker, nil, 0644)

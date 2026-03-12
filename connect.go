@@ -128,8 +128,11 @@ func runConnect(args []string) {
 		os.Exit(1)
 	}
 
+	// Get CWD for enrollment and session tracking
+	cwd, _ := os.Getwd()
+
 	// Enroll session with the relay server
-	if err := enrollSession(baseURL, devID, relayID, proj); err != nil {
+	if err := enrollSession(baseURL, devID, relayID, proj, agentServerName(agent), cwd); err != nil {
 		fmt.Fprintf(os.Stderr, "greenlight: session enrollment failed: %v\n", err)
 		os.Exit(1)
 	}
@@ -160,7 +163,6 @@ func runConnect(args []string) {
 	}
 
 	// Write connect PID file for session tracking
-	cwd, _ := os.Getwd()
 	connectPidFile := writeConnectPid(relayID, agent, cwd)
 	defer func() {
 		os.Remove(connectPidFile)
