@@ -58,6 +58,8 @@ func runStream(args []string) {
 			streamCursorBridge(*transcriptPath, *bridge)
 		case "codex":
 			streamCodexBridge(*transcriptPath, *bridge)
+		case "pi":
+			streamPiBridge(*transcriptPath, *bridge)
 		default:
 			streamToBridge(*transcriptPath, *sessionID, *bridge)
 		}
@@ -1230,6 +1232,321 @@ func transformCodexEvent(line string) string {
 		return ""
 	}
 	return string(out)
+}
+
+// streamPiBridge tails a pi-coding-agent session JSONL file, transforms each
+// event to Claude transcript format, and writes the result to the bridge file.
+// Pi JSONL entries have a "type" field; we only process "message" entries.
+func streamPiBridge(transcriptPath, bridgePath string) {
+	// Wait for transcript file to appear
+	var f *os.File
+	for i := 0; i < 300; i++ {
+		var err error
+		f, err = os.Open(transcriptPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if f == nil {
+		log.Printf("Transcript file never appeared: %s", transcriptPath)
+		return
+	}
+	defer f.Close()
+
+	bridge, err := os.OpenFile(bridgePath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("Failed to open bridge file: %v", err)
+		return
+	}
+	defer bridge.Close()
+
+	reader := bufio.NewReader(f)
+	var partial string
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err == nil {
+			fullLine := trimNewline(partial + line)
+			partial = ""
+			if fullLine != "" {
+				transformed := transformPiEvent(fullLine)
+				if transformed != "" {
+					if _, werr := fmt.Fprintln(bridge, transformed); werr != nil {
+						log.Printf("Bridge write error: %v", werr)
+						return
+					}
+				}
+			}
+		} else if line != "" {
+			partial += line
+		}
+
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("Transcript read error: %v", err)
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
+// transformPiEvent converts a pi-coding-agent session JSONL line to Claude
+// transcript format. Pi entries have:
+//
+//	{"type":"session",...} — session header (skip)
+//	{"type":"message","id":"...","parentId":"...","timestamp":"...","message":{...}}
+//
+// Messages have role: "user", "assistant", or "toolResult".
+// Assistant content can be a string or an array with text/toolCall blocks.
+func transformPiEvent(line string) string {
+	var event struct {
+		Type      string          `json:"type"`
+		ID        string          `json:"id"`
+		Timestamp string          `json:"timestamp"`
+		Message   json.RawMessage `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(line), &event); err != nil {
+		return ""
+	}
+
+	if event.Type != "message" {
+		return "" // skip session headers, model changes, etc.
+	}
+
+	var msg struct {
+		Role       string          `json:"role"`
+		Content    json.RawMessage `json:"content"`
+		Model      string          `json:"model"`
+		ToolCallID string          `json:"toolCallId"`
+		ToolName   string          `json:"toolName"`
+		IsError    bool            `json:"isError"`
+	}
+	if err := json.Unmarshal(event.Message, &msg); err != nil {
+		return ""
+	}
+
+	var entry map[string]interface{}
+
+	switch msg.Role {
+	case "user":
+		// Content is a string
+		var text string
+		if err := json.Unmarshal(msg.Content, &text); err != nil {
+			return ""
+		}
+		entry = map[string]interface{}{
+			"type":      "user",
+			"uuid":      event.ID,
+			"timestamp": event.Timestamp,
+			"message": map[string]interface{}{
+				"role":    "user",
+				"content": text,
+			},
+		}
+
+	case "assistant":
+		// Content can be a string or an array of text/toolCall blocks
+		var contentStr string
+		if json.Unmarshal(msg.Content, &contentStr) == nil {
+			// Simple string content
+			entry = map[string]interface{}{
+				"type":      "assistant",
+				"uuid":      event.ID,
+				"timestamp": event.Timestamp,
+				"message": map[string]interface{}{
+					"role": "assistant",
+					"content": []map[string]interface{}{
+						{"type": "text", "text": contentStr},
+					},
+					"model": msg.Model,
+				},
+			}
+		} else {
+			// Array content with text blocks and toolCall blocks
+			var parts []json.RawMessage
+			if err := json.Unmarshal(msg.Content, &parts); err != nil {
+				return ""
+			}
+			entries := transformPiAssistantContent(parts, event.ID, event.Timestamp, msg.Model)
+			if len(entries) == 0 {
+				return ""
+			}
+			// Return multiple entries as separate lines
+			var lines []string
+			for _, e := range entries {
+				out, err := json.Marshal(e)
+				if err != nil {
+					continue
+				}
+				lines = append(lines, string(out))
+			}
+			return strings.Join(lines, "\n")
+		}
+
+	case "toolResult":
+		// Tool result: content is an array [{type:"text",text:"..."}]
+		resultContent := ""
+		var parts []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(msg.Content, &parts) == nil {
+			for _, p := range parts {
+				if p.Text != "" {
+					if resultContent != "" {
+						resultContent += "\n"
+					}
+					resultContent += p.Text
+				}
+			}
+		} else {
+			// Try as plain string
+			json.Unmarshal(msg.Content, &resultContent)
+		}
+		entry = map[string]interface{}{
+			"type":      "progress",
+			"uuid":      event.ID,
+			"timestamp": event.Timestamp,
+			"data": map[string]interface{}{
+				"message": map[string]interface{}{
+					"type": "user",
+					"message": map[string]interface{}{
+						"role": "user",
+						"content": []map[string]interface{}{
+							{
+								"type":        "tool_result",
+								"tool_use_id": msg.ToolCallID,
+								"content":     resultContent,
+							},
+						},
+					},
+				},
+			},
+		}
+
+	default:
+		return ""
+	}
+
+	out, err := json.Marshal(entry)
+	if err != nil {
+		return ""
+	}
+	return string(out)
+}
+
+// transformPiAssistantContent processes a pi assistant message with mixed
+// text and toolCall content blocks, returning Claude-format entries.
+func transformPiAssistantContent(parts []json.RawMessage, id, timestamp, model string) []map[string]interface{} {
+	var entries []map[string]interface{}
+	var textParts []map[string]interface{}
+
+	for _, raw := range parts {
+		var block struct {
+			Type      string                 `json:"type"`
+			Text      string                 `json:"text"`
+			ID        string                 `json:"id"`
+			Name      string                 `json:"name"`
+			Arguments map[string]interface{} `json:"arguments"`
+		}
+		if err := json.Unmarshal(raw, &block); err != nil {
+			continue
+		}
+
+		switch block.Type {
+		case "text":
+			if block.Text != "" {
+				textParts = append(textParts, map[string]interface{}{
+					"type": "text",
+					"text": block.Text,
+				})
+			}
+		case "toolCall":
+			// Flush accumulated text before the tool call
+			if len(textParts) > 0 {
+				entries = append(entries, map[string]interface{}{
+					"type":      "assistant",
+					"uuid":      id,
+					"timestamp": timestamp,
+					"message": map[string]interface{}{
+						"role":    "assistant",
+						"content": textParts,
+						"model":   model,
+					},
+				})
+				textParts = nil
+			}
+			// Emit tool_use entry
+			entries = append(entries, map[string]interface{}{
+				"type":      "assistant",
+				"uuid":      block.ID,
+				"timestamp": timestamp,
+				"message": map[string]interface{}{
+					"role": "assistant",
+					"content": []map[string]interface{}{
+						{
+							"type":  "tool_use",
+							"id":    block.ID,
+							"name":  normalizePiToolName(block.Name),
+							"input": normalizePiToolArgs(block.Name, block.Arguments),
+						},
+					},
+				},
+			})
+		}
+	}
+
+	// Flush remaining text
+	if len(textParts) > 0 {
+		entries = append(entries, map[string]interface{}{
+			"type":      "assistant",
+			"uuid":      id,
+			"timestamp": timestamp,
+			"message": map[string]interface{}{
+				"role":    "assistant",
+				"content": textParts,
+				"model":   model,
+			},
+		})
+	}
+
+	return entries
+}
+
+// normalizePiToolName maps pi tool names to Claude equivalents.
+func normalizePiToolName(name string) string {
+	switch name {
+	case "bash":
+		return "Bash"
+	case "edit":
+		return "Edit"
+	case "read":
+		return "Read"
+	case "write":
+		return "Write"
+	default:
+		return name
+	}
+}
+
+// normalizePiToolArgs translates pi tool argument keys to Claude equivalents.
+func normalizePiToolArgs(toolName string, args map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(args))
+	for k, v := range args {
+		switch k {
+		case "path":
+			out["file_path"] = v
+		case "old_str":
+			out["old_string"] = v
+		case "new_str":
+			out["new_string"] = v
+		default:
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // streamTranscript tails a JSONL transcript file and POSTs each line to the server.

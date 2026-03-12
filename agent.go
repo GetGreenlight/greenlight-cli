@@ -16,6 +16,7 @@ var knownAgents = map[string]bool{
 	"copilot": true,
 	"cursor":  true,
 	"codex":   true,
+	"pi":      true,
 }
 
 const defaultAgent = "claude"
@@ -45,6 +46,8 @@ func agentBinary(agent string) string {
 		return "agent"
 	case "codex":
 		return "codex"
+	case "pi":
+		return "pi"
 	default:
 		return "claude"
 	}
@@ -61,6 +64,8 @@ func agentServerName(agent string) string {
 		return "cursor"
 	case "codex":
 		return "codex"
+	case "pi":
+		return "pi"
 	default:
 		return "claude-code"
 	}
@@ -78,6 +83,8 @@ func agentSettingsPath(agent string) string {
 		return "" // cursor has no hooks — interpose handles everything
 	case "codex":
 		return "" // codex has no hooks — interpose handles everything
+	case "pi":
+		return "" // pi has no hooks — interpose handles everything
 	default:
 		return filepath.Join(".claude", "settings.local.json")
 	}
@@ -94,6 +101,8 @@ func agentSettingsDir(agent string) string {
 		return "" // cursor has no hooks
 	case "codex":
 		return "" // codex has no hooks
+	case "pi":
+		return "" // pi has no hooks
 	default:
 		return ".claude"
 	}
@@ -110,6 +119,8 @@ func agentHookEvents(agent string) []string {
 		return nil // cursor has no hooks
 	case "codex":
 		return nil // codex has no hooks
+	case "pi":
+		return nil // pi has no hooks
 	default:
 		return []string{"SessionStart", "PermissionRequest"}
 	}
@@ -125,6 +136,8 @@ func agentOldHookEvents(agent string) []string {
 	case "cursor":
 		return nil
 	case "codex":
+		return nil
+	case "pi":
 		return nil
 	default:
 		return []string{"UserPromptSubmit"}
@@ -155,6 +168,8 @@ func deriveTranscriptPath(agent, sessionID string) string {
 		return deriveCursorTranscriptPath()
 	case "codex":
 		return deriveCodexTranscriptPath()
+	case "pi":
+		return derivePiTranscriptPath()
 	default:
 		return ""
 	}
@@ -332,6 +347,45 @@ func deriveCodexTranscriptPath() string {
 	return newest
 }
 
+func derivePiTranscriptPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	// Pi encodes CWD as: strip leading /, replace /\: with -, wrap in --
+	safePath := strings.TrimLeft(cwd, "/\\")
+	safePath = strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(safePath)
+	safePath = "--" + safePath + "--"
+	sessDir := filepath.Join(home, ".pi", "agent", "sessions", safePath)
+	entries, err := os.ReadDir(sessDir)
+	if err != nil {
+		return ""
+	}
+	var newest string
+	var newestTime time.Time
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(newestTime) {
+			newestTime = info.ModTime()
+			newest = e.Name()
+		}
+	}
+	if newest != "" {
+		return filepath.Join(sessDir, newest)
+	}
+	return ""
+}
+
 func runAgent(args []string) {
 	if len(args) == 0 {
 		// Print current agent
@@ -344,13 +398,13 @@ func runAgent(args []string) {
 		fmt.Fprintf(os.Stderr, "Usage: greenlight agent [name]\n\n")
 		fmt.Fprintf(os.Stderr, "Without arguments, prints the current default agent.\n")
 		fmt.Fprintf(os.Stderr, "With a name, sets the default agent in ~/.greenlight/config.\n\n")
-		fmt.Fprintf(os.Stderr, "Supported agents: claude, codex, copilot, cursor\n")
+		fmt.Fprintf(os.Stderr, "Supported agents: claude, codex, copilot, cursor, pi\n")
 		os.Exit(0)
 	}
 
 	name := args[0]
 	if !knownAgents[name] {
-		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, codex, copilot, cursor)\n", name)
+		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, codex, copilot, cursor, pi)\n", name)
 		os.Exit(1)
 	}
 
