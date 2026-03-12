@@ -26,6 +26,7 @@ type interposeRequest struct {
 	IP      string   `json:"ip,omitempty"`      // IP for connect
 	Port    int      `json:"port,omitempty"`    // port for connect
 	PID     int      `json:"pid,omitempty"`
+	Project *bool    `json:"project,omitempty"` // true if file is within project dir
 }
 
 // interposeResponse is sent back to the interpose library.
@@ -115,6 +116,9 @@ func handleInterposeConn(conn net.Conn, baseURL, deviceID, project, relayID, age
 		"hook_event_name": "PermissionRequest",
 		"tool_name":       toolName,
 		"tool_input":      toolInput,
+	}
+	if req.Project != nil {
+		payload["project_file"] = *req.Project
 	}
 
 	// Send to server (long-poll, same timeout as hooks) with retry on 429
