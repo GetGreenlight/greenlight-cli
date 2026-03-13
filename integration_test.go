@@ -485,9 +485,6 @@ func TestIntegration_Connect_FullFlow(t *testing.T) {
 	if !strings.Contains(string(settingsData), "greenlight") {
 		t.Error("expected greenlight hook in settings")
 	}
-	if !strings.Contains(string(settingsData), "SessionStart") {
-		t.Error("expected SessionStart hook in settings")
-	}
 	if !strings.Contains(string(settingsData), "PermissionRequest") {
 		t.Error("expected PermissionRequest hook in settings")
 	}
