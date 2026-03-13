@@ -122,7 +122,7 @@ func agentHookEvents(agent string) []string {
 	case "pi":
 		return nil // pi has no hooks
 	default:
-		return []string{"SessionStart", "PermissionRequest"}
+		return []string{"PermissionRequest"}
 	}
 }
 
@@ -140,7 +140,7 @@ func agentOldHookEvents(agent string) []string {
 	case "pi":
 		return nil
 	default:
-		return []string{"UserPromptSubmit"}
+		return []string{"UserPromptSubmit", "SessionStart"}
 	}
 }
 
