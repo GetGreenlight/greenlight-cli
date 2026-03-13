@@ -54,7 +54,7 @@ func installHooks(agent string) error {
 	// that aren't tool calls interpose can intercept.
 	matcher := ""
 	if agent == "claude" {
-		matcher = "AskUser|ExitPlanMode"
+		matcher = "AskUserQuestion|ExitPlanMode"
 	}
 
 	hookEntry := []interface{}{

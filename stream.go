@@ -1331,10 +1331,23 @@ func transformPiEvent(line string) string {
 
 	switch msg.Role {
 	case "user":
-		// Content is a string
+		// Content can be a string or an array of {type:"text", text:"..."}
 		var text string
 		if err := json.Unmarshal(msg.Content, &text); err != nil {
-			return ""
+			// Try array format
+			var blocks []struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(msg.Content, &blocks); err != nil {
+				return ""
+			}
+			var parts []string
+			for _, b := range blocks {
+				if b.Text != "" {
+					parts = append(parts, b.Text)
+				}
+			}
+			text = strings.Join(parts, "\n")
 		}
 		entry = map[string]interface{}{
 			"type":      "user",
