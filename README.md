@@ -137,7 +137,7 @@ Run the integration tests:
 go test -tags integration -v -timeout 120s
 ```
 
-The tests compile greenlight with a local test server and exercise CLI basics, hook events, streaming, and the full connect flow.
+The tests compile greenlight with a local test server and exercise CLI basics, streaming, and the full connect flow.
 
 ## Learn More
 
