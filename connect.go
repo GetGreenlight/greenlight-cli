@@ -93,6 +93,11 @@ func runConnect(args []string) {
 		proj = readConfigValue("project")
 	}
 	if proj == "" {
+		if wd, err := os.Getwd(); err == nil {
+			proj = filepath.Base(wd)
+		}
+	}
+	if proj == "" {
 		fmt.Fprintf(os.Stderr, "greenlight: project name is required (use --project)\n")
 		os.Exit(1)
 	}
