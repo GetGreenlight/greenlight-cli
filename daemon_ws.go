@@ -1,0 +1,242 @@
+//go:build darwin || linux
+
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"sync"
+	"time"
+)
+
+// WSConn is the interface used by sessions for WebSocket communication.
+// Both *WSClient (direct) and *sessionWS (multiplexed via daemon) implement it.
+type WSConn interface {
+	SendText(data []byte)
+	Send(data []byte)
+	RegisterPending(requestID string) <-chan []byte
+	RemovePending(requestID string)
+	Close()
+}
+
+// DaemonWS is a multiplexed WebSocket owned by the daemon. All sessions
+// share this single connection. Outgoing text frames are tagged with
+// relay_id so the server can route them. Incoming messages are dispatched
+// to the correct session by relay_id.
+type DaemonWS struct {
+	ws          *WSClient
+	wakeHandler func([]byte)
+
+	mu       sync.RWMutex
+	sessions map[string]*sessionWS // relay_id → session handle
+}
+
+// sessionWS is a per-session handle to the shared daemon WebSocket.
+type sessionWS struct {
+	daemon     *DaemonWS
+	relayID    string
+	injectFunc func([]byte) error
+	killFunc   func()
+}
+
+// NewDaemonWS creates a multiplexed WebSocket connection.
+func NewDaemonWS(url, deviceID string) *DaemonWS {
+	d := &DaemonWS{
+		sessions: make(map[string]*sessionWS),
+	}
+
+	// The inject callback receives text frames from the server (input injection).
+	// We override the normal inject path since there's no single PTY to write to.
+	d.ws = NewWSClient(url, deviceID, WSModeRW, nil)
+
+	d.ws.controlFunc = func(data []byte) {
+		d.routeControlFrame(data)
+	}
+
+	return d
+}
+
+// Run starts the WebSocket connection. Blocks until closed.
+func (d *DaemonWS) Run() {
+	d.ws.Run()
+}
+
+// Close shuts down the WebSocket.
+func (d *DaemonWS) Close() {
+	d.ws.Close()
+}
+
+// IsConnected returns whether the WebSocket is connected.
+func (d *DaemonWS) IsConnected() bool {
+	return d.ws.IsConnected()
+}
+
+// SetWakeHandler sets the handler for wake control messages.
+func (d *DaemonWS) SetWakeHandler(fn func([]byte)) {
+	d.wakeHandler = fn
+}
+
+// RegisterSession creates a per-session handle for the given relay ID.
+func (d *DaemonWS) RegisterSession(relayID string, injectFunc func([]byte) error, killFunc func()) *sessionWS {
+	sw := &sessionWS{
+		daemon:     d,
+		relayID:    relayID,
+		injectFunc: injectFunc,
+		killFunc:   killFunc,
+	}
+	d.mu.Lock()
+	d.sessions[relayID] = sw
+	d.mu.Unlock()
+	log.Printf("daemon-ws: registered session %s", relayID)
+	return sw
+}
+
+// UnregisterSession removes a session handle.
+func (d *DaemonWS) UnregisterSession(relayID string) {
+	d.mu.Lock()
+	delete(d.sessions, relayID)
+	d.mu.Unlock()
+	log.Printf("daemon-ws: unregistered session %s", relayID)
+}
+
+// StartSession sends a session_start message over the daemon WS and waits
+// for the server to acknowledge it. This replaces HTTP enrollment for
+// sessions within an already-enrolled daemon.
+func (d *DaemonWS) StartSession(relayID, project, agent, cwd, version string) error {
+	data := map[string]string{
+		"project": project,
+		"agent":   agent,
+		"cwd":     cwd,
+		"version": version,
+	}
+	dataBytes, _ := json.Marshal(data)
+
+	msg := map[string]interface{}{
+		"type":     "session_start",
+		"relay_id": relayID,
+		"data":     json.RawMessage(dataBytes),
+	}
+	msgBytes, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+
+	// Register a pending response keyed by relay_id so we can wait for the ack
+	ch := d.ws.RegisterPending("session_start:" + relayID)
+	defer d.ws.RemovePending("session_start:" + relayID)
+
+	d.ws.SendText(msgBytes)
+
+	select {
+	case resp := <-ch:
+		var ack struct {
+			Type    string `json:"type"`
+			Project string `json:"project"`
+			Error   string `json:"error,omitempty"`
+		}
+		if json.Unmarshal(resp, &ack) == nil && ack.Error != "" {
+			return fmt.Errorf("session_start failed: %s", ack.Error)
+		}
+		return nil
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("session_start timed out")
+	}
+}
+
+// EndSession sends a session_end message over the daemon WS.
+func (d *DaemonWS) EndSession(relayID string) {
+	msg := map[string]string{
+		"type":     "session_end",
+		"relay_id": relayID,
+	}
+	msgBytes, _ := json.Marshal(msg)
+	d.ws.SendText(msgBytes)
+}
+
+// routeControlFrame handles binary control frames from the server.
+func (d *DaemonWS) routeControlFrame(data []byte) {
+	var msg struct {
+		Type    string `json:"type"`
+		RelayID string `json:"relay_id"`
+	}
+	if json.Unmarshal(data, &msg) != nil {
+		return
+	}
+
+	switch msg.Type {
+	case "kill":
+		d.mu.RLock()
+		sw := d.sessions[msg.RelayID]
+		d.mu.RUnlock()
+		if sw != nil && sw.killFunc != nil {
+			log.Printf("daemon-ws: kill session %s", msg.RelayID)
+			sw.killFunc()
+		}
+	case "wake":
+		if d.wakeHandler != nil {
+			d.wakeHandler(data)
+		}
+	case "session_history":
+		d.handleSessionHistory()
+	default:
+		log.Printf("daemon-ws: unknown control message: %s", msg.Type)
+	}
+}
+
+// handleSessionHistory loads persisted session records and sends them back to the server.
+func (d *DaemonWS) handleSessionHistory() {
+	records := listSessionRecords()
+	log.Printf("daemon-ws: session_history request, returning %d records", len(records))
+
+	resp := map[string]interface{}{
+		"type":    "session_history_response",
+		"entries": records,
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		log.Printf("daemon-ws: failed to marshal session history: %v", err)
+		return
+	}
+	d.ws.SendText(data)
+}
+
+// SendText sends a text frame tagged with the session's relay_id.
+func (sw *sessionWS) SendText(data []byte) {
+	var msg map[string]interface{}
+	if json.Unmarshal(data, &msg) != nil {
+		return
+	}
+
+	// For permission requests, relay_id goes inside "data" (server expects it there).
+	// For everything else (transcript, cancel), it goes at the top level.
+	msgType, _ := msg["type"].(string)
+	if msgType == "permission_request" {
+		if dataField, ok := msg["data"].(map[string]interface{}); ok {
+			dataField["relay_id"] = sw.relayID
+		}
+	}
+	msg["relay_id"] = sw.relayID
+
+	tagged, err := json.Marshal(msg)
+	if err != nil {
+		return
+	}
+	sw.daemon.ws.SendText(tagged)
+}
+
+// RegisterPending creates a channel for receiving a permission response.
+func (sw *sessionWS) RegisterPending(requestID string) <-chan []byte {
+	return sw.daemon.ws.RegisterPending(requestID)
+}
+
+// RemovePending removes a pending request channel.
+func (sw *sessionWS) RemovePending(requestID string) {
+	sw.daemon.ws.RemovePending(requestID)
+}
+
+// Send is a no-op — PTY output is not sent to the server.
+func (sw *sessionWS) Send(data []byte) {}
+
+// Close is a no-op — the shared connection is owned by the daemon.
+func (sw *sessionWS) Close() {}

@@ -25,11 +25,55 @@ func runConnect(args []string) {
 	deviceID := fs.String("device-id", "", "Device ID (overrides GREENLIGHT_DEVICE_ID env and config file)")
 	project := fs.String("project", "", "Project name (overrides GREENLIGHT_PROJECT env and config file)")
 	agentFlag := fs.String("agent", "", "Agent runtime: claude, codex, copilot, cursor, gemini, pi (overrides GREENLIGHT_AGENT env and config file)")
+	noDaemon := fs.Bool("no-daemon", false, "Run without the background daemon")
 	fs.Parse(args)
 
 	if wsURL == "" {
 		fmt.Fprintf(os.Stderr, "greenlight: no relay server URL configured (binary must be built with -ldflags)\n")
 		os.Exit(1)
+	}
+
+	// When resuming, load the saved session record and use its values
+	// as defaults. Explicit flags still override.
+	if *resume != "" {
+		if rec, err := loadSessionRecord(*resume); err == nil {
+			if *agentFlag == "" {
+				*agentFlag = rec.Agent
+			}
+			if *deviceID == "" {
+				*deviceID = rec.DeviceID
+			}
+			if *project == "" {
+				*project = rec.Project
+			}
+			// cd to the session's original directory if we're not already there
+			if rec.Cwd != "" {
+				if cwd, err := os.Getwd(); err == nil && cwd != rec.Cwd {
+					if err := os.Chdir(rec.Cwd); err == nil {
+						log.Printf("Resumed session cwd: %s", rec.Cwd)
+					}
+				}
+			}
+		}
+	}
+
+	// Route through daemon unless --no-daemon is set
+	if !*noDaemon {
+		// Resolve device ID early so the daemon can verify it matches
+		resolvedDeviceID := *deviceID
+		if resolvedDeviceID == "" {
+			resolvedDeviceID = os.Getenv("GREENLIGHT_DEVICE_ID")
+		}
+		if resolvedDeviceID == "" {
+			resolvedDeviceID = readConfigValue("device_id")
+		}
+		if err := ensureDaemon(resolvedDeviceID); err != nil {
+			log.Printf("daemon: failed to start, falling back to direct mode: %v", err)
+		} else {
+			cwd, _ := os.Getwd()
+			connectViaDaemon(*agentFlag, resolvedDeviceID, *project, *resume, cwd)
+			return
+		}
 	}
 
 	// Resolve agent runtime: flag > env > config > default
@@ -39,117 +83,25 @@ func runConnect(args []string) {
 		os.Exit(1)
 	}
 
-	// Build the agent command
-	command := agentBinary(agent)
-	var cmdArgs []string
+	// Build agent command with session IDs and flags
+	setup, err := buildAgentCommand(agent, *resume)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+		os.Exit(1)
+	}
+	command := setup.Command
+	cmdArgs := setup.Args
+	agentSessionID := setup.AgentSessionID
+	relayID := setup.RelayID
 
-	// Generate a session ID for agents that support it. This lets us
-	// derive the transcript path deterministically, avoiding the bug where
-	// two concurrent sessions in the same CWD pick up the same transcript.
-	var agentSessionID string
-	if *resume != "" {
-		// Resuming: the conversation ID IS the agent session ID (for Claude/Copilot/Pi)
-		agentSessionID = *resume
-	} else if agent == "claude" || agent == "copilot" || agent == "pi" {
-		agentSessionID = generateUUID()
-	}
-
-	// Agent-specific resume handling
-	if *resume != "" {
-		switch agent {
-		case "codex":
-			// Codex uses a subcommand: codex resume <id>
-			cmdArgs = append(cmdArgs, "resume", *resume)
-		case "pi":
-			// Pi's --resume is a boolean flag (no ID arg), so we can't pass
-			// a conversation ID to it. Error out rather than silently ignoring.
-			fmt.Fprintf(os.Stderr, "greenlight: --resume is not supported for pi; use /resume to pick a session once pi starts\n")
-			os.Exit(1)
-		default:
-			cmdArgs = append(cmdArgs, "--resume", *resume)
-		}
-	}
-	// Agent-specific flags
-	switch agent {
-	case "copilot":
-		// Bypass built-in prompts so interpose handles permissions
-		cmdArgs = append(cmdArgs, "--allow-all")
-		// Set session ID for new sessions (--resume also works for new Copilot sessions)
-		if *resume == "" && agentSessionID != "" {
-			cmdArgs = append(cmdArgs, "--resume", agentSessionID)
-		}
-	case "cursor":
-		// Bypass built-in prompts so interpose handles permissions
-		cmdArgs = append(cmdArgs, "--yolo")
-	case "codex":
-		// Bypass built-in prompts and sandbox so interpose handles permissions
-		cmdArgs = append(cmdArgs, "--dangerously-bypass-approvals-and-sandbox")
-	case "claude":
-		cmdArgs = append(cmdArgs, "--dangerously-skip-permissions", "--append-system-prompt", greenlightSystemPrompt)
-		// Set session ID for new sessions so transcript path is deterministic
-		if *resume == "" && agentSessionID != "" {
-			cmdArgs = append(cmdArgs, "--session-id", agentSessionID)
-		}
-	case "pi":
-		// Pi runs in YOLO mode by default (no bypass flag needed).
-		// Inject greenlight instructions via --append-system-prompt.
-		cmdArgs = append(cmdArgs, "--append-system-prompt", greenlightSystemPrompt)
-		// Use --session <path> for both new and resumed sessions.
-		// Pi's --resume is a boolean flag (no ID), so we control the
-		// session file directly to get deterministic transcript paths.
-		if agentSessionID != "" {
-			sessPath := piSessionPath(agentSessionID)
-			if sessPath != "" {
-				cmdArgs = append(cmdArgs, "--session", sessPath)
-			}
-		}
-	}
-
-	// Resolve device ID: flag > env > config file
-	devID := *deviceID
-	if devID == "" {
-		devID = os.Getenv("GREENLIGHT_DEVICE_ID")
-	}
-	if devID == "" {
-		devID = readConfigValue("device_id")
-	}
-	if devID == "" {
-		fmt.Fprintf(os.Stderr, "greenlight: device ID is required (use --device-id, GREENLIGHT_DEVICE_ID, or set device_id in ~/.greenlight/config)\n")
-		fmt.Fprintf(os.Stderr, "greenlight: your device ID can be found on the About tab in the Greenlight app\n")
+	// Resolve device ID and project
+	cwd, _ := os.Getwd()
+	devID, proj, err := resolveDeviceAndProject(*deviceID, *project, cwd)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Resolve project: flag > env > config file (required)
-	proj := *project
-	if proj == "" {
-		proj = os.Getenv("GREENLIGHT_PROJECT")
-	}
-	if proj == "" {
-		proj = readConfigValue("project")
-	}
-	if proj == "" {
-		if wd, err := os.Getwd(); err == nil {
-			proj = filepath.Base(wd)
-		}
-	}
-	if proj == "" {
-		fmt.Fprintf(os.Stderr, "greenlight: project name is required (use --project)\n")
-		os.Exit(1)
-	}
-
-	// Reuse relay ID for resumed conversations so the phone sees the same session
-	var relayID string
-	if *resume != "" {
-		relayID = lookupRelayID(*resume)
-	}
-	if relayID == "" {
-		relayID = generateUUID()
-	}
-	// For Codex, use relay ID as the sentinel for transcript matching.
-	// The relay ID is embedded in AGENTS.md and serialized into the transcript.
-	if agent == "codex" {
-		agentSessionID = relayID
-	}
 	dialURL := wsURL
 	u, err := url.Parse(dialURL)
 	if err != nil {
@@ -173,31 +125,13 @@ func runConnect(args []string) {
 		os.Exit(1)
 	}
 
-	// Get CWD for enrollment and session tracking
-	cwd, _ := os.Getwd()
-
 	// Enroll session with the relay server
-	if err := enrollSession(baseURL, devID, relayID, proj, agentServerName(agent), cwd); err != nil {
+	if err := enrollSession(baseURL, devID, relayID, proj, agentServerName(agent), cwd, ""); err != nil {
 		fmt.Fprintf(os.Stderr, "greenlight: session enrollment failed: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Gemini still needs its policy file to auto-approve tools at the CLI level,
-	// so interpose handles permissions without Gemini double-prompting.
-	if agent == "gemini" {
-		if err := installGeminiPolicy(); err != nil {
-			log.Printf("Warning: failed to install gemini policy: %v", err)
-		}
-	}
-
-	// Install agent instruction files for Gemini/Copilot/Cursor (Claude uses --append-system-prompt).
-	// These teach the agent how to interpret [GREENLIGHT] permission denial messages.
-	// Pi uses --append-system-prompt (like Claude), so no instruction file needed.
-	if agent == "gemini" || agent == "copilot" || agent == "cursor" || agent == "codex" {
-		if err := installGreenlightInstructions(agent, relayID); err != nil {
-			log.Printf("Warning: failed to install agent instructions: %v", err)
-		}
-	}
+	installAgentFiles(agent, relayID)
 
 	// Write connect PID file for session tracking
 	connectPidFile := writeConnectPid(relayID, agent, cwd)
@@ -213,72 +147,13 @@ func runConnect(args []string) {
 	}
 	defer os.Remove(bridgePath)
 
-	// Export greenlight vars into the child process
-	exportEnvs := map[string]string{
-		"GREENLIGHT_DEVICE_ID":  devID,
-		"GREENLIGHT_SESSION_ID": relayID,
-		"GREENLIGHT_PROJECT":    proj,
-		"GREENLIGHT_BRIDGE":     bridgePath,
-		"GREENLIGHT_AGENT":      agent,
+	exportEnvs := buildExportEnvs(devID, relayID, proj, bridgePath, agent)
+	command, cmdArgs, interpose := setupInterpose(agent, command, cmdArgs, relayID, baseURL, devID, proj, cwd, exportEnvs)
+	if interpose.LibExtracted {
+		defer os.Remove(interpose.LibPath)
 	}
-
-	// Set up library interposition
-	libPath, libExtracted := findInterposeLib()
-	if libPath != "" {
-		if libExtracted {
-			defer os.Remove(libPath)
-		}
-		var logPath string
-		if version == "" || version == "dev" {
-			logPath = filepath.Join(os.TempDir(), "greenlight-interpose-"+relayID+".log")
-			exportEnvs["GREENLIGHT_INTERPOSE_LOG"] = logPath
-		}
-		if runtime.GOOS == "darwin" {
-			// For cursor, check the bundled node binary (not the bash wrapper script)
-			entitlementTarget := command
-			if agent == "cursor" {
-				if nodeBin := resolveCursorNodeBin(command); nodeBin != "" {
-					entitlementTarget = nodeBin
-				}
-			}
-			if err := ensureDyldEntitlement(entitlementTarget); err != nil {
-				log.Printf("Interposition: skipping, cannot ensure dyld entitlement: %v", err)
-			} else {
-				exportEnvs["DYLD_INSERT_LIBRARIES"] = libPath
-				// Re-sign agent helper binaries so they inherit DYLD_INSERT_LIBRARIES
-				ensureAgentHelpers(agent)
-			}
-		} else {
-			exportEnvs["LD_PRELOAD"] = libPath
-		}
-		// Set project dir for seccomp path classification (Linux)
-		if wd, err := os.Getwd(); err == nil {
-			seccompProjectDir = wd
-		}
-		// Start permission socket for interpose library
-		sockPath, sockCleanup := startInterposeSock(relayID, baseURL, devID, proj, agentServerName(agent))
-		if sockPath != "" {
-			exportEnvs["GREENLIGHT_INTERPOSE_SOCK"] = sockPath
-			defer sockCleanup()
-			log.Printf("Interposition socket: %s", sockPath)
-		}
-		log.Printf("Interposition library: %s", libPath)
-		if logPath != "" {
-			log.Printf("Interposition log: %s", logPath)
-		}
-	}
-
-	// If we're injecting a dylib and the command is a script, launch the
-	// interpreter directly to avoid /usr/bin/env stripping DYLD_INSERT_LIBRARIES.
-	if exportEnvs["DYLD_INSERT_LIBRARIES"] != "" {
-		if agent == "cursor" {
-			// Cursor's `agent` is a bash script that execs node. We can't
-			// resolve to bash (SIP-protected, strips DYLD_INSERT_LIBRARIES).
-			// Instead, extract the bundled node binary and index.js directly.
-			command, cmdArgs = resolveCursorCommand(command, cmdArgs)
-		} else {
-			command, cmdArgs = resolveScriptCommand(command, cmdArgs)
-		}
+	if interpose.SockCleanup != nil {
+		defer interpose.SockCleanup()
 	}
 
 	r, err := New(command, cmdArgs, dialURL, devID, WSModeRW, exportEnvs)
@@ -314,7 +189,7 @@ func runConnect(args []string) {
 		bridgeDone = make(chan struct{})
 		bridgeFinished = make(chan struct{})
 		go func() {
-			tailBridge(bridgePath, r.ws, bridgeDone)
+			tailBridge(bridgePath, r.ws, bridgeDone, agentServerName(agent))
 			close(bridgeFinished)
 		}()
 	}

@@ -75,6 +75,16 @@ func agentServerName(agent string) string {
 	}
 }
 
+// agentSupportsResume returns whether the agent supports --resume with a session ID.
+func agentSupportsResume(agent string) bool {
+	switch agent {
+	case "claude", "copilot", "codex", "cursor", "gemini":
+		return true
+	default:
+		return false
+	}
+}
+
 // greenlightSystemPrompt is appended to the agent's system prompt to teach it
 // how to interpret permission denials from the Greenlight interpose library.
 const greenlightSystemPrompt = `Tool calls are managed by a permission system called Greenlight. ` +

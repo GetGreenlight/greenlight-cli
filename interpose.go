@@ -212,7 +212,7 @@ func handleInterposeConn(conn net.Conn, baseURL, deviceID, project, relayID, age
 	relay := promptRelay.r
 	promptRelay.mu.Unlock()
 
-	if relay == nil || relay.ws == nil {
+	if relay == nil || relay.wsConn == nil {
 		log.Printf("Interpose: no relay/websocket available, denying")
 		respond(conn, interposeResponse{Allow: false})
 		return
@@ -223,7 +223,7 @@ func handleInterposeConn(conn net.Conn, baseURL, deviceID, project, relayID, age
 
 // wsPermission sends a permission request over the WebSocket and waits for
 // the server's response. Returns the response or an error if ctx is cancelled.
-func wsPermission(ctx context.Context, ws *WSClient, requestID string, payload map[string]interface{}) (interposeResponse, error) {
+func wsPermission(ctx context.Context, ws WSConn, requestID string, payload map[string]interface{}) (interposeResponse, error) {
 	respCh := ws.RegisterPending(requestID)
 	defer ws.RemovePending(requestID)
 
@@ -277,7 +277,7 @@ func racePermission(relay *Relay, toolName string, toolInput map[string]interfac
 	ch := make(chan result, 2)
 	requestID := generateUUID()
 
-	ws := relay.ws
+	ws := relay.wsConn
 	wsCtx, wsCancel := context.WithCancel(context.Background())
 	defer wsCancel()
 
@@ -317,7 +317,13 @@ func racePermission(relay *Relay, toolName string, toolInput map[string]interfac
 	var terminalOutcomes = []string{"allow", "always_allow", "deny", "deny_stop"}
 
 	go func() {
-		choice, err := relay.ShowPrompt(promptCtx, toolName, detail)
+		var choice int
+		var err error
+		if relay.daemonMode {
+			choice, err = relay.ShowPromptDaemon(promptCtx, toolName, detail)
+		} else {
+			choice, err = relay.ShowPrompt(promptCtx, toolName, detail)
+		}
 		if err != nil {
 			if promptCtx.Err() != nil {
 				return // ctx cancelled, server won

@@ -17,6 +17,14 @@ var version string
 //	go build -ldflags "-X main.wsURL=wss://api.aigreenlight.app/ws/relay" -o greenlight .
 var wsURL string
 
+// updateURL overrides the binary download URL for updates, set at build time via:
+//
+//	go build -ldflags "-X main.updateURL=file:///path/to/binary" -o greenlight .
+//
+// When set, skips GitHub version checking and downloads from this URL directly.
+// Useful for local testing of the update flow.
+var updateURL string
+
 func main() {
 	// Log to file to avoid polluting the terminal (which may be in raw mode)
 	if logPath := os.Getenv("GREENLIGHT_LOG"); logPath != "" {
@@ -44,6 +52,10 @@ func main() {
 		runRegister(os.Args[2:])
 	case "agent":
 		runAgent(os.Args[2:])
+	case "daemon":
+		runDaemon(os.Args[2:])
+	case "update":
+		runUpdate(os.Args[2:])
 	case "version", "--version", "-v":
 		printVersion()
 	case "help", "--help", "-h":
@@ -59,9 +71,6 @@ func versionString() string {
 	v := version
 	if v == "" {
 		v = "dev"
-	}
-	if wsURL != "" {
-		return fmt.Sprintf("greenlight %s (relay: %s)", v, wsURL)
 	}
 	return fmt.Sprintf("greenlight %s", v)
 }
@@ -79,6 +88,8 @@ Commands:
   connect    Start an agent session with a remote relay to the Greenlight app
   register   Register a device ID for the Greenlight app
   agent      Get or set the default agent runtime (claude, codex, copilot, cursor, pi)
+  daemon     Manage the background daemon (start, stop, status)
+  update     Update greenlight to the latest version
   version    Print version and build settings
 
 Run 'greenlight <command> --help' for details on a command.

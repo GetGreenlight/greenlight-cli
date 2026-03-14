@@ -344,7 +344,7 @@ func TestIntegration_Version(t *testing.T) {
 func TestIntegration_Connect_MissingDeviceID(t *testing.T) {
 	// Use a temp HOME so ~/.greenlight/config doesn't supply a device_id
 	tmpHome := t.TempDir()
-	r := run(t, []string{"connect"}, []string{"HOME=" + tmpHome}, "")
+	r := run(t, []string{"connect", "--no-daemon"}, []string{"HOME=" + tmpHome}, "")
 	if r.ExitCode == 0 {
 		t.Error("expected non-zero exit code")
 	}
@@ -356,7 +356,7 @@ func TestIntegration_Connect_MissingDeviceID(t *testing.T) {
 func TestIntegration_Connect_MissingProject(t *testing.T) {
 	// Project is optional (defaults to cwd basename), so with a device-id
 	// and no relay server, it should get past arg validation and fail on enrollment.
-	r := run(t, []string{"connect", "--device-id", "test-device"}, nil, "")
+	r := run(t, []string{"connect", "--no-daemon", "--device-id", "test-device"}, nil, "")
 	if r.ExitCode == 0 {
 		t.Error("expected non-zero exit code")
 	}
@@ -367,7 +367,7 @@ func TestIntegration_Connect_MissingProject(t *testing.T) {
 
 func TestIntegration_Connect_DeviceIDFromEnv(t *testing.T) {
 	// Should get past device-id and project validation (project defaults to cwd basename)
-	r := run(t, []string{"connect"}, []string{"GREENLIGHT_DEVICE_ID=test-device"}, "")
+	r := run(t, []string{"connect", "--no-daemon"}, []string{"GREENLIGHT_DEVICE_ID=test-device"}, "")
 	if r.ExitCode == 0 {
 		t.Error("expected non-zero exit code")
 	}
@@ -389,7 +389,7 @@ func TestIntegration_Connect_DeviceIDFromConfig(t *testing.T) {
 	os.WriteFile(filepath.Join(configDir, "config"), []byte("device_id=config-device\n"), 0644)
 
 	// Should get past device-id (from config) and project (defaults to cwd basename)
-	r := run(t, []string{"connect"}, []string{"HOME=" + home}, "")
+	r := run(t, []string{"connect", "--no-daemon"}, []string{"HOME=" + home}, "")
 	if r.ExitCode == 0 {
 		t.Error("expected non-zero exit code")
 	}
@@ -401,7 +401,7 @@ func TestIntegration_Connect_DeviceIDFromConfig(t *testing.T) {
 func TestIntegration_Connect_ProjectFromEnv(t *testing.T) {
 	// Should get past project validation and reach enrollment
 	testServerURL.clearHandlers()
-	r := run(t, []string{"connect"},
+	r := run(t, []string{"connect", "--no-daemon"},
 		[]string{
 			"GREENLIGHT_DEVICE_ID=test-device",
 			"GREENLIGHT_PROJECT=test-project",
@@ -428,7 +428,7 @@ func TestIntegration_Connect_FullFlow(t *testing.T) {
 	// Put mock claude on PATH
 	pathWithMock := filepath.Dir(mockClaudeBin) + ":" + os.Getenv("PATH")
 
-	cmd := exec.Command(greenlightBin, "connect", "--device-id", "test-dev", "--project", "test-proj")
+	cmd := exec.Command(greenlightBin, "connect", "--no-daemon", "--device-id", "test-dev", "--project", "test-proj")
 	cmd.Dir = workDir
 	cmd.Env = []string{
 		"HOME=" + os.Getenv("HOME"),
@@ -487,7 +487,7 @@ func TestIntegration_Connect_EnrollmentRejected(t *testing.T) {
 	defer testServerURL.clearHandlers()
 
 	pathWithMock := filepath.Dir(mockClaudeBin) + ":" + os.Getenv("PATH")
-	r := run(t, []string{"connect", "--device-id", "test-dev", "--project", "test-proj"},
+	r := run(t, []string{"connect", "--no-daemon", "--device-id", "test-dev", "--project", "test-proj"},
 		[]string{"PATH=" + pathWithMock}, "")
 	if r.ExitCode == 0 {
 		t.Error("expected non-zero exit code for rejected enrollment")
@@ -568,7 +568,7 @@ func TestIntegration_Connect_WSInputInjection(t *testing.T) {
 
 	pathWithMock := filepath.Dir(mockClaudeBin) + ":" + os.Getenv("PATH")
 
-	cmd := exec.Command(greenlightBin, "connect", "--device-id", "test-dev", "--project", "test-proj")
+	cmd := exec.Command(greenlightBin, "connect", "--no-daemon", "--device-id", "test-dev", "--project", "test-proj")
 	cmd.Dir = workDir
 	cmd.Env = []string{
 		"HOME=" + os.Getenv("HOME"),
@@ -652,7 +652,7 @@ func TestIntegration_Connect_SuspendResume(t *testing.T) {
 
 	pathWithMock := filepath.Dir(mockClaudeBin) + ":" + os.Getenv("PATH")
 
-	cmd := exec.Command(greenlightBin, "connect", "--device-id", "test-dev", "--project", "test-proj")
+	cmd := exec.Command(greenlightBin, "connect", "--no-daemon", "--device-id", "test-dev", "--project", "test-proj")
 	cmd.Dir = workDir
 	cmd.Env = []string{
 		"HOME=" + os.Getenv("HOME"),
@@ -789,7 +789,7 @@ func TestIntegration_Connect_TranscriptRelay(t *testing.T) {
 
 	pathWithMock := filepath.Dir(mockClaudeBin) + ":" + os.Getenv("PATH")
 
-	cmd := exec.Command(greenlightBin, "connect", "--device-id", "test-dev", "--project", "test-proj")
+	cmd := exec.Command(greenlightBin, "connect", "--no-daemon", "--device-id", "test-dev", "--project", "test-proj")
 	cmd.Dir = workDir
 	cmd.Env = []string{
 		"HOME=" + os.Getenv("HOME"),
@@ -964,7 +964,7 @@ func TestIntegration_Connect_TranscriptRelayIncremental(t *testing.T) {
 
 	pathWithMock := filepath.Dir(mockClaudeBin) + ":" + os.Getenv("PATH")
 
-	cmd := exec.Command(greenlightBin, "connect", "--device-id", "test-dev", "--project", "test-proj")
+	cmd := exec.Command(greenlightBin, "connect", "--no-daemon", "--device-id", "test-dev", "--project", "test-proj")
 	cmd.Dir = workDir
 	cmd.Env = []string{
 		"HOME=" + os.Getenv("HOME"),
@@ -1314,7 +1314,7 @@ func wsPermissionHelper(t *testing.T, respondFn func(data map[string]interface{}
 
 	pathWithMock := filepath.Dir(mockClaudeBin) + ":" + os.Getenv("PATH")
 
-	cmd = exec.Command(greenlightBin, "connect", "--device-id", "test-dev", "--project", "test-proj")
+	cmd = exec.Command(greenlightBin, "connect", "--no-daemon", "--device-id", "test-dev", "--project", "test-proj")
 	cmd.Dir = workDir
 	cmd.Env = []string{
 		"HOME=" + os.Getenv("HOME"),

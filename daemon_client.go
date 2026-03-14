@@ -1,0 +1,291 @@
+//go:build darwin || linux
+
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"os"
+	"os/signal"
+	"strings"
+	"sync/atomic"
+	"syscall"
+	"time"
+)
+
+// connectViaDaemon is the thin client implementation of `greenlight connect`.
+// It sends a connect request to the daemon, then enters raw mode and proxies
+// terminal I/O over the IPC socket using binary framing.
+func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
+	conn, err := net.DialTimeout("unix", daemonSockPath(), 5*time.Second)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "greenlight: cannot connect to daemon: %v\n", err)
+		os.Exit(1)
+	}
+	defer conn.Close()
+
+	// Get terminal window size
+	var winsize *ipcWinsize
+	if ws, err := getWinsize(os.Stdin.Fd()); err == nil {
+		winsize = &ipcWinsize{Rows: ws.Row, Cols: ws.Col}
+	}
+
+	// Forward client environment to the daemon so the child process
+	// inherits vars like TERM, MOCK_CLAUDE_OUTPUT (tests), etc.
+	clientEnv := make(map[string]string)
+	for _, e := range os.Environ() {
+		if k, v, ok := strings.Cut(e, "="); ok {
+			clientEnv[k] = v
+		}
+	}
+
+	// Send connect request
+	req := ipcRequest{
+		Type:     "connect",
+		Agent:    agent,
+		DeviceID: deviceID,
+		Project:  project,
+		Resume:   resume,
+		Cwd:      cwd,
+		Winsize:  winsize,
+		Env:      clientEnv,
+	}
+	data, _ := json.Marshal(req)
+	data = append(data, '\n')
+	if _, err := conn.Write(data); err != nil {
+		fmt.Fprintf(os.Stderr, "greenlight: failed to send connect request: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Read control response
+	reader := bufio.NewReader(conn)
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "greenlight: failed to read daemon response: %v\n", err)
+		os.Exit(1)
+	}
+
+	var resp ipcResponse
+	if err := json.Unmarshal(line, &resp); err != nil {
+		fmt.Fprintf(os.Stderr, "greenlight: invalid daemon response: %v\n", err)
+		os.Exit(1)
+	}
+
+	if resp.Type == "error" {
+		fmt.Fprintf(os.Stderr, "greenlight: %s\n", resp.Message)
+		os.Exit(1)
+	}
+
+	if resp.Type != "session_started" {
+		fmt.Fprintf(os.Stderr, "greenlight: unexpected response: %s\n", resp.Type)
+		os.Exit(1)
+	}
+
+	// Enter raw mode on the local terminal
+	origTermios, err := setRawTerminal()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "greenlight: failed to set raw mode: %v\n", err)
+		os.Exit(1)
+	}
+	defer restoreTerminal(origTermios)
+
+	// Handle SIGWINCH — forward resize to daemon
+	winchCh := make(chan os.Signal, 1)
+	signal.Notify(winchCh, syscall.SIGWINCH)
+	go func() {
+		for range winchCh {
+			if ws, err := getWinsize(os.Stdin.Fd()); err == nil {
+				resizeData, _ := json.Marshal(ipcWinsize{Rows: ws.Row, Cols: ws.Col})
+				writeFrame(conn, frameResize, resizeData)
+			}
+		}
+	}()
+
+	// Handle SIGINT/SIGTERM — forward to daemon
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		for sig := range sigCh {
+			sigName := "TERM"
+			if sig == syscall.SIGINT {
+				sigName = "INT"
+			}
+			sigData, _ := json.Marshal(map[string]string{"signal": sigName})
+			writeFrame(conn, frameSignal, sigData)
+		}
+	}()
+
+	// promptActive is set when a permission prompt is showing.
+	// The stdin goroutine checks this to route keystrokes to promptResp
+	// instead of stdin frames.
+	var promptActive atomic.Bool
+
+	// Stdin → daemon (send user keystrokes as frameStdin, or framePromptResp during prompts)
+	go func() {
+		buf := make([]byte, 1) // single byte for prompt keystroke detection
+		for {
+			n, err := os.Stdin.Read(buf)
+			if n > 0 {
+				if promptActive.Load() && buf[0] >= '1' && buf[0] <= '4' {
+					promptActive.Store(false)
+					clearPrompt()
+					writeFrame(conn, framePromptResp, buf[:1])
+				} else {
+					writeFrame(conn, frameStdin, buf[:n])
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// Daemon → stdout (read frames and handle them)
+	exitCode := 0
+	for {
+		frameType, payload, err := readFrame(reader)
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("daemon client: read error: %v", err)
+			}
+			break
+		}
+
+		switch frameType {
+		case frameStdout:
+			os.Stdout.Write(payload)
+
+		case framePrompt:
+			// Display permission prompt locally
+			var prompt struct {
+				ToolName string `json:"tool_name"`
+				Detail   string `json:"detail"`
+			}
+			if json.Unmarshal(payload, &prompt) == nil {
+				promptActive.Store(true)
+				drawPrompt(prompt.ToolName, prompt.Detail)
+			}
+
+		case framePromptCancel:
+			// Server won the race — clear the prompt
+			if promptActive.Load() {
+				promptActive.Store(false)
+				clearPrompt()
+			}
+
+		case frameExit:
+			var exit struct{ Code int `json:"code"` }
+			json.Unmarshal(payload, &exit)
+			exitCode = exit.Code
+			goto done
+		}
+	}
+done:
+
+	signal.Stop(winchCh)
+	signal.Stop(sigCh)
+
+	// Restore terminal before exiting (defer handles the normal return path,
+	// but os.Exit skips defers so we restore explicitly here too)
+	restoreTerminal(origTermios)
+
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
+}
+
+const promptHeight uint16 = 4
+
+// drawPrompt draws a permission prompt at the bottom of the terminal.
+// The stdin goroutine handles input; clearPrompt removes the UI.
+func drawPrompt(toolName, detail string) {
+	ws, err := getWinsize(os.Stdin.Fd())
+	if err != nil || ws.Row < 10 {
+		return
+	}
+
+	agentRows := ws.Row - promptHeight
+	sep := strings.Repeat("─", int(ws.Col))
+	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K\033[2m%s\033[0m", agentRows+1, sep)
+
+	line := fmt.Sprintf(" \033[1m%s\033[0m: %s", toolName, detail)
+	maxLen := int(ws.Col) - 1
+	if len(toolName)+len(detail)+4 > maxLen {
+		avail := maxLen - len(toolName) - 7
+		if avail > 0 && avail < len(detail) {
+			detail = detail[:avail] + "..."
+		}
+		line = fmt.Sprintf(" \033[1m%s\033[0m: %s", toolName, detail)
+	}
+	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K%s", agentRows+2, line)
+	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K [1] Allow  [2] Always allow  [3] Deny  [4] Deny & stop", agentRows+3)
+	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K Choice: ", agentRows+4)
+}
+
+// clearPrompt removes the permission prompt from the terminal.
+func clearPrompt() {
+	ws, err := getWinsize(os.Stdin.Fd())
+	if err != nil {
+		return
+	}
+	agentRows := ws.Row - promptHeight
+	for i := uint16(0); i < promptHeight; i++ {
+		fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K", agentRows+1+i)
+	}
+}
+
+// setRawTerminal puts os.Stdin into raw mode and returns the original termios
+// for later restoration.
+func setRawTerminal() (*syscall.Termios, error) {
+	fd := int(os.Stdin.Fd())
+	var orig syscall.Termios
+
+	if _, _, errno := syscall.Syscall(
+		syscall.SYS_IOCTL,
+		uintptr(fd),
+		ioctlReadTermios,
+		uintptr(ptrOf(&orig)),
+	); errno != 0 {
+		return nil, errno
+	}
+
+	raw := orig
+	raw.Iflag &^= syscall.IGNBRK | syscall.BRKINT | syscall.PARMRK |
+		syscall.ISTRIP | syscall.INLCR | syscall.IGNCR | syscall.ICRNL | syscall.IXON
+	raw.Oflag &^= syscall.OPOST
+	raw.Cflag &^= syscall.PARENB | syscall.CSIZE
+	raw.Cflag |= syscall.CS8
+	raw.Lflag &^= syscall.ECHO | syscall.ECHONL | syscall.ICANON |
+		syscall.ISIG | syscall.IEXTEN
+	raw.Cc[syscall.VMIN] = 1
+	raw.Cc[syscall.VTIME] = 0
+
+	if _, _, errno := syscall.Syscall(
+		syscall.SYS_IOCTL,
+		uintptr(fd),
+		ioctlWriteTermios,
+		uintptr(ptrOf(&raw)),
+	); errno != 0 {
+		return nil, errno
+	}
+
+	return &orig, nil
+}
+
+// restoreTerminal restores the terminal to its original settings.
+func restoreTerminal(orig *syscall.Termios) {
+	if orig == nil {
+		return
+	}
+	fd := int(os.Stdin.Fd())
+	syscall.Syscall(
+		syscall.SYS_IOCTL,
+		uintptr(fd),
+		ioctlWriteTermios,
+		uintptr(ptrOf(orig)),
+	)
+}

@@ -14,7 +14,7 @@ import (
 // tailBridge tails the bridge file and sends each line over the WebSocket
 // as a JSON transcript message. Blocks until done is closed or an error occurs.
 // After done is closed, drains any remaining lines before returning.
-func tailBridge(path string, ws *WSClient, done <-chan struct{}) {
+func tailBridge(path string, ws WSConn, done <-chan struct{}, agent string) {
 	// Wait for the bridge file to appear (hook creates it)
 	var f *os.File
 	for {
@@ -50,13 +50,13 @@ func tailBridge(path string, ws *WSClient, done <-chan struct{}) {
 					fullLine := trimNewline(partial + line)
 					partial = ""
 					if fullLine != "" {
-						msg := fmt.Sprintf(`{"type":"transcript","data":%s}`, fullLine)
+						msg := fmt.Sprintf(`{"type":"transcript","agent":%q,"data":%s}`, agent, fullLine)
 						ws.SendText([]byte(msg))
 					}
 				} else {
 					// EOF or error — send any remaining buffered partial
 					if partial != "" {
-						msg := fmt.Sprintf(`{"type":"transcript","data":%s}`, partial)
+						msg := fmt.Sprintf(`{"type":"transcript","agent":%q,"data":%s}`, agent, partial)
 						ws.SendText([]byte(msg))
 					}
 					return
@@ -77,7 +77,7 @@ func tailBridge(path string, ws *WSClient, done <-chan struct{}) {
 			fullLine := trimNewline(partial + line)
 			partial = ""
 			if fullLine != "" {
-				msg := fmt.Sprintf(`{"type":"transcript","data":%s}`, fullLine)
+				msg := fmt.Sprintf(`{"type":"transcript","agent":%q,"data":%s}`, agent, fullLine)
 				ws.SendText([]byte(msg))
 			}
 		} else if line != "" {

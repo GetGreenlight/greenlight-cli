@@ -31,11 +31,12 @@ const textQueueSize = 1024
 // messages into the PTY via the provided inject function. When connected,
 // it also sends PTY output back to the server.
 type WSClient struct {
-	url      string
-	token    string
-	mode     WSMode
-	inject   func([]byte) error
-	killFunc func()
+	url         string
+	token       string
+	mode        WSMode
+	inject      func([]byte) error
+	killFunc    func()
+	controlFunc func([]byte) // optional handler for binary control messages
 
 	done chan struct{}
 	wg   sync.WaitGroup
@@ -247,10 +248,35 @@ func (c *WSClient) routePermissionResponse(data []byte) bool {
 	var msg struct {
 		Type      string `json:"type"`
 		RequestID string `json:"request_id"`
+		RelayID   string `json:"relay_id"`
 	}
 	if json.Unmarshal(data, &msg) != nil {
 		return false
 	}
+
+	// Route session_started ack by relay_id
+	if msg.Type == "session_started" && msg.RelayID != "" {
+		key := "session_start:" + msg.RelayID
+		c.pendingMu.Lock()
+		ch, ok := c.pending[key]
+		if ok {
+			delete(c.pending, key)
+		}
+		c.pendingMu.Unlock()
+		if ok {
+			ch <- data
+		}
+		return true
+	}
+
+	// Route control messages (session_history, wake) to the control handler
+	if msg.Type == "session_history" || msg.Type == "wake" {
+		if c.controlFunc != nil {
+			c.controlFunc(data)
+		}
+		return true
+	}
+
 	if msg.Type != "permission_response" {
 		return false
 	}
@@ -354,12 +380,19 @@ func (c *WSClient) connectAndRead() error {
 		// Binary frames are control messages
 		if msgType == websocket.MessageBinary && len(data) > 0 {
 			var msg struct{ Type string `json:"type"` }
-			if json.Unmarshal(data, &msg) == nil && msg.Type == "kill" {
-				log.Printf("ws: received kill command")
-				if c.killFunc != nil {
-					c.killFunc()
+			if json.Unmarshal(data, &msg) == nil {
+				switch msg.Type {
+				case "kill":
+					log.Printf("ws: received kill command")
+					if c.killFunc != nil {
+						c.killFunc()
+					}
+					return nil
+				default:
+					if c.controlFunc != nil {
+						c.controlFunc(data)
+					}
 				}
-				return nil
 			}
 			continue
 		}

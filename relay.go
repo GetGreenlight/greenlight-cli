@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -46,7 +47,8 @@ type Relay struct {
 	slave       *os.File
 	origTermios syscall.Termios
 	mu          sync.Mutex // serializes writes to master
-	ws          *WSClient  // optional WebSocket client
+	ws          *WSClient  // optional WebSocket client (non-daemon mode)
+	wsConn      WSConn     // WebSocket interface (set in both modes)
 	killed      bool       // true if the child was killed (not normal exit)
 
 	// Virtual terminal emulator — shadow copy of agent output. Always
@@ -67,6 +69,12 @@ type Relay struct {
 	promptActive  atomic.Bool                // true = render mode, false = direct mode
 	promptCh      chan byte                   // keystrokes redirected here during prompt
 	promptContent atomic.Pointer[promptData] // prompt text for render loop
+
+	// Daemon mode: PTY output goes to daemonWriter instead of os.Stdout,
+	// and terminal raw mode is managed by the client, not the relay.
+	daemonMode   bool
+	daemonWriter io.Writer
+	daemonMu     sync.RWMutex
 }
 
 // New creates a new Relay that will run the given command inside a PTY.
@@ -96,6 +104,7 @@ func New(command string, args []string, wsURL, wsToken string, wsMode WSMode, ex
 
 	if wsURL != "" {
 		r.ws = NewWSClient(wsURL, wsToken, wsMode, r.Inject)
+		r.wsConn = r.ws
 	}
 
 	return r, nil
