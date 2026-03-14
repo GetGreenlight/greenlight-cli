@@ -4,11 +4,11 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
-	"io"
+	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -17,7 +17,7 @@ import (
 
 // interposeRequest is the JSON structure sent by the interpose library.
 type interposeRequest struct {
-	Type    string   `json:"type"`              // "open", "spawn", "connect"
+	Type    string   `json:"type"`              // "open", "spawn", "connect", "read"
 	Path    string   `json:"path,omitempty"`    // file path or binary path
 	OldPath string   `json:"old_path,omitempty"` // source path for rename edits
 	Args    []string `json:"args,omitempty"`    // argv for spawn
@@ -36,20 +36,31 @@ type interposeResponse struct {
 	Message   string `json:"message,omitempty"`
 }
 
-// requestThrottle spaces out permission requests to the server,
-// preventing 429 rate limit cascades when Claude reads many files at once.
-var requestThrottle = struct {
-	sync.Mutex
-	last time.Time
-}{}
 
-func throttleRequest() {
-	requestThrottle.Lock()
-	if since := time.Since(requestThrottle.last); since < 100*time.Millisecond {
-		time.Sleep(100*time.Millisecond - since)
+// promptRelay holds a reference to the active Relay for terminal permission prompts.
+// Set by runConnect after the relay is created, cleared on exit.
+var promptRelay struct {
+	mu sync.Mutex
+	r  *Relay
+}
+
+// formatToolDetail returns a human-readable summary of the tool input for display.
+func formatToolDetail(toolName string, toolInput map[string]interface{}) string {
+	switch toolName {
+	case "Bash":
+		if cmd, ok := toolInput["command"].(string); ok {
+			return cmd
+		}
+	case "Read", "Write", "Edit":
+		if fp, ok := toolInput["file_path"].(string); ok {
+			return fp
+		}
+	case "WebFetch":
+		if u, ok := toolInput["url"].(string); ok {
+			return u
+		}
 	}
-	requestThrottle.last = time.Now()
-	requestThrottle.Unlock()
+	return fmt.Sprintf("%v", toolInput)
 }
 
 // startInterposeSock creates a Unix socket listener for interpose permission
@@ -109,9 +120,6 @@ func handleInterposeConn(conn net.Conn, baseURL, deviceID, project, relayID, age
 	toolName, toolInput := translateInterposeRequest(req)
 
 	payload := map[string]interface{}{
-		"device_id":       deviceID,
-		"project":         project,
-		"relay_id":        relayID,
 		"agent":           agent,
 		"hook_event_name": "PermissionRequest",
 		"tool_name":       toolName,
@@ -121,76 +129,159 @@ func handleInterposeConn(conn net.Conn, baseURL, deviceID, project, relayID, age
 		payload["project_file"] = *req.Project
 	}
 
-	// Send to server (long-poll, same timeout as hooks) with retry on 429
-	var resp *http.Response
-	for attempt := 0; attempt < 4; attempt++ {
-		// Space out requests to prevent burst overload (429s)
-		throttleRequest()
-		var err error
-		resp, err = postJSON(baseURL+"/request", payload, 595*time.Second)
+	// Get the relay for WebSocket and terminal prompt access
+	promptRelay.mu.Lock()
+	relay := promptRelay.r
+	promptRelay.mu.Unlock()
+
+	if relay == nil || relay.ws == nil {
+		log.Printf("Interpose: no relay/websocket available, denying")
+		respond(conn, interposeResponse{Allow: false})
+		return
+	}
+
+	respond(conn, racePermission(relay, toolName, toolInput, payload))
+}
+
+// wsPermission sends a permission request over the WebSocket and waits for
+// the server's response. Returns the response or an error if ctx is cancelled.
+func wsPermission(ctx context.Context, ws *WSClient, requestID string, payload map[string]interface{}) (interposeResponse, error) {
+	respCh := ws.RegisterPending(requestID)
+	defer ws.RemovePending(requestID)
+
+	// Copy payload and add request_id (avoid mutating shared map)
+	data := make(map[string]interface{}, len(payload)+1)
+	for k, v := range payload {
+		data[k] = v
+	}
+	data["request_id"] = requestID
+
+	msg := map[string]interface{}{
+		"type": "permission_request",
+		"data": data,
+	}
+	encoded, err := json.Marshal(msg)
+	if err != nil {
+		return interposeResponse{Allow: false}, err
+	}
+
+	ws.SendText(encoded)
+
+	select {
+	case respData := <-respCh:
+		var resp struct {
+			Behavior  string `json:"behavior"`
+			Message   string `json:"message"`
+			Interrupt bool   `json:"interrupt"`
+		}
+		if err := json.Unmarshal(respData, &resp); err != nil {
+			return interposeResponse{Allow: false}, err
+		}
+		return interposeResponse{
+			Allow:     resp.Behavior == "allow",
+			Interrupt: resp.Interrupt,
+			Message:   resp.Message,
+		}, nil
+	case <-ctx.Done():
+		return interposeResponse{Allow: false}, ctx.Err()
+	}
+}
+
+// racePermission sends the permission request to the server via WebSocket.
+// If the server doesn't respond quickly (e.g. waiting for phone approval),
+// a terminal prompt is shown. Whichever responds first wins.
+func racePermission(relay *Relay, toolName string, toolInput map[string]interface{}, payload map[string]interface{}) interposeResponse {
+	type result struct {
+		resp    interposeResponse
+		source  string
+		outcome string // terminal choice: allow, always_allow, deny, deny_stop
+	}
+	ch := make(chan result, 2)
+	requestID := generateUUID()
+
+	ws := relay.ws
+	wsCtx, wsCancel := context.WithCancel(context.Background())
+	defer wsCancel()
+
+	go func() {
+		r, err := wsPermission(wsCtx, ws, requestID, payload)
 		if err != nil {
-			log.Printf("Interpose: server error: %v", err)
-			respond(conn, interposeResponse{Allow: false})
+			if wsCtx.Err() != nil {
+				return // cancelled by terminal
+			}
+			log.Printf("Interpose: WS permission error: %v", err)
+			ch <- result{resp: interposeResponse{Allow: false}, source: "server"}
 			return
 		}
+		ch <- result{resp: r, source: "server"}
+	}()
 
-		// Handle 401 — re-enroll and retry
-		if resp.StatusCode == 401 && relayID != "" {
-			clearEnrollmentMarker(relayID)
-			interpCwd, _ := os.Getwd()
-			if err := enrollSessionWithMarker(baseURL, deviceID, relayID, project, agent, interpCwd); err != nil {
-				resp.Body.Close()
-				respond(conn, interposeResponse{Allow: false})
-				return
+	// Wait for a fast server response (auto-approve).
+	select {
+	case r := <-ch:
+		log.Printf("Interpose: permission %s via %s (fast)",
+			map[bool]string{true: "allowed", false: "denied"}[r.resp.Allow], r.source)
+		return r.resp
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Server is waiting for phone approval — show terminal prompt
+	promptCtx, promptCancel := context.WithCancel(context.Background())
+	defer promptCancel()
+
+	log.Printf("Interpose: showing terminal prompt for %s", toolName)
+	detail := formatToolDetail(toolName, toolInput)
+	// Terminal prompt choices: 0=allow, 1=always_allow, 2=deny, 3=deny_stop
+	var terminalOutcomes = []string{"allow", "always_allow", "deny", "deny_stop"}
+
+	go func() {
+		choice, err := relay.ShowPrompt(promptCtx, toolName, detail)
+		if err != nil {
+			if promptCtx.Err() != nil {
+				return // ctx cancelled, server won
 			}
-			resp.Body.Close()
-			continue
+			log.Printf("Interpose: ShowPrompt error: %v", err)
+			return
 		}
-
-		// Retry on 429 with exponential backoff
-		if resp.StatusCode == 429 {
-			resp.Body.Close()
-			backoff := time.Duration(1<<uint(attempt)) * 500 * time.Millisecond
-			log.Printf("Interpose: 429 rate limited, retrying in %v", backoff)
-			time.Sleep(backoff)
-			continue
+		outcome := terminalOutcomes[choice]
+		ch <- result{
+			resp: interposeResponse{
+				Allow:     outcome == "allow" || outcome == "always_allow",
+				Interrupt: outcome == "deny_stop",
+			},
+			source:  "terminal",
+			outcome: outcome,
 		}
+	}()
 
-		break
+	// Wait for either terminal or server response, with a safety timeout
+	var r result
+	select {
+	case r = <-ch:
+	case <-time.After(600 * time.Second):
+		log.Printf("Interpose: permission request timed out for %s", toolName)
+		wsCancel()
+		return interposeResponse{Allow: false}
 	}
-	defer resp.Body.Close()
+	log.Printf("Interpose: permission %s via %s",
+		map[bool]string{true: "allowed", false: "denied"}[r.resp.Allow], r.source)
 
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		log.Printf("Interpose: server HTTP %d: %s", resp.StatusCode, string(body))
-		respond(conn, interposeResponse{Allow: false})
-		return
-	}
-
-	var serverResp struct {
-		Behavior  string `json:"behavior"`
-		Message   string `json:"message"`
-		Interrupt bool   `json:"interrupt"`
-		Error     string `json:"error"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&serverResp); err != nil {
-		log.Printf("Interpose: bad server response: %v", err)
-		respond(conn, interposeResponse{Allow: false})
-		return
-	}
-
-	if serverResp.Error != "" {
-		log.Printf("Interpose: server error: %s", serverResp.Error)
-		respond(conn, interposeResponse{Allow: false})
-		return
+	// If the terminal won, cancel the pending server request
+	if r.source == "terminal" && ws != nil {
+		cancel := map[string]interface{}{
+			"type": "cancel_request",
+			"data": map[string]interface{}{
+				"request_id": requestID,
+				"outcome":    r.outcome,
+			},
+		}
+		if data, err := json.Marshal(cancel); err == nil {
+			ws.SendText(data)
+		}
+		wsCancel() // unblock wsPermission goroutine
 	}
 
-	r := interposeResponse{
-		Allow:     serverResp.Behavior == "allow",
-		Interrupt: serverResp.Interrupt,
-		Message:   serverResp.Message,
-	}
-	respond(conn, r)
+	return r.resp
 }
 
 func respond(conn net.Conn, r interposeResponse) {

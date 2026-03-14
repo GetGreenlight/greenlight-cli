@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -94,9 +95,6 @@ func newTestServer() *testServer {
 		case "/session/enroll":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"approved":true}`)
-		case "/request":
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"behavior":"allow"}`)
 		case "/activity":
 			w.WriteHeader(200)
 		case "/transcript":
@@ -356,23 +354,25 @@ func TestIntegration_Connect_MissingDeviceID(t *testing.T) {
 }
 
 func TestIntegration_Connect_MissingProject(t *testing.T) {
+	// Project is optional (defaults to cwd basename), so with a device-id
+	// and no relay server, it should get past arg validation and fail on enrollment.
 	r := run(t, []string{"connect", "--device-id", "test-device"}, nil, "")
 	if r.ExitCode == 0 {
 		t.Error("expected non-zero exit code")
 	}
-	if !strings.Contains(r.Stderr, "project") {
-		t.Errorf("expected project error, got stderr=%q", r.Stderr)
+	if strings.Contains(r.Stderr, "project name is required") {
+		t.Errorf("project should default to cwd basename, got stderr=%q", r.Stderr)
 	}
 }
 
 func TestIntegration_Connect_DeviceIDFromEnv(t *testing.T) {
-	// Should get past device-id validation and fail on project
+	// Should get past device-id and project validation (project defaults to cwd basename)
 	r := run(t, []string{"connect"}, []string{"GREENLIGHT_DEVICE_ID=test-device"}, "")
 	if r.ExitCode == 0 {
 		t.Error("expected non-zero exit code")
 	}
-	if !strings.Contains(r.Stderr, "project") {
-		t.Errorf("expected project error (past device-id), got stderr=%q", r.Stderr)
+	if strings.Contains(r.Stderr, "device ID is required") {
+		t.Errorf("expected to get past device-id validation, got stderr=%q", r.Stderr)
 	}
 }
 
@@ -388,13 +388,13 @@ func TestIntegration_Connect_DeviceIDFromConfig(t *testing.T) {
 	os.MkdirAll(configDir, 0755)
 	os.WriteFile(filepath.Join(configDir, "config"), []byte("device_id=config-device\n"), 0644)
 
-	// Should get past device-id validation and fail on project
+	// Should get past device-id (from config) and project (defaults to cwd basename)
 	r := run(t, []string{"connect"}, []string{"HOME=" + home}, "")
 	if r.ExitCode == 0 {
 		t.Error("expected non-zero exit code")
 	}
-	if !strings.Contains(r.Stderr, "project") {
-		t.Errorf("expected project error (past device-id from config), got stderr=%q", r.Stderr)
+	if strings.Contains(r.Stderr, "device ID is required") {
+		t.Errorf("expected device-id from config, got stderr=%q", r.Stderr)
 	}
 }
 
@@ -476,18 +476,6 @@ func TestIntegration_Connect_FullFlow(t *testing.T) {
 		t.Error("expected non-empty session_id")
 	}
 
-	// Verify hooks were installed
-	settingsPath := filepath.Join(workDir, ".claude", "settings.local.json")
-	settingsData, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatalf("expected settings file at %s: %v", settingsPath, err)
-	}
-	if !strings.Contains(string(settingsData), "greenlight") {
-		t.Error("expected greenlight hook in settings")
-	}
-	if !strings.Contains(string(settingsData), "PermissionRequest") {
-		t.Error("expected PermissionRequest hook in settings")
-	}
 }
 
 func TestIntegration_Connect_EnrollmentRejected(t *testing.T) {
@@ -768,6 +756,21 @@ func TestIntegration_Connect_TranscriptRelay(t *testing.T) {
 				return
 			}
 			if msgType == websocket.MessageText {
+				// Auto-approve permission requests so interpose doesn't block
+				var msg struct {
+					Type string                 `json:"type"`
+					Data map[string]interface{} `json:"data"`
+				}
+				if json.Unmarshal(data, &msg) == nil && msg.Type == "permission_request" {
+					requestID, _ := msg.Data["request_id"].(string)
+					resp, _ := json.Marshal(map[string]interface{}{
+						"type":       "permission_response",
+						"request_id": requestID,
+						"behavior":   "allow",
+					})
+					conn.Write(ctx, websocket.MessageText, resp)
+					continue
+				}
 				wsTextMu.Lock()
 				wsTextFrames = append(wsTextFrames, string(data))
 				wsTextMu.Unlock()
@@ -917,6 +920,22 @@ func TestIntegration_Connect_TranscriptRelayIncremental(t *testing.T) {
 				return
 			}
 			if msgType == websocket.MessageText {
+				// Auto-approve permission requests so interpose doesn't block
+				var msg struct {
+					Type string                 `json:"type"`
+					Data map[string]interface{} `json:"data"`
+				}
+				if json.Unmarshal(data, &msg) == nil && msg.Type == "permission_request" {
+					requestID, _ := msg.Data["request_id"].(string)
+					resp, _ := json.Marshal(map[string]interface{}{
+						"type":       "permission_response",
+						"request_id": requestID,
+						"behavior":   "allow",
+					})
+					conn.Write(ctx, websocket.MessageText, resp)
+					continue
+				}
+
 				wsTextMu.Lock()
 				wsTextFrames = append(wsTextFrames, string(data))
 				wsTextMu.Unlock()
@@ -1008,313 +1027,8 @@ func TestIntegration_Connect_TranscriptRelayIncremental(t *testing.T) {
 	}
 }
 
-// ---------- hook — SessionStart ----------
-
-func TestIntegration_Hook_SessionStart(t *testing.T) {
-	testServerURL.clearHandlers()
-
-	// Clean up any enrollment marker from previous tests
-	os.Remove(filepath.Join(os.TempDir(), "greenlight-enrolled-relay-123"))
-
-	input := `{"hook_event_name":"SessionStart","session_id":"test-session-123","transcript_path":"/tmp/fake-transcript.jsonl"}`
-	r := run(t, []string{"hook"},
-		[]string{
-			"GREENLIGHT_DEVICE_ID=test-dev",
-			"GREENLIGHT_PROJECT=test-proj",
-			"GREENLIGHT_SESSION_ID=relay-123",
-		}, input)
-
-	if r.ExitCode != 0 {
-		t.Errorf("expected exit 0, got %d; stdout=%q stderr=%q", r.ExitCode, r.Stdout, r.Stderr)
-	}
-
-	// Give async activity POST a moment to arrive
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify enrollment was attempted
-	enrollReqs := testServerURL.getRequests("/session/enroll")
-	if len(enrollReqs) == 0 {
-		t.Error("expected enrollment request on SessionStart")
-	}
-
-	// Verify activity POST was sent
-	activityReqs := testServerURL.getRequests("/activity")
-	if len(activityReqs) == 0 {
-		t.Error("expected activity request on SessionStart")
-	} else {
-		var body map[string]interface{}
-		json.Unmarshal(activityReqs[0].Body, &body)
-		if body["event"] != "session_start" {
-			t.Errorf("expected event=session_start, got %v", body["event"])
-		}
-		if body["device_id"] != "test-dev" {
-			t.Errorf("expected device_id=test-dev, got %v", body["device_id"])
-		}
-	}
-}
-
-func TestIntegration_Hook_MissingDeviceID(t *testing.T) {
-	// Use an isolated HOME so no real ~/.greenlight/config is found.
-	// When device ID is missing, the hook should allow (passthrough mode).
-	tmpHome := t.TempDir()
-	input := `{"hook_event_name":"PermissionRequest","tool_name":"Bash"}`
-	r := run(t, []string{"hook"},
-		[]string{
-			"HOME=" + tmpHome,
-			"GREENLIGHT_PROJECT=test-proj",
-		}, input)
-
-	if r.ExitCode != 0 {
-		t.Errorf("expected exit 0 (allow via JSON), got %d", r.ExitCode)
-	}
-
-	var output map[string]interface{}
-	if err := json.Unmarshal([]byte(r.Stdout), &output); err != nil {
-		t.Fatalf("failed to parse stdout JSON: %v; stdout=%q", err, r.Stdout)
-	}
-
-	hso := output["hookSpecificOutput"].(map[string]interface{})
-	decision := hso["decision"].(map[string]interface{})
-	if decision["behavior"] != "allow" {
-		t.Errorf("expected allow, got %v", decision["behavior"])
-	}
-}
-
-func TestIntegration_Hook_MissingProject(t *testing.T) {
-	// Use an isolated HOME so no real ~/.greenlight/config is found.
-	// When project is missing, the hook should allow (passthrough mode).
-	tmpHome := t.TempDir()
-	input := `{"hook_event_name":"PermissionRequest","tool_name":"Bash"}`
-	r := run(t, []string{"hook"},
-		[]string{
-			"HOME=" + tmpHome,
-			"GREENLIGHT_DEVICE_ID=test-dev",
-		}, input)
-
-	if r.ExitCode != 0 {
-		t.Errorf("expected exit 0 (allow via JSON), got %d", r.ExitCode)
-	}
-
-	var output map[string]interface{}
-	json.Unmarshal([]byte(r.Stdout), &output)
-	hso := output["hookSpecificOutput"].(map[string]interface{})
-	decision := hso["decision"].(map[string]interface{})
-	if decision["behavior"] != "allow" {
-		t.Errorf("expected allow, got %v", decision["behavior"])
-	}
-}
-
-// ---------- hook — PermissionRequest ----------
-
-func TestIntegration_Hook_PermissionRequest_Allow(t *testing.T) {
-	testServerURL.clearHandlers()
-	testServerURL.setHandler("/request", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"behavior":"allow"}`)
-	})
-	defer testServerURL.clearHandlers()
-
-	input := `{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"},"session_id":"s1"}`
-	r := run(t, []string{"hook"},
-		[]string{
-			"GREENLIGHT_DEVICE_ID=test-dev",
-			"GREENLIGHT_PROJECT=test-proj",
-			"GREENLIGHT_SESSION_ID=relay-1",
-		}, input)
-
-	if r.ExitCode != 0 {
-		t.Errorf("expected exit 0, got %d; stderr=%q", r.ExitCode, r.Stderr)
-	}
-
-	var output map[string]interface{}
-	if err := json.Unmarshal([]byte(r.Stdout), &output); err != nil {
-		t.Fatalf("parse stdout: %v; stdout=%q", err, r.Stdout)
-	}
-	hso := output["hookSpecificOutput"].(map[string]interface{})
-	decision := hso["decision"].(map[string]interface{})
-	if decision["behavior"] != "allow" {
-		t.Errorf("expected allow, got %v", decision["behavior"])
-	}
-
-	// Verify the request payload forwarded to server
-	reqs := testServerURL.getRequests("/request")
-	if len(reqs) == 0 {
-		t.Fatal("expected /request POST")
-	}
-	var payload map[string]interface{}
-	json.Unmarshal(reqs[0].Body, &payload)
-	if payload["device_id"] != "test-dev" {
-		t.Errorf("expected device_id=test-dev, got %v", payload["device_id"])
-	}
-	if payload["tool_name"] != "Bash" {
-		t.Errorf("expected tool_name=Bash, got %v", payload["tool_name"])
-	}
-}
-
-func TestIntegration_Hook_PermissionRequest_Deny(t *testing.T) {
-	testServerURL.clearHandlers()
-	testServerURL.setHandler("/request", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"behavior":"deny","message":"not allowed by test"}`)
-	})
-	defer testServerURL.clearHandlers()
-
-	input := `{"hook_event_name":"PermissionRequest","tool_name":"Bash","session_id":"s1"}`
-	r := run(t, []string{"hook"},
-		[]string{
-			"GREENLIGHT_DEVICE_ID=test-dev",
-			"GREENLIGHT_PROJECT=test-proj",
-			"GREENLIGHT_SESSION_ID=relay-1",
-		}, input)
-
-	var output map[string]interface{}
-	json.Unmarshal([]byte(r.Stdout), &output)
-	hso := output["hookSpecificOutput"].(map[string]interface{})
-	decision := hso["decision"].(map[string]interface{})
-	if decision["behavior"] != "deny" {
-		t.Errorf("expected deny, got %v", decision["behavior"])
-	}
-	if decision["message"] != "not allowed by test" {
-		t.Errorf("expected 'not allowed by test', got %v", decision["message"])
-	}
-}
-
-func TestIntegration_Hook_PermissionRequest_AllowWithUpdatedInput(t *testing.T) {
-	testServerURL.clearHandlers()
-	testServerURL.setHandler("/request", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"behavior":"allow","updated_input":{"command":"echo safe"}}`)
-	})
-	defer testServerURL.clearHandlers()
-
-	input := `{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf /"},"session_id":"s1"}`
-	r := run(t, []string{"hook"},
-		[]string{
-			"GREENLIGHT_DEVICE_ID=test-dev",
-			"GREENLIGHT_PROJECT=test-proj",
-			"GREENLIGHT_SESSION_ID=relay-1",
-		}, input)
-
-	var output map[string]interface{}
-	json.Unmarshal([]byte(r.Stdout), &output)
-	hso := output["hookSpecificOutput"].(map[string]interface{})
-	decision := hso["decision"].(map[string]interface{})
-	if decision["behavior"] != "allow" {
-		t.Errorf("expected allow, got %v", decision["behavior"])
-	}
-	updatedInput, ok := decision["updatedInput"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected updatedInput map, got %v", decision["updatedInput"])
-	}
-	if updatedInput["command"] != "echo safe" {
-		t.Errorf("expected updated command='echo safe', got %v", updatedInput["command"])
-	}
-}
-
-func TestIntegration_Hook_PermissionRequest_DenyWithInterrupt(t *testing.T) {
-	testServerURL.clearHandlers()
-	testServerURL.setHandler("/request", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"behavior":"deny","message":"interrupted","interrupt":true}`)
-	})
-	defer testServerURL.clearHandlers()
-
-	input := `{"hook_event_name":"PermissionRequest","tool_name":"Bash","session_id":"s1"}`
-	r := run(t, []string{"hook"},
-		[]string{
-			"GREENLIGHT_DEVICE_ID=test-dev",
-			"GREENLIGHT_PROJECT=test-proj",
-			"GREENLIGHT_SESSION_ID=relay-1",
-		}, input)
-
-	var output map[string]interface{}
-	json.Unmarshal([]byte(r.Stdout), &output)
-	hso := output["hookSpecificOutput"].(map[string]interface{})
-	decision := hso["decision"].(map[string]interface{})
-	if decision["behavior"] != "deny" {
-		t.Errorf("expected deny, got %v", decision["behavior"])
-	}
-	if decision["interrupt"] != true {
-		t.Errorf("expected interrupt=true, got %v", decision["interrupt"])
-	}
-}
-
-func TestIntegration_Hook_PermissionRequest_401Retry(t *testing.T) {
-	testServerURL.clearHandlers()
-
-	var requestCount int
-	var requestMu sync.Mutex
-	testServerURL.setHandler("/request", func(w http.ResponseWriter, r *http.Request) {
-		requestMu.Lock()
-		requestCount++
-		count := requestCount
-		requestMu.Unlock()
-
-		if count == 1 {
-			w.WriteHeader(401)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"behavior":"allow"}`)
-	})
-	defer testServerURL.clearHandlers()
-
-	// Clear any enrollment markers from previous tests
-	relayID := "retry-relay-1"
-	os.Remove(filepath.Join(os.TempDir(), "greenlight-enrolled-"+relayID))
-
-	input := `{"hook_event_name":"PermissionRequest","tool_name":"Bash","session_id":"s1"}`
-	r := run(t, []string{"hook"},
-		[]string{
-			"GREENLIGHT_DEVICE_ID=test-dev",
-			"GREENLIGHT_PROJECT=test-proj",
-			"GREENLIGHT_SESSION_ID=" + relayID,
-		}, input)
-
-	var output map[string]interface{}
-	json.Unmarshal([]byte(r.Stdout), &output)
-	hso := output["hookSpecificOutput"].(map[string]interface{})
-	decision := hso["decision"].(map[string]interface{})
-	if decision["behavior"] != "allow" {
-		t.Errorf("expected allow after retry, got %v; stdout=%q", decision["behavior"], r.Stdout)
-	}
-
-	// Should have made 2 requests to /request
-	requestMu.Lock()
-	if requestCount != 2 {
-		t.Errorf("expected 2 requests to /request, got %d", requestCount)
-	}
-	requestMu.Unlock()
-}
-
-func TestIntegration_Hook_PermissionRequest_ServerError(t *testing.T) {
-	testServerURL.clearHandlers()
-	testServerURL.setHandler("/request", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(500)
-		fmt.Fprint(w, "internal server error")
-	})
-	defer testServerURL.clearHandlers()
-
-	input := `{"hook_event_name":"PermissionRequest","tool_name":"Bash","session_id":"s1"}`
-	r := run(t, []string{"hook"},
-		[]string{
-			"GREENLIGHT_DEVICE_ID=test-dev",
-			"GREENLIGHT_PROJECT=test-proj",
-			"GREENLIGHT_SESSION_ID=relay-1",
-		}, input)
-
-	var output map[string]interface{}
-	json.Unmarshal([]byte(r.Stdout), &output)
-	hso := output["hookSpecificOutput"].(map[string]interface{})
-	decision := hso["decision"].(map[string]interface{})
-	if decision["behavior"] != "deny" {
-		t.Errorf("expected deny on server error, got %v", decision["behavior"])
-	}
-	msg := decision["message"].(string)
-	if !strings.Contains(msg, "500") {
-		t.Errorf("expected HTTP 500 in message, got %q", msg)
-	}
-}
+// Hook tests were removed — the hook subcommand was removed.
+// All permission requests now go through interpose → WS, tested via TestIntegration_WSPermission_*.
 
 // ---------- stream — arg validation ----------
 
@@ -1521,67 +1235,272 @@ func TestIntegration_Stream_HTTPMode_FatalError(t *testing.T) {
 	}
 }
 
-// ---------- hook — unknown event ----------
 
-func TestIntegration_Hook_UnknownEvent(t *testing.T) {
-	input := `{"hook_event_name":"SomeUnknownEvent"}`
-	r := run(t, []string{"hook"},
-		[]string{
-			"GREENLIGHT_DEVICE_ID=test-dev",
-			"GREENLIGHT_PROJECT=test-proj",
-		}, input)
+// ---------- WS permission request/response ----------
 
-	if r.ExitCode != 0 {
-		t.Errorf("expected exit 0 for unknown event, got %d", r.ExitCode)
-	}
-}
-
-// ---------- hook — invalid JSON ----------
-
-func TestIntegration_Hook_InvalidJSON(t *testing.T) {
-	r := run(t, []string{"hook"},
-		[]string{
-			"GREENLIGHT_DEVICE_ID=test-dev",
-			"GREENLIGHT_PROJECT=test-proj",
-		}, "this is not json")
-
-	// Should output deny JSON
-	var output map[string]interface{}
-	if err := json.Unmarshal([]byte(r.Stdout), &output); err != nil {
-		t.Fatalf("expected JSON output, got %q", r.Stdout)
-	}
-	hso := output["hookSpecificOutput"].(map[string]interface{})
-	decision := hso["decision"].(map[string]interface{})
-	if decision["behavior"] != "deny" {
-		t.Errorf("expected deny for invalid JSON, got %v", decision["behavior"])
-	}
-}
-
-// ---------- hook — default event type ----------
-
-func TestIntegration_Hook_DefaultEventType(t *testing.T) {
+// wsPermissionHelper sets up a connect session with a WS handler that processes
+// permission_request messages and responds with permission_response.
+// Returns a channel that receives each permission_request's data payload.
+// wsPermissionHelper sets up a connect session with a WS handler that processes
+// permission_request messages. It returns the relay ID extracted from the WS
+// connection URL, so the caller can connect to the interpose socket directly.
+// respondFn is called for each permission_request and should return the response.
+// receivedCh receives each permission_request's data payload.
+func wsPermissionHelper(t *testing.T, respondFn func(data map[string]interface{}) map[string]interface{}, receivedCh chan map[string]interface{}) (workDir string, master *os.File, cmd *exec.Cmd, done chan error) {
+	t.Helper()
 	testServerURL.clearHandlers()
-	testServerURL.setHandler("/request", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"behavior":"allow"}`)
+
+	workDir, err := os.MkdirTemp("", "greenlight-wsperm-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Channel to capture the relay ID from the WS connection URL
+	relayIDCh := make(chan string, 1)
+
+	testServerURL.setWSHandler(func(w http.ResponseWriter, r *http.Request) {
+		// Extract relay_id from query params
+		if rid := r.URL.Query().Get("relay_id"); rid != "" {
+			select {
+			case relayIDCh <- rid:
+			default:
+			}
+		}
+
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+		})
+		if err != nil {
+			t.Logf("ws accept error: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+
+		ctx := context.Background()
+		for {
+			msgType, msgData, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			if msgType != websocket.MessageText {
+				continue
+			}
+			var msg struct {
+				Type string                 `json:"type"`
+				Data map[string]interface{} `json:"data"`
+			}
+			if json.Unmarshal(msgData, &msg) != nil {
+				continue
+			}
+			if msg.Type == "permission_request" {
+				if receivedCh != nil {
+					select {
+					case receivedCh <- msg.Data:
+					default:
+					}
+				}
+				resp := respondFn(msg.Data)
+				respBytes, _ := json.Marshal(resp)
+				conn.Write(ctx, websocket.MessageText, respBytes)
+			}
+		}
 	})
+
+	master, slave, err := openPTY()
+	if err != nil {
+		t.Fatalf("openPTY: %v", err)
+	}
+	setWinsize(slave.Fd(), &Winsize{Row: 24, Col: 80})
+
+	pathWithMock := filepath.Dir(mockClaudeBin) + ":" + os.Getenv("PATH")
+
+	cmd = exec.Command(greenlightBin, "connect", "--device-id", "test-dev", "--project", "test-proj")
+	cmd.Dir = workDir
+	cmd.Env = []string{
+		"HOME=" + os.Getenv("HOME"),
+		"PATH=" + pathWithMock,
+		"TMPDIR=" + os.TempDir(),
+		"TERM=xterm-256color",
+	}
+	cmd.Stdin = slave
+	cmd.Stdout = slave
+	cmd.Stderr = slave
+
+	done = make(chan error, 1)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	slave.Close()
+	go func() { done <- cmd.Wait() }()
+
+	// Wait for WS connection to get the relay ID, then send a fake
+	// interpose request to the Unix socket to trigger the WS flow.
+	go func() {
+		var relayID string
+		select {
+		case relayID = <-relayIDCh:
+		case <-time.After(10 * time.Second):
+			return
+		}
+
+		// Give the interpose socket a moment to start
+		time.Sleep(200 * time.Millisecond)
+
+		sockPath := "/tmp/gl-" + relayID[:8] + ".sock"
+		conn, err := net.Dial("unix", sockPath)
+		if err != nil {
+			t.Logf("dial interpose socket: %v", err)
+			return
+		}
+		defer conn.Close()
+
+		// Send a fake read request (same format as the C interpose library)
+		req := `{"type":"read","path":"/tmp/test-file.txt","pid":1234}` + "\n"
+		conn.Write([]byte(req))
+
+		// Read the response (blocks until permission is resolved)
+		buf := make([]byte, 4096)
+		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		conn.Read(buf)
+	}()
+
+	return workDir, master, cmd, done
+}
+
+// sendInterposeRequest sends a fake interpose request to the Unix socket
+// and returns the response.
+func sendInterposeRequest(t *testing.T, relayID string, reqJSON string) string {
+	t.Helper()
+	sockPath := "/tmp/gl-" + relayID[:8] + ".sock"
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial interpose socket %s: %v", sockPath, err)
+	}
+	defer conn.Close()
+
+	conn.Write([]byte(reqJSON + "\n"))
+
+	buf := make([]byte, 4096)
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read interpose response: %v", err)
+	}
+	return string(buf[:n])
+}
+
+func TestIntegration_WSPermission_AutoApprove(t *testing.T) {
+	receivedCh := make(chan map[string]interface{}, 10)
+
+	workDir, master, cmd, done := wsPermissionHelper(t, func(data map[string]interface{}) map[string]interface{} {
+		requestID, _ := data["request_id"].(string)
+		return map[string]interface{}{
+			"type":       "permission_response",
+			"request_id": requestID,
+			"behavior":   "allow",
+		}
+	}, receivedCh)
+	defer os.RemoveAll(workDir)
+	defer master.Close()
 	defer testServerURL.clearHandlers()
 
-	// Empty hook_event_name should default to PermissionRequest
-	input := `{"tool_name":"Bash","session_id":"s1"}`
-	r := run(t, []string{"hook"},
-		[]string{
-			"GREENLIGHT_DEVICE_ID=test-dev",
-			"GREENLIGHT_PROJECT=test-proj",
-			"GREENLIGHT_SESSION_ID=relay-1",
-		}, input)
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		cmd.Process.Kill()
+		t.Fatal("connect timed out")
+	}
 
-	var output map[string]interface{}
-	json.Unmarshal([]byte(r.Stdout), &output)
-	hso := output["hookSpecificOutput"].(map[string]interface{})
-	decision := hso["decision"].(map[string]interface{})
-	if decision["behavior"] != "allow" {
-		t.Errorf("expected allow (default PermissionRequest), got %v; stdout=%q", decision["behavior"], r.Stdout)
+	// The helper sends a fake interpose request via the Unix socket,
+	// which triggers a WS permission_request.
+	select {
+	case first := <-receivedCh:
+		if first["request_id"] == nil || first["request_id"] == "" {
+			t.Error("expected non-empty request_id")
+		}
+		if first["tool_name"] != "Read" {
+			t.Errorf("expected tool_name=Read, got %v", first["tool_name"])
+		}
+		if first["hook_event_name"] != "PermissionRequest" {
+			t.Errorf("expected hook_event_name=PermissionRequest, got %v", first["hook_event_name"])
+		}
+	default:
+		t.Error("expected at least one permission_request via WebSocket")
+	}
+}
+
+func TestIntegration_WSPermission_Deny(t *testing.T) {
+	receivedCh := make(chan map[string]interface{}, 10)
+
+	workDir, master, cmd, done := wsPermissionHelper(t, func(data map[string]interface{}) map[string]interface{} {
+		requestID, _ := data["request_id"].(string)
+		return map[string]interface{}{
+			"type":       "permission_response",
+			"request_id": requestID,
+			"behavior":   "deny",
+			"message":    "denied by test",
+		}
+	}, receivedCh)
+	defer os.RemoveAll(workDir)
+	defer master.Close()
+	defer testServerURL.clearHandlers()
+
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		cmd.Process.Kill()
+		t.Fatal("connect timed out")
+	}
+
+	// Verify the request was received and the session completed
+	// without hanging (deny response handled correctly).
+	select {
+	case req := <-receivedCh:
+		if req["tool_name"] != "Read" {
+			t.Errorf("expected tool_name=Read, got %v", req["tool_name"])
+		}
+	default:
+		t.Error("expected at least one permission_request via WebSocket")
+	}
+}
+
+func TestIntegration_WSPermission_NoDeviceIDInPayload(t *testing.T) {
+	// Verify that device_id, project, relay_id are NOT sent in the payload
+	// (server has them from the WS connection).
+	receivedCh := make(chan map[string]interface{}, 10)
+
+	workDir, master, cmd, done := wsPermissionHelper(t, func(data map[string]interface{}) map[string]interface{} {
+		requestID, _ := data["request_id"].(string)
+		return map[string]interface{}{
+			"type":       "permission_response",
+			"request_id": requestID,
+			"behavior":   "allow",
+		}
+	}, receivedCh)
+	defer os.RemoveAll(workDir)
+	defer master.Close()
+	defer testServerURL.clearHandlers()
+
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		cmd.Process.Kill()
+		t.Fatal("connect timed out")
+	}
+
+	select {
+	case first := <-receivedCh:
+		if first["device_id"] != nil {
+			t.Errorf("device_id should not be in WS payload, got %v", first["device_id"])
+		}
+		if first["project"] != nil {
+			t.Errorf("project should not be in WS payload, got %v", first["project"])
+		}
+		if first["relay_id"] != nil {
+			t.Errorf("relay_id should not be in WS payload, got %v", first["relay_id"])
+		}
+	default:
+		t.Fatal("expected at least one permission_request")
 	}
 }
 

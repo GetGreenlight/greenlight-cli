@@ -4,12 +4,15 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 )
 
@@ -22,6 +25,13 @@ type Relay struct {
 	mu          sync.Mutex // serializes writes to master
 	ws          *WSClient  // optional WebSocket client
 	killed      bool       // true if the child was killed (not normal exit)
+
+	// Terminal permission prompt support
+	promptReady  atomic.Bool // true once stdin goroutine is running
+	promptMu     sync.Mutex  // serializes prompts (one at a time)
+	promptActive atomic.Bool // true when prompt is showing
+	promptCh     chan byte   // keystrokes redirected here during prompt
+	promptRows   uint16     // rows used by prompt UI
 }
 
 // New creates a new Relay that will run the given command inside a PTY.
@@ -41,9 +51,10 @@ func New(command string, args []string, wsURL, wsToken string, wsMode WSMode, ex
 	}
 
 	r := &Relay{
-		cmd:    cmd,
-		master: master,
-		slave:  slave,
+		cmd:      cmd,
+		master:   master,
+		slave:    slave,
+		promptCh: make(chan byte, 32),
 	}
 
 	if wsURL != "" {
@@ -98,8 +109,18 @@ func (r *Relay) Run() error {
 	signal.Notify(winchCh, syscall.SIGWINCH)
 	go func() {
 		for range winchCh {
-			if err := r.syncWinsize(); err != nil {
-				log.Printf("warn: syncWinsize on SIGWINCH: %v", err)
+			if r.promptActive.Load() {
+				// During prompt, resize PTY and scroll region to outer terminal minus prompt rows
+				if ws, err := getWinsize(os.Stdin.Fd()); err == nil && ws.Row > r.promptRows {
+					agentWs := *ws
+					agentWs.Row -= r.promptRows
+					setWinsize(r.master.Fd(), &agentWs)
+					fmt.Fprintf(os.Stdout, "\033[1;%dr", agentWs.Row)
+				}
+			} else {
+				if err := r.syncWinsize(); err != nil {
+					log.Printf("warn: syncWinsize on SIGWINCH: %v", err)
+				}
 			}
 		}
 	}()
@@ -125,7 +146,9 @@ func (r *Relay) Run() error {
 		for {
 			n, err := r.master.Read(buf)
 			if n > 0 {
-				os.Stdout.Write(buf[:n])
+				if !r.promptActive.Load() {
+					os.Stdout.Write(buf[:n])
+				}
 				if r.ws != nil {
 					r.ws.Send(buf[:n])
 				}
@@ -137,6 +160,9 @@ func (r *Relay) Run() error {
 		}
 	}()
 
+	// Mark relay as ready for terminal prompts (stdin goroutine is about to start)
+	r.promptReady.Store(true)
+
 	// outer stdin → master (user keystrokes → Claude Code)
 	go func() {
 		buf := make([]byte, 256)
@@ -144,21 +170,30 @@ func (r *Relay) Run() error {
 			n, err := os.Stdin.Read(buf)
 			if n > 0 {
 				data := buf[:n]
-				for len(data) > 0 {
-					idx := bytes.IndexByte(data, 0x1a) // Ctrl-Z
-					if idx == -1 {
-						r.mu.Lock()
-						r.master.Write(data)
-						r.mu.Unlock()
-						break
+				if r.promptActive.Load() {
+					for _, b := range data {
+						select {
+						case r.promptCh <- b:
+						default:
+						}
 					}
-					if idx > 0 {
-						r.mu.Lock()
-						r.master.Write(data[:idx])
-						r.mu.Unlock()
+				} else {
+					for len(data) > 0 {
+						idx := bytes.IndexByte(data, 0x1a) // Ctrl-Z
+						if idx == -1 {
+							r.mu.Lock()
+							r.master.Write(data)
+							r.mu.Unlock()
+							break
+						}
+						if idx > 0 {
+							r.mu.Lock()
+							r.master.Write(data[:idx])
+							r.mu.Unlock()
+						}
+						r.suspend()
+						data = data[idx+1:]
 					}
-					r.suspend()
-					data = data[idx+1:]
 				}
 			}
 			if err != nil {
@@ -290,4 +325,103 @@ func (r *Relay) restoreTermios() {
 		ioctlWriteTermios,
 		uintptr(ptrOf(&r.origTermios)),
 	)
+}
+
+// ShowPrompt shrinks the agent PTY, draws a permission prompt in the freed
+// terminal rows, and waits for the user to press a key. Returns 0 for allow,
+// 1 for deny, or an error if the context is cancelled (server responded first).
+func (r *Relay) ShowPrompt(ctx context.Context, toolName, detail string) (int, error) {
+	if !r.promptReady.Load() {
+		return -1, fmt.Errorf("relay not ready for prompts")
+	}
+
+	r.promptMu.Lock()
+	defer r.promptMu.Unlock()
+
+	const promptHeight uint16 = 4
+
+	ws, err := getWinsize(os.Stdin.Fd())
+	if err != nil {
+		return -1, err
+	}
+	if ws.Row <= promptHeight+5 {
+		return -1, fmt.Errorf("terminal too small for prompt")
+	}
+
+	agentRows := ws.Row - promptHeight
+
+	// Shrink agent PTY so it doesn't draw over our prompt area
+	agentWs := &Winsize{Row: agentRows, Col: ws.Col, Xpixel: ws.Xpixel, Ypixel: ws.Ypixel}
+	setWinsize(r.master.Fd(), agentWs)
+
+	// Drain stale keystrokes from previous prompts
+	for {
+		select {
+		case <-r.promptCh:
+		default:
+			goto drained
+		}
+	}
+drained:
+
+	// Activate input interception — stdin goroutine will redirect to promptCh
+	r.promptRows = promptHeight
+	r.promptActive.Store(true)
+
+	defer func() {
+		r.promptActive.Store(false)
+
+		// Get current outer terminal size (may have changed during prompt)
+		currentWs, wsErr := getWinsize(os.Stdin.Fd())
+		if wsErr != nil {
+			currentWs = ws
+		}
+
+		// Clear prompt lines
+		for i := uint16(0); i < promptHeight; i++ {
+			fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K", currentWs.Row-promptHeight+1+i)
+		}
+
+		// Restore full PTY size — agent gets SIGWINCH and redraws
+		setWinsize(r.master.Fd(), currentWs)
+	}()
+
+	// Draw the prompt. Agent output is suppressed while promptActive is true
+	// (master→stdout goroutine skips os.Stdout.Write), so nothing can overwrite it.
+	sep := strings.Repeat("─", int(ws.Col))
+	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K\033[2m%s\033[0m", agentRows+1, sep)
+
+	line := fmt.Sprintf(" \033[1m%s\033[0m: %s", toolName, detail)
+	maxLen := int(ws.Col) - 1
+	if len(toolName)+len(detail)+4 > maxLen {
+		avail := maxLen - len(toolName) - 7
+		if avail > 0 && avail < len(detail) {
+			detail = detail[:avail] + "..."
+		}
+		line = fmt.Sprintf(" \033[1m%s\033[0m: %s", toolName, detail)
+	}
+	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K%s", agentRows+2, line)
+	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K [1] Allow  [2] Always allow  [3] Deny  [4] Deny & stop", agentRows+3)
+	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K Choice: ", agentRows+4)
+
+	// Wait for valid keystroke or context cancellation.
+	// No escape sequence filtering needed — agent output is suppressed,
+	// so no terminal query responses will arrive on stdin.
+	for {
+		select {
+		case <-ctx.Done():
+			return -1, ctx.Err()
+		case b := <-r.promptCh:
+			switch b {
+			case '1':
+				return 0, nil // allow
+			case '2':
+				return 1, nil // always_allow
+			case '3':
+				return 2, nil // deny
+			case '4':
+				return 3, nil // deny_stop
+			}
+		}
+	}
 }

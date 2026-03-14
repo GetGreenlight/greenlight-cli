@@ -142,14 +142,6 @@ func runConnect(args []string) {
 		os.Exit(1)
 	}
 
-	// Interpose handles tool permission requests for all agents.
-	// Claude also gets a PermissionRequest hook for intent-style requests
-	// (questions, plan mode) that aren't tool calls interpose can intercept.
-	if agent == "claude" {
-		if err := installHooks(agent); err != nil {
-			log.Printf("Warning: failed to install hooks: %v", err)
-		}
-	}
 	// Gemini still needs its policy file to auto-approve tools at the CLI level,
 	// so interpose handles permissions without Gemini double-prompting.
 	if agent == "gemini" {
@@ -250,6 +242,16 @@ func runConnect(args []string) {
 		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Enable terminal permission prompts
+	promptRelay.mu.Lock()
+	promptRelay.r = r
+	promptRelay.mu.Unlock()
+	defer func() {
+		promptRelay.mu.Lock()
+		promptRelay.r = nil
+		promptRelay.mu.Unlock()
+	}()
 
 	// Set kill function for remote "pull the plug"
 	if r.ws != nil {
@@ -439,12 +441,6 @@ func cleanupAgentFiles(agent, cwd string) {
 		}
 		removeGreenlightInstructions(filepath.Join(cwd, "GEMINI.md"))
 	case "copilot":
-		// Hooks are installed at git root, not necessarily CWD
-		root := gitRoot()
-		hookPath := filepath.Join(root, ".github", "hooks", "greenlight.json")
-		if err := os.Remove(hookPath); err == nil {
-			log.Printf("Removed copilot hook %s", hookPath)
-		}
 		removeGreenlightInstructions(filepath.Join(cwd, ".github", "copilot-instructions.md"))
 	case "cursor":
 		removeGreenlightInstructions(filepath.Join(cwd, ".cursor", "rules", "greenlight.mdc"))
@@ -825,6 +821,13 @@ func resolveCursorCommand(command string, args []string) (string, []string) {
 
 	log.Printf("Interposition: launching %s %s (bypassing cursor bash wrapper)", nodeBin, strings.Join(newArgs, " "))
 	return nodeBin, newArgs
+}
+
+// detachedSysProcAttr returns SysProcAttr for a detached subprocess.
+func detachedSysProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{
+		Setsid: true,
+	}
 }
 
 func generateUUID() string {

@@ -27,6 +27,11 @@ import (
 func main() {
 	fmt.Println("MOCK_CLAUDE_STARTED")
 
+	// Read a file to trigger interpose permission request via DYLD_INSERT_LIBRARIES
+	if path := os.Getenv("MOCK_CLAUDE_READ_FILE"); path != "" {
+		os.ReadFile(path)
+	}
+
 	if path := os.Getenv("MOCK_CLAUDE_OUTPUT"); path != "" {
 		readStdinToFile(path)
 		return

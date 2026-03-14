@@ -388,6 +388,20 @@ func transformGeminiMessage(raw json.RawMessage, sessionID string) []map[string]
 	}
 }
 
+// geminiToolNameMap translates Gemini tool names to their Claude equivalents
+// so the server and client can use a single set of tool name display logic.
+var geminiToolNameMap = map[string]string{
+	"read_file":         "Read",
+	"write_file":        "Write",
+	"replace":           "Edit",
+	"run_shell_command": "Bash",
+	"grep_search":       "Grep",
+	"list_directory":    "Bash",
+	"web_fetch":         "WebFetch",
+	"google_web_search": "WebSearch",
+	"get_internal_docs": "Read",
+}
+
 // normalizeGeminiToolName maps Gemini tool names to Claude equivalents.
 func normalizeGeminiToolName(name string) string {
 	if mapped, ok := geminiToolNameMap[name]; ok {

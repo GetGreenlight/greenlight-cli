@@ -38,8 +38,6 @@ func main() {
 	switch os.Args[1] {
 	case "connect":
 		runConnect(os.Args[2:])
-	case "hook":
-		runHook(os.Args[2:])
 	case "stream":
 		runStream(os.Args[2:])
 	case "register":

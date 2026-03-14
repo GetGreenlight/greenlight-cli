@@ -49,6 +49,11 @@ type WSClient struct {
 	// a write fails, and drained on reconnection.
 	textMu    sync.Mutex
 	textQueue [][]byte
+
+	// Pending permission requests waiting for server responses.
+	// Maps client-generated request_id → response channel.
+	pendingMu sync.Mutex
+	pending   map[string]chan []byte
 }
 
 // NewWSClient creates a new WebSocket client. Call Run to start connecting.
@@ -212,6 +217,65 @@ func (c *WSClient) drainTextQueue(conn *websocket.Conn) {
 	}
 }
 
+// RegisterPending creates a channel for receiving a permission response
+// for the given client-generated request ID.
+func (c *WSClient) RegisterPending(requestID string) <-chan []byte {
+	ch := make(chan []byte, 1)
+	c.pendingMu.Lock()
+	if c.pending == nil {
+		c.pending = make(map[string]chan []byte)
+	}
+	c.pending[requestID] = ch
+	c.pendingMu.Unlock()
+	return ch
+}
+
+// RemovePending removes a pending request channel (idempotent).
+func (c *WSClient) RemovePending(requestID string) {
+	c.pendingMu.Lock()
+	delete(c.pending, requestID)
+	c.pendingMu.Unlock()
+}
+
+// routePermissionResponse checks if a frame is a permission_response
+// and routes it to the pending channel. Returns true if handled.
+func (c *WSClient) routePermissionResponse(data []byte) bool {
+	// Quick check before parsing JSON
+	if len(data) < 20 || data[0] != '{' {
+		return false
+	}
+	var msg struct {
+		Type      string `json:"type"`
+		RequestID string `json:"request_id"`
+	}
+	if json.Unmarshal(data, &msg) != nil {
+		return false
+	}
+	if msg.Type != "permission_response" {
+		return false
+	}
+	c.pendingMu.Lock()
+	ch, ok := c.pending[msg.RequestID]
+	if ok {
+		delete(c.pending, msg.RequestID)
+	}
+	pendingCount := len(c.pending)
+	c.pendingMu.Unlock()
+	log.Printf("ws: permission_response for %s (matched=%v, pending=%d)", msg.RequestID, ok, pendingCount)
+	if ok {
+		ch <- data
+	}
+	return true
+}
+
+// IsConnected returns true if the WebSocket connection is currently active.
+func (c *WSClient) IsConnected() bool {
+	c.connMu.Lock()
+	connected := c.conn != nil
+	c.connMu.Unlock()
+	return connected
+}
+
 // Close signals the client to stop and waits for it to exit.
 func (c *WSClient) Close() {
 	close(c.done)
@@ -276,6 +340,12 @@ func (c *WSClient) connectAndRead() error {
 			default:
 			}
 			return err
+		}
+
+		// Check for permission response frames before PTY injection.
+		// Try both text and binary — server may use either frame type.
+		if c.routePermissionResponse(data) {
+			continue
 		}
 
 		// Binary frames are control messages
