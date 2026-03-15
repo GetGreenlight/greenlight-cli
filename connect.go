@@ -42,12 +42,28 @@ func runConnect(args []string) {
 	// Build the agent command
 	command := agentBinary(agent)
 	var cmdArgs []string
+
+	// Generate a session ID for agents that support it. This lets us
+	// derive the transcript path deterministically, avoiding the bug where
+	// two concurrent sessions in the same CWD pick up the same transcript.
+	var agentSessionID string
+	if *resume != "" {
+		// Resuming: the conversation ID IS the agent session ID (for Claude/Copilot/Pi)
+		agentSessionID = *resume
+	} else if agent == "claude" || agent == "copilot" || agent == "pi" {
+		agentSessionID = generateUUID()
+	}
+
 	// Agent-specific resume handling
 	if *resume != "" {
-		if agent == "codex" {
+		switch agent {
+		case "codex":
 			// Codex uses a subcommand: codex resume <id>
 			cmdArgs = append(cmdArgs, "resume", *resume)
-		} else {
+		case "pi":
+			// Pi's --resume is boolean (no ID arg). Use --session <path> instead,
+			// handled below in agent-specific flags.
+		default:
 			cmdArgs = append(cmdArgs, "--resume", *resume)
 		}
 	}
@@ -56,6 +72,10 @@ func runConnect(args []string) {
 	case "copilot":
 		// Bypass built-in prompts so interpose handles permissions
 		cmdArgs = append(cmdArgs, "--allow-all")
+		// Set session ID for new sessions (--resume also works for new Copilot sessions)
+		if *resume == "" && agentSessionID != "" {
+			cmdArgs = append(cmdArgs, "--resume", agentSessionID)
+		}
 	case "cursor":
 		// Bypass built-in prompts so interpose handles permissions
 		cmdArgs = append(cmdArgs, "--yolo")
@@ -64,10 +84,23 @@ func runConnect(args []string) {
 		cmdArgs = append(cmdArgs, "--dangerously-bypass-approvals-and-sandbox")
 	case "claude":
 		cmdArgs = append(cmdArgs, "--dangerously-skip-permissions", "--append-system-prompt", greenlightSystemPrompt)
+		// Set session ID for new sessions so transcript path is deterministic
+		if *resume == "" && agentSessionID != "" {
+			cmdArgs = append(cmdArgs, "--session-id", agentSessionID)
+		}
 	case "pi":
 		// Pi runs in YOLO mode by default (no bypass flag needed).
 		// Inject greenlight instructions via --append-system-prompt.
 		cmdArgs = append(cmdArgs, "--append-system-prompt", greenlightSystemPrompt)
+		// Use --session <path> for both new and resumed sessions.
+		// Pi's --resume is a boolean flag (no ID), so we control the
+		// session file directly to get deterministic transcript paths.
+		if agentSessionID != "" {
+			sessPath := piSessionPath(agentSessionID)
+			if sessPath != "" {
+				cmdArgs = append(cmdArgs, "--session", sessPath)
+			}
+		}
 	}
 
 	// Resolve device ID: flag > env > config file
@@ -109,6 +142,11 @@ func runConnect(args []string) {
 	}
 	if relayID == "" {
 		relayID = generateUUID()
+	}
+	// For Codex, use relay ID as the sentinel for transcript matching.
+	// The relay ID is embedded in AGENTS.md and serialized into the transcript.
+	if agent == "codex" {
+		agentSessionID = relayID
 	}
 	dialURL := wsURL
 	u, err := url.Parse(dialURL)
@@ -154,7 +192,7 @@ func runConnect(args []string) {
 	// These teach the agent how to interpret [GREENLIGHT] permission denial messages.
 	// Pi uses --append-system-prompt (like Claude), so no instruction file needed.
 	if agent == "gemini" || agent == "copilot" || agent == "cursor" || agent == "codex" {
-		if err := installGreenlightInstructions(agent); err != nil {
+		if err := installGreenlightInstructions(agent, relayID); err != nil {
 			log.Printf("Warning: failed to install agent instructions: %v", err)
 		}
 	}
@@ -281,7 +319,7 @@ func runConnect(args []string) {
 	// Use a context so polling stops when the session ends.
 	startTime := time.Now()
 	transcriptCtx, transcriptCancel := context.WithCancel(context.Background())
-	go startTranscriptStreamer(transcriptCtx, agent, relayID, bridgePath, startTime)
+	go startTranscriptStreamer(transcriptCtx, agent, relayID, agentSessionID, bridgePath, startTime)
 
 	runErr := r.Run()
 	transcriptCancel()
@@ -312,7 +350,7 @@ func runConnect(args []string) {
 
 // startTranscriptStreamer polls for the agent's transcript file to appear,
 // then spawns `greenlight stream --bridge` to tail it into the bridge file.
-func startTranscriptStreamer(ctx context.Context, agent, relayID, bridgePath string, notBefore time.Time) {
+func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID, bridgePath string, notBefore time.Time) {
 	// Poll until the agent creates its transcript file or the session ends.
 	// Some agents (e.g. Codex) only create the file on first user prompt,
 	// so we poll for the entire session lifetime rather than using a fixed cap.
@@ -324,7 +362,7 @@ func startTranscriptStreamer(ctx context.Context, agent, relayID, bridgePath str
 			return
 		case <-time.After(500 * time.Millisecond):
 		}
-		p := deriveTranscriptPath(agent, "")
+		p := deriveTranscriptPath(agent, agentSessionID)
 		if p == "" {
 			continue
 		}
@@ -332,22 +370,24 @@ func startTranscriptStreamer(ctx context.Context, agent, relayID, bridgePath str
 		if err != nil {
 			continue
 		}
-		if info.ModTime().After(notBefore) {
+		if agentSessionID != "" || info.ModTime().After(notBefore) {
 			transcriptPath = p
 			break
 		}
 	}
 	// Re-derive after a short delay to handle the race where an old file gets
 	// a brief mtime bump (e.g. Gemini touches previous session during init).
-	// If a newer file appeared, switch to it.
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(2 * time.Second):
-	}
-	if p := deriveTranscriptPath(agent, ""); p != "" && p != transcriptPath {
-		log.Printf("Transcript: switching from %s to %s", transcriptPath, p)
-		transcriptPath = p
+	// If a newer file appeared, switch to it. Skip for deterministic paths.
+	if agentSessionID == "" {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+		if p := deriveTranscriptPath(agent, ""); p != "" && p != transcriptPath {
+			log.Printf("Transcript: switching from %s to %s", transcriptPath, p)
+			transcriptPath = p
+		}
 	}
 	log.Printf("Transcript: found %s", transcriptPath)
 

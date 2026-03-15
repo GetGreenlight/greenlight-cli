@@ -3,9 +3,11 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -87,20 +89,47 @@ const greenlightSystemPrompt = `Tool calls are managed by a permission system ca
 func deriveTranscriptPath(agent, sessionID string) string {
 	switch agent {
 	case "claude":
+		if sessionID != "" {
+			return deriveClaudeTranscriptPathByID(sessionID)
+		}
 		return deriveClaudeTranscriptPath()
 	case "copilot":
+		if sessionID != "" {
+			return deriveCopilotTranscriptPathByID(sessionID)
+		}
 		return deriveCopilotTranscriptPath()
 	case "gemini":
 		return deriveGeminiTranscriptPath()
 	case "cursor":
 		return deriveCursorTranscriptPath()
 	case "codex":
+		if sessionID != "" {
+			return deriveCodexTranscriptBySentinel(sessionID)
+		}
 		return deriveCodexTranscriptPath()
 	case "pi":
+		if sessionID != "" {
+			return piSessionPath(sessionID)
+		}
 		return derivePiTranscriptPath()
 	default:
 		return ""
 	}
+}
+
+// deriveClaudeTranscriptPathByID returns the transcript path for a known session ID.
+// The file may not exist yet (the caller polls until it appears).
+func deriveClaudeTranscriptPathByID(sessionID string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	projHash := strings.ReplaceAll(cwd, "/", "-")
+	return filepath.Join(home, ".claude", "projects", projHash, sessionID+".jsonl")
 }
 
 func deriveClaudeTranscriptPath() string {
@@ -138,6 +167,15 @@ func deriveClaudeTranscriptPath() string {
 		return filepath.Join(projDir, newest)
 	}
 	return ""
+}
+
+// deriveCopilotTranscriptPathByID returns the transcript path for a known session ID.
+func deriveCopilotTranscriptPathByID(sessionID string) string {
+	home := os.Getenv("COPILOT_HOME")
+	if home == "" {
+		home = filepath.Join(os.Getenv("HOME"), ".copilot")
+	}
+	return filepath.Join(home, "session-state", sessionID, "events.jsonl")
 }
 
 func deriveCopilotTranscriptPath() string {
@@ -247,6 +285,63 @@ func deriveCursorTranscriptPath() string {
 	return ""
 }
 
+// deriveCodexTranscriptBySentinel scans recent Codex transcript files for
+// a greenlight-relay sentinel embedded in the AGENTS.md content that Codex
+// serializes into the transcript at session start.
+func deriveCodexTranscriptBySentinel(relayID string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	sentinel := "greenlight-relay:" + relayID
+	sessionsDir := filepath.Join(home, ".codex", "sessions")
+
+	// Collect candidates sorted newest first to find our session quickly.
+	type candidate struct {
+		path  string
+		mtime time.Time
+	}
+	var candidates []candidate
+	filepath.Walk(sessionsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(info.Name(), ".jsonl") {
+			return nil
+		}
+		candidates = append(candidates, candidate{path, info.ModTime()})
+		return nil
+	})
+	// Sort newest first
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].mtime.After(candidates[j].mtime)
+	})
+
+	// Only check the 5 newest files — the sentinel should be in a very recent one.
+	limit := 5
+	if len(candidates) < limit {
+		limit = len(candidates)
+	}
+	for _, c := range candidates[:limit] {
+		f, err := os.Open(c.path)
+		if err != nil {
+			continue
+		}
+		found := false
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 256*1024), 256*1024)
+		// The sentinel appears in the first few lines (AGENTS.md content).
+		for i := 0; i < 20 && scanner.Scan(); i++ {
+			if strings.Contains(scanner.Text(), sentinel) {
+				found = true
+				break
+			}
+		}
+		f.Close()
+		if found {
+			return c.path
+		}
+	}
+	return ""
+}
+
 func deriveCodexTranscriptPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -273,6 +368,29 @@ func deriveCodexTranscriptPath() string {
 		return nil
 	})
 	return newest
+}
+
+// piSessionPath returns the transcript file path for a Pi session ID,
+// following Pi's convention: $PI_CODING_AGENT_DIR/sessions/<normalized-cwd>/<sessionID>.jsonl
+// PI_CODING_AGENT_DIR defaults to ~/.pi/agent.
+func piSessionPath(sessionID string) string {
+	baseDir := os.Getenv("PI_CODING_AGENT_DIR")
+	if baseDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		baseDir = filepath.Join(home, ".pi", "agent")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	// Pi encodes CWD as: strip leading /, replace /\: with -, wrap in --
+	safePath := strings.TrimLeft(cwd, "/\\")
+	safePath = strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(safePath)
+	safePath = "--" + safePath + "--"
+	return filepath.Join(baseDir, "sessions", safePath, sessionID+".jsonl")
 }
 
 func derivePiTranscriptPath() string {
