@@ -61,8 +61,10 @@ func runConnect(args []string) {
 			// Codex uses a subcommand: codex resume <id>
 			cmdArgs = append(cmdArgs, "resume", *resume)
 		case "pi":
-			// Pi's --resume is boolean (no ID arg). Use --session <path> instead,
-			// handled below in agent-specific flags.
+			// Pi's --resume is a boolean flag (no ID arg), so we can't pass
+			// a conversation ID to it. Error out rather than silently ignoring.
+			fmt.Fprintf(os.Stderr, "greenlight: --resume is not supported for pi; use /resume to pick a session once pi starts\n")
+			os.Exit(1)
 		default:
 			cmdArgs = append(cmdArgs, "--resume", *resume)
 		}
