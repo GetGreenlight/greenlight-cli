@@ -108,6 +108,9 @@ func streamToBridge(transcriptPath, sessionID, bridgePath string) {
 			fullLine := trimNewline(partial + line)
 			partial = ""
 			if fullLine != "" {
+				if isSlashCommand(fullLine) {
+					continue
+				}
 				// Write the raw JSONL line to the bridge file (one line per entry)
 				if _, werr := fmt.Fprintln(bridge, fullLine); werr != nil {
 					log.Printf("Bridge write error: %v", werr)
@@ -127,6 +130,31 @@ func streamToBridge(transcriptPath, sessionID, bridgePath string) {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
+}
+
+// isSlashCommand returns true if the JSONL line represents a Claude Code
+// slash command (e.g. /voice, /commit) that should not be sent to the server.
+func isSlashCommand(line string) bool {
+	var entry struct {
+		Type    string `json:"type"`
+		Subtype string `json:"subtype"`
+		Message *struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal([]byte(line), &entry) != nil {
+		return false
+	}
+	if entry.Subtype == "local_command" {
+		return true
+	}
+	if entry.Type == "user" && entry.Message != nil {
+		trimmed := strings.TrimSpace(entry.Message.Content)
+		if strings.HasPrefix(trimmed, "<command-name>") || strings.HasPrefix(trimmed, "<local-command-caveat>") {
+			return true
+		}
+	}
+	return false
 }
 
 // streamGeminiBridge polls a Gemini JSON transcript file for new messages,
