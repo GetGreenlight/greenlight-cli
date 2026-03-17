@@ -393,16 +393,22 @@ func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID
 	}
 	log.Printf("Transcript: found %s", transcriptPath)
 
-	// Extract conversation ID from transcript filename and persist the
+	// Extract conversation ID from transcript path and persist the
 	// conversation→relay mapping so resumed sessions reuse the same relay ID.
-	// This works for all agents (previously only saved from SessionStart hook).
-	base := filepath.Base(transcriptPath)
-	if ext := filepath.Ext(base); ext != "" {
-		convID := strings.TrimSuffix(base, ext)
-		if convID != "" {
-			saveRelayID(convID, relayID)
-			log.Printf("Transcript: saved relay mapping %s → %s", convID, relayID)
+	// Copilot uses the parent directory name (session UUID) since all
+	// transcripts are named "events.jsonl". Other agents use the filename.
+	var convID string
+	if agent == "copilot" {
+		convID = filepath.Base(filepath.Dir(transcriptPath))
+	} else {
+		base := filepath.Base(transcriptPath)
+		if ext := filepath.Ext(base); ext != "" {
+			convID = strings.TrimSuffix(base, ext)
 		}
+	}
+	if convID != "" {
+		saveRelayID(convID, relayID)
+		log.Printf("Transcript: saved relay mapping %s → %s", convID, relayID)
 	}
 
 	exePath, err := os.Executable()
@@ -597,16 +603,37 @@ func ensureCopilotHelpers() {
 	// Copilot's spawn-helper is used for bash tool invocations.
 	// Without the dyld entitlement, macOS strips DYLD_INSERT_LIBRARIES
 	// from spawn-helper, so inner commands (find, cat, etc.) are uninterposed.
+	//
+	// Copilot installs under ~/.copilot/pkg/ with varying directory layouts
+	// across versions (e.g. darwin-arm64/1.0.2/, universal/1.0.5/). We glob
+	// for all spawn-helper binaries matching the current architecture.
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return
 	}
-	spawnHelper := filepath.Join(home, ".copilot", "pkg", "darwin-arm64", "1.0.2", "prebuilds", "darwin-arm64", "spawn-helper")
-	if _, err := os.Stat(spawnHelper); err != nil {
-		return
+
+	arch := "darwin-arm64"
+	if runtime.GOARCH == "amd64" {
+		arch = "darwin-x64"
 	}
-	if err := ensureDyldEntitlement(spawnHelper); err != nil {
-		log.Printf("Interposition: spawn-helper: %v", err)
+
+	// Copilot stores spawn-helper in multiple locations across versions:
+	//   ~/.copilot/pkg/<variant>/<version>/prebuilds/<arch>/spawn-helper
+	//   ~/Library/Caches/copilot/pkg/<variant>/<version>/prebuilds/<arch>/spawn-helper
+	patterns := []string{
+		filepath.Join(home, ".copilot", "pkg", "*", "*", "prebuilds", arch, "spawn-helper"),
+		filepath.Join(home, "Library", "Caches", "copilot", "pkg", "*", "*", "prebuilds", arch, "spawn-helper"),
+	}
+	for _, pattern := range patterns {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			continue
+		}
+		for _, spawnHelper := range matches {
+			if err := ensureDyldEntitlement(spawnHelper); err != nil {
+				log.Printf("Interposition: spawn-helper %s: %v", spawnHelper, err)
+			}
+		}
 	}
 }
 

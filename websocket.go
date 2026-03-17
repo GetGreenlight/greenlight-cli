@@ -254,6 +254,9 @@ func (c *WSClient) routePermissionResponse(data []byte) bool {
 	if msg.Type != "permission_response" {
 		return false
 	}
+	if msg.RequestID == "" {
+		log.Printf("ws: permission_response with empty request_id: %s", string(data))
+	}
 	c.pendingMu.Lock()
 	ch, ok := c.pending[msg.RequestID]
 	if ok {

@@ -222,6 +222,10 @@ func racePermission(relay *Relay, toolName string, toolInput map[string]interfac
 		log.Printf("Interpose: permission %s via %s (fast)",
 			map[bool]string{true: "allowed", false: "denied"}[r.resp.Allow], r.source)
 		return r.resp
+	case <-relay.shutdownCh:
+		log.Printf("Interpose: relay shutting down, denying %s", toolName)
+		wsCancel()
+		return interposeResponse{Allow: false}
 	case <-time.After(200 * time.Millisecond):
 	}
 
@@ -254,10 +258,15 @@ func racePermission(relay *Relay, toolName string, toolInput map[string]interfac
 		}
 	}()
 
-	// Wait for either terminal or server response, with a safety timeout
+	// Wait for either terminal or server response, relay shutdown, or safety timeout
 	var r result
 	select {
 	case r = <-ch:
+	case <-relay.shutdownCh:
+		log.Printf("Interpose: relay shutting down, denying %s", toolName)
+		wsCancel()
+		promptCancel()
+		return interposeResponse{Allow: false}
 	case <-time.After(600 * time.Second):
 		log.Printf("Interpose: permission request timed out for %s", toolName)
 		wsCancel()
