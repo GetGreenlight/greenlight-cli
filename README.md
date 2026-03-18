@@ -44,8 +44,6 @@ Or use `scripts/build.sh` which auto-detects the version from git tags and build
 scripts/build.sh
 ```
 
-Requires Go 1.20+. macOS, Linux, and WSL2.
-
 ## Quick Start
 
 Register your device ID (found on the "About" tab in the Greenlight app):
