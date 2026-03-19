@@ -10,8 +10,10 @@ import (
 	"log"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -98,11 +100,9 @@ func handleInterposeSock(listener net.Listener, baseURL, deviceID, project, rela
 func handleInterposeConn(conn net.Conn, baseURL, deviceID, project, relayID, agent string) {
 	defer conn.Close()
 
-	// Read one line (the request)
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	reader := bufio.NewReader(conn)
-	line, err := reader.ReadBytes('\n')
-	if err != nil {
+	// Try to receive with ancillary data (SCM_RIGHTS for seccomp fd)
+	line, seccompFd := recvWithAncillary(conn)
+	if line == nil {
 		respond(conn, interposeResponse{Allow: false})
 		return
 	}
@@ -111,6 +111,13 @@ func handleInterposeConn(conn net.Conn, baseURL, deviceID, project, relayID, age
 	if err := json.Unmarshal(line, &req); err != nil {
 		log.Printf("Interpose: bad request: %v", err)
 		respond(conn, interposeResponse{Allow: false})
+		return
+	}
+
+	// Handle seccomp fd handoff (Linux only)
+	if req.Type == "seccomp_fd" && seccompFd >= 0 {
+		log.Printf("Interpose: received seccomp notification fd %d", seccompFd)
+		go runSeccompSupervisor(seccompFd, agent)
 		return
 	}
 
@@ -593,4 +600,55 @@ func interposeRequestSummary(req interposeRequest) string {
 	default:
 		return req.Path
 	}
+}
+
+// recvWithAncillary reads a line from the connection, optionally extracting
+// an SCM_RIGHTS fd (used on Linux for seccomp notification fd handoff).
+// Returns the line bytes and the fd (-1 if none).
+func recvWithAncillary(conn net.Conn) ([]byte, int) {
+	if runtime.GOOS == "linux" {
+		// Try recvmsg to get ancillary data (SCM_RIGHTS)
+		unixConn, ok := conn.(*net.UnixConn)
+		if ok {
+			rawConn, err := unixConn.SyscallConn()
+			if err == nil {
+				var buf [4096]byte
+				oob := make([]byte, syscall.CmsgSpace(4))
+				var n, oobn int
+				var recvErr error
+
+				rawConn.Read(func(fd uintptr) bool {
+					n, oobn, _, _, recvErr = syscall.Recvmsg(int(fd), buf[:], oob, 0)
+					return recvErr != syscall.EAGAIN
+				})
+
+				if recvErr == nil && n > 0 {
+					seccompFd := -1
+					if oobn > 0 {
+						msgs, err := syscall.ParseSocketControlMessage(oob[:oobn])
+						if err == nil {
+							for _, msg := range msgs {
+								if msg.Header.Level == syscall.SOL_SOCKET && msg.Header.Type == syscall.SCM_RIGHTS {
+									fds, err := syscall.ParseUnixRights(&msg)
+									if err == nil && len(fds) > 0 {
+										seccompFd = fds[0]
+									}
+								}
+							}
+						}
+					}
+					return buf[:n], seccompFd
+				}
+			}
+		}
+	}
+
+	// Fallback: normal buffered read
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	reader := bufio.NewReader(conn)
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		return nil, -1
+	}
+	return line, -1
 }

@@ -251,6 +251,10 @@ func runConnect(args []string) {
 		} else {
 			exportEnvs["LD_PRELOAD"] = libPath
 		}
+		// Set project dir for seccomp path classification (Linux)
+		if wd, err := os.Getwd(); err == nil {
+			seccompProjectDir = wd
+		}
 		// Start permission socket for interpose library
 		sockPath, sockCleanup := startInterposeSock(relayID, baseURL, devID, proj, agentServerName(agent))
 		if sockPath != "" {
