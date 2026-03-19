@@ -97,6 +97,68 @@ func handleInterposeSock(listener net.Listener, baseURL, deviceID, project, rela
 	}
 }
 
+// isSafeCommand checks if a Bash command can be auto-allowed without
+// prompting the user. A command is safe if its base binary is read-only
+// AND it contains no output redirects (which could write to files).
+func isSafeCommand(cmd string) bool {
+	// Check for output redirects: any unquoted > means the command can
+	// write to a file, even if the binary itself is read-only.
+	inSingle := false
+	inDouble := false
+	for i := 0; i < len(cmd); i++ {
+		c := cmd[i]
+		if c == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+		if c == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+		if c == '\\' && inDouble && i+1 < len(cmd) {
+			i++ // skip escaped char
+			continue
+		}
+		if c == '>' && !inSingle && !inDouble {
+			return false
+		}
+	}
+
+	// Extract the base command name (skip env assignments like VAR=val)
+	fields := strings.Fields(cmd)
+	cmdName := ""
+	for _, f := range fields {
+		if strings.Contains(f, "=") && !strings.HasPrefix(f, "-") {
+			continue // env var assignment
+		}
+		cmdName = f
+		break
+	}
+	if cmdName == "" {
+		return false
+	}
+	// Use basename
+	if idx := strings.LastIndex(cmdName, "/"); idx >= 0 {
+		cmdName = cmdName[idx+1:]
+	}
+
+	// Read-only commands that cannot modify files without redirects
+	switch cmdName {
+	case "pwd", "echo", "printf", "wc", "ls", "cat", "head", "tail",
+		"grep", "awk", "find", "file", "stat", "realpath", "readlink",
+		"dirname", "basename", "which", "command", "type",
+		"ps", "uname", "whoami", "hostname", "id", "arch", "nproc",
+		"uptime", "df", "free", "env", "printenv",
+		"defaults", "system_profiler", "security", "ioreg",
+		"dpkg", "lsb_release", "lscpu", "lsblk",
+		"date", "cal", "true", "false", "test", "[",
+		"sort", "uniq", "tr", "cut", "less", "more",
+		"greenlight", "greenlight-dev":
+		return true
+	}
+	return false
+}
+
 func handleInterposeConn(conn net.Conn, baseURL, deviceID, project, relayID, agent string) {
 	defer conn.Close()
 
@@ -125,6 +187,15 @@ func handleInterposeConn(conn net.Conn, baseURL, deviceID, project, relayID, age
 
 	// Translate to server permission request format
 	toolName, toolInput := translateInterposeRequest(req)
+
+	// Auto-allow safe commands (read-only with no output redirects)
+	if toolName == "Bash" {
+		if cmd, ok := toolInput["command"].(string); ok && isSafeCommand(cmd) {
+			log.Printf("Interpose: auto-allow safe command: %s", cmd)
+			respond(conn, interposeResponse{Allow: true})
+			return
+		}
+	}
 
 	payload := map[string]interface{}{
 		"agent":           agent,
