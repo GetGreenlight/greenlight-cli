@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ var knownAgents = map[string]bool{
 	"copilot": true,
 	"cursor":  true,
 	"codex":   true,
+	"gemini":  true,
 	"pi":      true,
 }
 
@@ -99,8 +101,14 @@ func deriveTranscriptPath(agent, sessionID string) string {
 		}
 		return deriveCopilotTranscriptPath()
 	case "gemini":
+		if sessionID != "" {
+			return deriveGeminiTranscriptPathByID(sessionID)
+		}
 		return deriveGeminiTranscriptPath()
 	case "cursor":
+		if sessionID != "" {
+			return deriveCursorTranscriptPathByID(sessionID)
+		}
 		return deriveCursorTranscriptPath()
 	case "codex":
 		if sessionID != "" {
@@ -209,6 +217,35 @@ func deriveCopilotTranscriptPath() string {
 	return ""
 }
 
+// deriveGeminiTranscriptPathByID finds the transcript file whose sessionId
+// JSON field matches the given UUID.
+func deriveGeminiTranscriptPathByID(sessionID string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	projName := filepath.Base(cwd)
+	chatsDir := filepath.Join(home, ".gemini", "tmp", projName, "chats")
+	entries, err := os.ReadDir(chatsDir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		p := filepath.Join(chatsDir, e.Name())
+		if extractGeminiSessionID(p) == sessionID {
+			return p
+		}
+	}
+	return ""
+}
+
 func deriveGeminiTranscriptPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -246,6 +283,47 @@ func deriveGeminiTranscriptPath() string {
 	return ""
 }
 
+// extractGeminiSessionID reads the sessionId field from a Gemini transcript JSON file.
+func extractGeminiSessionID(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var obj struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return ""
+	}
+	return obj.SessionID
+}
+
+// deriveCursorTranscriptPathByID returns the transcript path for a known session UUID.
+// Cursor uses two layouts: <uuid>.jsonl (old) or <uuid>/<uuid>.jsonl (new).
+func deriveCursorTranscriptPathByID(sessionID string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	projHash := strings.TrimLeft(strings.ReplaceAll(cwd, "/", "-"), "-")
+	transcriptsDir := filepath.Join(home, ".cursor", "projects", projHash, "agent-transcripts")
+	// New layout: <uuid>/<uuid>.jsonl
+	nested := filepath.Join(transcriptsDir, sessionID, sessionID+".jsonl")
+	if _, err := os.Stat(nested); err == nil {
+		return nested
+	}
+	// Old layout: <uuid>.jsonl
+	flat := filepath.Join(transcriptsDir, sessionID+".jsonl")
+	if _, err := os.Stat(flat); err == nil {
+		return flat
+	}
+	return ""
+}
+
 func deriveCursorTranscriptPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -264,25 +342,29 @@ func deriveCursorTranscriptPath() string {
 	if err != nil {
 		return ""
 	}
-	var newest string
+	var newestPath string
 	var newestTime time.Time
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		if info.ModTime().After(newestTime) {
-			newestTime = info.ModTime()
-			newest = e.Name()
+		if e.IsDir() {
+			// New layout: <uuid>/<uuid>.jsonl
+			nested := filepath.Join(transcriptsDir, e.Name(), e.Name()+".jsonl")
+			if info, err := os.Stat(nested); err == nil && info.ModTime().After(newestTime) {
+				newestTime = info.ModTime()
+				newestPath = nested
+			}
+		} else if strings.HasSuffix(e.Name(), ".jsonl") {
+			// Old layout: <uuid>.jsonl
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			if info.ModTime().After(newestTime) {
+				newestTime = info.ModTime()
+				newestPath = filepath.Join(transcriptsDir, e.Name())
+			}
 		}
 	}
-	if newest != "" {
-		return filepath.Join(transcriptsDir, newest)
-	}
-	return ""
+	return newestPath
 }
 
 // deriveCodexTranscriptBySentinel scans recent Codex transcript files for

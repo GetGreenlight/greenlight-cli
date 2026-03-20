@@ -24,7 +24,7 @@ func runConnect(args []string) {
 	resume := fs.String("resume", "", "Resume a previous session by ID")
 	deviceID := fs.String("device-id", "", "Device ID (overrides GREENLIGHT_DEVICE_ID env and config file)")
 	project := fs.String("project", "", "Project name (overrides GREENLIGHT_PROJECT env and config file)")
-	agentFlag := fs.String("agent", "", "Agent runtime: claude, codex, copilot, cursor, pi (overrides GREENLIGHT_AGENT env and config file)")
+	agentFlag := fs.String("agent", "", "Agent runtime: claude, codex, copilot, cursor, gemini, pi (overrides GREENLIGHT_AGENT env and config file)")
 	fs.Parse(args)
 
 	if wsURL == "" {
@@ -35,7 +35,7 @@ func runConnect(args []string) {
 	// Resolve agent runtime: flag > env > config > default
 	agent := resolveAgent(*agentFlag)
 	if !knownAgents[agent] {
-		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, codex, copilot, cursor, pi)\n", agent)
+		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, codex, copilot, cursor, gemini, pi)\n", agent)
 		os.Exit(1)
 	}
 
@@ -342,6 +342,29 @@ func runConnect(args []string) {
 
 	r.CloseWS()
 
+	// If the transcript streamer never found the transcript (short session),
+	// try one last time to find it and save the relay mapping.
+	if lookupConversationID(relayID) == "" {
+		if p := deriveTranscriptPath(agent, agentSessionID); p != "" {
+			var convID string
+			switch agent {
+			case "copilot":
+				convID = filepath.Base(filepath.Dir(p))
+			case "gemini":
+				convID = extractGeminiSessionID(p)
+			default:
+				base := filepath.Base(p)
+				if ext := filepath.Ext(base); ext != "" {
+					convID = strings.TrimSuffix(base, ext)
+				}
+			}
+			if convID != "" {
+				saveRelayID(convID, relayID)
+				log.Printf("Saved relay mapping at exit: %s → %s", convID, relayID)
+			}
+		}
+	}
+
 	// If the session was killed remotely, print resume instructions
 	if r.killed {
 		if convID := lookupConversationID(relayID); convID != "" {
@@ -400,11 +423,15 @@ func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID
 	// Extract conversation ID from transcript path and persist the
 	// conversation→relay mapping so resumed sessions reuse the same relay ID.
 	// Copilot uses the parent directory name (session UUID) since all
-	// transcripts are named "events.jsonl". Other agents use the filename.
+	// transcripts are named "events.jsonl". Gemini stores the session UUID
+	// in the JSON body (sessionId field). Other agents use the filename.
 	var convID string
-	if agent == "copilot" {
+	switch agent {
+	case "copilot":
 		convID = filepath.Base(filepath.Dir(transcriptPath))
-	} else {
+	case "gemini":
+		convID = extractGeminiSessionID(transcriptPath)
+	default:
 		base := filepath.Base(transcriptPath)
 		if ext := filepath.Ext(base); ext != "" {
 			convID = strings.TrimSuffix(base, ext)
