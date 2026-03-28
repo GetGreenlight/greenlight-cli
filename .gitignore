@@ -1,0 +1,10 @@
+/greenlight*
+/dist/
+/release-notes.md
+/CLAUDE.md
+.DS_Store
+/dump-hook.sh
+/.gemini
+/.github
+/.claude
+/logs
