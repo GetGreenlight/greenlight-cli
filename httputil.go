@@ -78,19 +78,3 @@ func enrollSession(baseURL, deviceID, sessionID, project, agent, cwd, hostname s
 	}
 	return nil
 }
-
-// postJSON sends a JSON POST request and returns the response.
-func postJSON(url string, payload interface{}, timeout time.Duration) (*http.Response, error) {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encode payload: %w", err)
-	}
-	client := &http.Client{Timeout: timeout}
-	return client.Post(url, "application/json", bytes.NewReader(body))
-}
-
-// postRawJSON sends a pre-encoded JSON body as a POST request.
-func postRawJSON(url string, body []byte, timeout time.Duration) (*http.Response, error) {
-	client := &http.Client{Timeout: timeout}
-	return client.Post(url, "application/json", bytes.NewReader(body))
-}

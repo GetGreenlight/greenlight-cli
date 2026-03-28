@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,7 +24,6 @@ func runConnect(args []string) {
 	deviceID := fs.String("device-id", "", "Device ID (overrides GREENLIGHT_DEVICE_ID env and config file)")
 	project := fs.String("project", "", "Project name (overrides GREENLIGHT_PROJECT env and config file)")
 	agentFlag := fs.String("agent", "", "Agent runtime: claude, codex, copilot, cursor, gemini, pi (overrides GREENLIGHT_AGENT env and config file)")
-	noDaemon := fs.Bool("no-daemon", false, "Run without the background daemon")
 	fs.Parse(args)
 
 	if wsURL == "" {
@@ -57,204 +55,25 @@ func runConnect(args []string) {
 		}
 	}
 
-	// Route through daemon unless --no-daemon is set
-	if !*noDaemon {
-		// Resolve device ID early so the daemon can verify it matches
-		resolvedDeviceID := *deviceID
-		if resolvedDeviceID == "" {
-			resolvedDeviceID = os.Getenv("GREENLIGHT_DEVICE_ID")
-		}
-		if resolvedDeviceID == "" {
-			resolvedDeviceID = readConfigValue("device_id")
-		}
-		if err := ensureDaemon(resolvedDeviceID); err != nil {
-			log.Printf("daemon: failed to start, falling back to direct mode: %v", err)
-		} else {
-			cwd, _ := os.Getwd()
-			connectViaDaemon(*agentFlag, resolvedDeviceID, *project, *resume, cwd)
-			return
-		}
+	// Resolve device ID early so the daemon can verify it matches
+	resolvedDeviceID := *deviceID
+	if resolvedDeviceID == "" {
+		resolvedDeviceID = os.Getenv("GREENLIGHT_DEVICE_ID")
 	}
-
-	// Resolve agent runtime: flag > env > config > default
-	agent := resolveAgent(*agentFlag)
-	if !knownAgents[agent] {
-		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, codex, copilot, cursor, gemini, pi)\n", agent)
+	if resolvedDeviceID == "" {
+		resolvedDeviceID = readConfigValue("device_id")
+	}
+	if err := ensureDaemon(resolvedDeviceID); err != nil {
+		fmt.Fprintf(os.Stderr, "greenlight: failed to start daemon: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Build agent command with session IDs and flags
-	setup, err := buildAgentCommand(agent, *resume)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-		os.Exit(1)
-	}
-	command := setup.Command
-	cmdArgs := setup.Args
-	agentSessionID := setup.AgentSessionID
-	relayID := setup.RelayID
-
-	// Resolve device ID and project
 	cwd, _ := os.Getwd()
-	devID, proj, err := resolveDeviceAndProject(*deviceID, *project, cwd)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-		os.Exit(1)
-	}
-
-	dialURL := wsURL
-	u, err := url.Parse(dialURL)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "greenlight: bad relay URL: %v\n", err)
-		os.Exit(1)
-	}
-	q := u.Query()
-	q.Set("relay_id", relayID)
-	q.Set("project", proj)
-	q.Set("agent", agentServerName(agent))
-	if version != "" {
-		q.Set("version", version)
-	}
-	u.RawQuery = q.Encode()
-	dialURL = u.String()
-
-	// Derive HTTP base URL for enrollment
-	baseURL, err := serverBaseURL()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Enroll session with the relay server
-	if err := enrollSession(baseURL, devID, relayID, proj, agentServerName(agent), cwd, ""); err != nil {
-		fmt.Fprintf(os.Stderr, "greenlight: session enrollment failed: %v\n", err)
-		os.Exit(1)
-	}
-
-	installAgentFiles(agent, relayID)
-
-	// Write connect PID file for session tracking
-	connectPidFile := writeConnectPid(relayID, agent, cwd)
-	defer func() {
-		os.Remove(connectPidFile)
-		cleanupAgentFiles(agent, cwd)
-	}()
-
-	// Create bridge file for transcript relay
-	bridgePath := filepath.Join(os.TempDir(), "greenlight-bridge-"+relayID)
-	if f, err := os.Create(bridgePath); err == nil {
-		f.Close()
-	}
-	defer os.Remove(bridgePath)
-
-	exportEnvs := buildExportEnvs(devID, relayID, proj, bridgePath, agent)
-	command, cmdArgs, interpose := setupInterpose(agent, command, cmdArgs, relayID, baseURL, devID, proj, cwd, exportEnvs)
-	if interpose.LibExtracted {
-		defer os.Remove(interpose.LibPath)
-	}
-	if interpose.SockCleanup != nil {
-		defer interpose.SockCleanup()
-	}
-
-	r, err := New(command, cmdArgs, dialURL, devID, WSModeRW, exportEnvs)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Enable terminal permission prompts
-	promptRelay.mu.Lock()
-	promptRelay.r = r
-	promptRelay.mu.Unlock()
-	defer func() {
-		promptRelay.mu.Lock()
-		promptRelay.r = nil
-		promptRelay.mu.Unlock()
-	}()
-
-	// Set kill function for remote "pull the plug"
-	if r.ws != nil {
-		r.ws.killFunc = func() {
-			if r.cmd.Process != nil {
-				r.killed = true
-				syscall.Kill(-r.cmd.Process.Pid, syscall.SIGKILL)
-			}
-		}
-	}
-
-	// Start bridge tailer — sends transcript lines from bridge file over WebSocket
-	var bridgeDone chan struct{}
-	var bridgeFinished chan struct{}
-	if r.ws != nil {
-		bridgeDone = make(chan struct{})
-		bridgeFinished = make(chan struct{})
-		go func() {
-			tailBridge(bridgePath, r.ws, bridgeDone, agentServerName(agent))
-			close(bridgeFinished)
-		}()
-	}
-
-	// Start transcript streamer — polls for the agent's transcript file
-	// to appear, then spawns `greenlight stream` to write to the bridge file.
-	// Record start time so we only pick up transcripts created after launch.
-	// Use a context so polling stops when the session ends.
-	startTime := time.Now()
-	transcriptCtx, transcriptCancel := context.WithCancel(context.Background())
-	go startTranscriptStreamer(transcriptCtx, agent, relayID, agentSessionID, bridgePath, startTime)
-
-	runErr := r.Run()
-	transcriptCancel()
-
-	// Kill the detached transcript streamer process.
-	killStreamer(relayID)
-
-	// Signal bridge tailer to drain remaining lines and wait for it
-	// to finish. This must happen before closing the WebSocket.
-	if bridgeDone != nil {
-		close(bridgeDone)
-		<-bridgeFinished
-	}
-
-	r.CloseWS()
-
-	// If the transcript streamer never found the transcript (short session),
-	// try one last time to find it and save the relay mapping.
-	if lookupConversationID(relayID) == "" {
-		if p := deriveTranscriptPath(agent, agentSessionID); p != "" {
-			var convID string
-			switch agent {
-			case "copilot":
-				convID = filepath.Base(filepath.Dir(p))
-			case "gemini":
-				convID = extractGeminiSessionID(p)
-			default:
-				base := filepath.Base(p)
-				if ext := filepath.Ext(base); ext != "" {
-					convID = strings.TrimSuffix(base, ext)
-				}
-			}
-			if convID != "" {
-				saveRelayID(convID, relayID)
-				log.Printf("Saved relay mapping at exit: %s → %s", convID, relayID)
-			}
-		}
-	}
-
-	// If the session was killed remotely, print resume instructions
-	if r.killed {
-		if convID := lookupConversationID(relayID); convID != "" {
-			fmt.Fprintf(os.Stderr, "\nTo resume this conversation use --resume %s\n", convID)
-		}
-	}
-
-	if runErr != nil {
-		os.Exit(1)
-	}
+	connectViaDaemon(*agentFlag, resolvedDeviceID, *project, *resume, cwd)
 }
 
 // startTranscriptStreamer polls for the agent's transcript file to appear,
 // then spawns `greenlight stream --bridge` to tail it into the bridge file.
-func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID, bridgePath string, notBefore time.Time) {
+func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID, bridgePath, cwd string, notBefore time.Time) {
 	// Poll until the agent creates its transcript file or the session ends.
 	// Some agents (e.g. Codex) only create the file on first user prompt,
 	// so we poll for the entire session lifetime rather than using a fixed cap.
@@ -266,7 +85,7 @@ func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID
 			return
 		case <-time.After(500 * time.Millisecond):
 		}
-		p := deriveTranscriptPath(agent, agentSessionID)
+		p := deriveTranscriptPath(agent, agentSessionID, cwd)
 		if p == "" {
 			continue
 		}
@@ -288,7 +107,7 @@ func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID
 			return
 		case <-time.After(2 * time.Second):
 		}
-		if p := deriveTranscriptPath(agent, ""); p != "" && p != transcriptPath {
+		if p := deriveTranscriptPath(agent, "", cwd); p != "" && p != transcriptPath {
 			log.Printf("Transcript: switching from %s to %s", transcriptPath, p)
 			transcriptPath = p
 		}
@@ -764,10 +583,10 @@ func resolveCursorNodeBin(command string) string {
 //
 // We replicate this to launch node directly, so DYLD_INSERT_LIBRARIES is
 // inherited (bash is SIP-protected and strips it).
-func resolveCursorCommand(command string, args []string) (string, []string) {
+func resolveCursorCommand(command string, args []string) (string, []string, error) {
 	binPath, err := exec.LookPath(command)
 	if err != nil {
-		return command, args
+		return "", nil, fmt.Errorf("cursor binary %q not found: %w", command, err)
 	}
 	resolved, err := filepath.EvalSymlinks(binPath)
 	if err != nil {
@@ -780,12 +599,10 @@ func resolveCursorCommand(command string, args []string) (string, []string) {
 
 	// Verify both files exist
 	if _, err := os.Stat(nodeBin); err != nil {
-		log.Printf("Interposition: cursor node not found at %s, falling back", nodeBin)
-		return resolveScriptCommand(command, args)
+		return "", nil, fmt.Errorf("cursor node not found at %s: %w", nodeBin, err)
 	}
 	if _, err := os.Stat(indexJS); err != nil {
-		log.Printf("Interposition: cursor index.js not found at %s, falling back", indexJS)
-		return resolveScriptCommand(command, args)
+		return "", nil, fmt.Errorf("cursor index.js not found at %s: %w", indexJS, err)
 	}
 
 	newArgs := []string{"--use-system-ca", indexJS}
@@ -795,7 +612,7 @@ func resolveCursorCommand(command string, args []string) (string, []string) {
 	os.Setenv("CURSOR_INVOKED_AS", filepath.Base(binPath))
 
 	log.Printf("Interposition: launching %s %s (bypassing cursor bash wrapper)", nodeBin, strings.Join(newArgs, " "))
-	return nodeBin, newArgs
+	return nodeBin, newArgs, nil
 }
 
 // detachedSysProcAttr returns SysProcAttr for a detached subprocess.

@@ -76,7 +76,7 @@ func buildAgentCommand(agent, resume string) (*AgentSetup, error) {
 	case "pi":
 		cmdArgs = append(cmdArgs, "--append-system-prompt", greenlightSystemPrompt)
 		if agentSessionID != "" {
-			sessPath := piSessionPath(agentSessionID)
+			sessPath := piSessionPath(agentSessionID, "")
 			if sessPath != "" {
 				cmdArgs = append(cmdArgs, "--session", sessPath)
 			}
@@ -165,11 +165,11 @@ func buildExportEnvs(devID, relayID, proj, bridgePath, agent string) map[string]
 // LD_PRELOAD), starts the interpose socket, and resolves script commands.
 // It modifies exportEnvs in place and may modify command/args for dyld.
 // Returns the resolved command, args, and interpose state for cleanup.
-func setupInterpose(agent, command string, args []string, relayID, baseURL, devID, proj string, cwd string, exportEnvs map[string]string) (string, []string, *InterposeSetup) {
+func setupInterpose(agent, command string, args []string, relayID string, cwd string, exportEnvs map[string]string) (string, []string, *InterposeSetup, error) {
 	setup := &InterposeSetup{}
 	setup.LibPath, setup.LibExtracted = findInterposeLib()
 	if setup.LibPath == "" {
-		return command, args, setup
+		return "", nil, nil, fmt.Errorf("interpose library not found")
 	}
 
 	if version == "" || version == "dev" {
@@ -185,11 +185,10 @@ func setupInterpose(agent, command string, args []string, relayID, baseURL, devI
 			}
 		}
 		if err := ensureDyldEntitlement(entitlementTarget); err != nil {
-			log.Printf("Interposition: skipping, cannot ensure dyld entitlement: %v", err)
-		} else {
-			exportEnvs["DYLD_INSERT_LIBRARIES"] = setup.LibPath
-			ensureAgentHelpers(agent)
+			return "", nil, nil, fmt.Errorf("cannot ensure dyld entitlement for %s: %w", entitlementTarget, err)
 		}
+		exportEnvs["DYLD_INSERT_LIBRARIES"] = setup.LibPath
+		ensureAgentHelpers(agent)
 	} else {
 		exportEnvs["LD_PRELOAD"] = setup.LibPath
 	}
@@ -200,24 +199,28 @@ func setupInterpose(agent, command string, args []string, relayID, baseURL, devI
 	}
 
 	// Start permission socket for interpose library
-	sockPath, sockCleanup := startInterposeSock(relayID, baseURL, devID, proj, agentServerName(agent))
-	if sockPath != "" {
-		setup.SockPath = sockPath
-		setup.SockCleanup = sockCleanup
-		exportEnvs["GREENLIGHT_INTERPOSE_SOCK"] = sockPath
-		log.Printf("Interpose socket: %s", sockPath)
+	sockPath, sockCleanup, err := startInterposeSock(relayID, agentServerName(agent))
+	if err != nil {
+		return "", nil, nil, err
 	}
+	setup.SockPath = sockPath
+	setup.SockCleanup = sockCleanup
+	exportEnvs["GREENLIGHT_INTERPOSE_SOCK"] = sockPath
+	log.Printf("Interpose socket: %s", sockPath)
 	log.Printf("Interpose library: %s", setup.LibPath)
 
 	// If we're injecting a dylib and the command is a script, launch the
 	// interpreter directly to avoid /usr/bin/env stripping DYLD_INSERT_LIBRARIES.
 	if exportEnvs["DYLD_INSERT_LIBRARIES"] != "" {
 		if agent == "cursor" {
-			command, args = resolveCursorCommand(command, args)
+			command, args, err = resolveCursorCommand(command, args)
+			if err != nil {
+				return "", nil, nil, err
+			}
 		} else {
 			command, args = resolveScriptCommand(command, args)
 		}
 	}
 
-	return command, args, setup
+	return command, args, setup, nil
 }

@@ -154,8 +154,8 @@ func handleSeccompOpenat(notifFd int, notif *seccompNotif, agent string) bool {
 	// Read the path from the process's memory
 	path, err := readStringFromProc(pid, pathPtr)
 	if err != nil {
-		log.Printf("Seccomp: failed to read path from pid %d: %v", pid, err)
-		return true // fail-open if we can't read
+		log.Printf("Seccomp: failed to read path from pid %d, denying: %v", pid, err)
+		return false
 	}
 
 	// Resolve relative paths
@@ -212,8 +212,8 @@ func handleSeccompRename(notifFd int, notif *seccompNotif, agent string) bool {
 
 	newPath, err := readStringFromProc(pid, newpathPtr)
 	if err != nil {
-		log.Printf("Seccomp: failed to read rename path from pid %d: %v", pid, err)
-		return true
+		log.Printf("Seccomp: failed to read rename path from pid %d, denying: %v", pid, err)
+		return false
 	}
 
 	if !filepath.IsAbs(newPath) {
@@ -278,7 +278,7 @@ func seccompRequestPermission(toolName string, toolInput map[string]interface{},
 	relay := promptRelay.r
 	promptRelay.mu.Unlock()
 
-	if relay == nil || relay.ws == nil {
+	if relay == nil || relay.wsConn == nil {
 		log.Printf("Seccomp: no relay available, denying %s %s", toolName, path)
 		return false
 	}

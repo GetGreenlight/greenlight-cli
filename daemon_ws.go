@@ -3,9 +3,11 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 )
@@ -104,6 +106,7 @@ func (d *DaemonWS) UnregisterSession(relayID string) {
 // for the server to acknowledge it. This replaces HTTP enrollment for
 // sessions within an already-enrolled daemon.
 func (d *DaemonWS) StartSession(relayID, project, agent, cwd, version string) error {
+	hostname, _ := os.Hostname()
 	data := map[string]string{
 		"project": project,
 		"agent":   agent,
@@ -115,6 +118,7 @@ func (d *DaemonWS) StartSession(relayID, project, agent, cwd, version string) er
 	msg := map[string]interface{}{
 		"type":     "session_start",
 		"relay_id": relayID,
+		"hostname": hostname,
 		"data":     json.RawMessage(dataBytes),
 	}
 	msgBytes, err := json.Marshal(msg)
@@ -179,6 +183,8 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 		}
 	case "session_history":
 		d.handleSessionHistory()
+	case "session_transcript":
+		d.handleSessionTranscript(data)
 	default:
 		log.Printf("daemon-ws: unknown control message: %s", msg.Type)
 	}
@@ -196,6 +202,82 @@ func (d *DaemonWS) handleSessionHistory() {
 	data, err := json.Marshal(resp)
 	if err != nil {
 		log.Printf("daemon-ws: failed to marshal session history: %v", err)
+		return
+	}
+	d.ws.SendText(data)
+}
+
+// handleSessionTranscript loads a transcript file for a session and sends the entries back.
+func (d *DaemonWS) handleSessionTranscript(data []byte) {
+	var msg struct {
+		RelayID string `json:"relay_id"`
+	}
+	if json.Unmarshal(data, &msg) != nil || msg.RelayID == "" {
+		log.Printf("daemon-ws: session_transcript missing relay_id")
+		d.sendTranscriptResponse("", nil, "missing relay_id")
+		return
+	}
+
+	convID := lookupConversationID(msg.RelayID)
+	if convID == "" {
+		log.Printf("daemon-ws: session_transcript: no conversation ID for relay %s", msg.RelayID)
+		d.sendTranscriptResponse(msg.RelayID, nil, "no conversation ID found for relay_id")
+		return
+	}
+
+	rec, err := loadSessionRecord(convID)
+	if err != nil {
+		log.Printf("daemon-ws: session_transcript: failed to load session record %s: %v", convID, err)
+		d.sendTranscriptResponse(msg.RelayID, nil, fmt.Sprintf("session record not found: %v", err))
+		return
+	}
+
+	transcriptPath := deriveTranscriptPath(rec.Agent, convID, rec.Cwd)
+	if transcriptPath == "" {
+		log.Printf("daemon-ws: session_transcript: could not derive transcript path for %s", convID)
+		d.sendTranscriptResponse(msg.RelayID, nil, "could not derive transcript path")
+		return
+	}
+
+	f, err := os.Open(transcriptPath)
+	if err != nil {
+		log.Printf("daemon-ws: session_transcript: failed to open %s: %v", transcriptPath, err)
+		d.sendTranscriptResponse(msg.RelayID, nil, fmt.Sprintf("transcript file not found: %v", err))
+		return
+	}
+	defer f.Close()
+
+	var entries []json.RawMessage
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		// Validate it's valid JSON before including
+		if json.Valid(line) {
+			entries = append(entries, json.RawMessage(append([]byte(nil), line...)))
+		}
+	}
+
+	log.Printf("daemon-ws: session_transcript for relay %s: %d entries", msg.RelayID, len(entries))
+	d.sendTranscriptResponse(msg.RelayID, entries, "")
+}
+
+// sendTranscriptResponse sends a session_transcript_response message.
+func (d *DaemonWS) sendTranscriptResponse(relayID string, entries []json.RawMessage, message string) {
+	resp := map[string]interface{}{
+		"type":     "session_transcript_response",
+		"relay_id": relayID,
+		"entries":  entries,
+	}
+	if message != "" {
+		resp["message"] = message
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		log.Printf("daemon-ws: failed to marshal transcript response: %v", err)
 		return
 	}
 	d.ws.SendText(data)

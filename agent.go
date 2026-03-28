@@ -98,13 +98,13 @@ const greenlightSystemPrompt = `Tool calls are managed by a permission system ca
 // deriveTranscriptPath constructs the transcript file path for the given agent.
 // For Claude it finds the newest .jsonl in the project dir; for Copilot it
 // finds the newest session dir. Returns "" if it can't be determined.
-func deriveTranscriptPath(agent, sessionID string) string {
+func deriveTranscriptPath(agent, sessionID, cwd string) string {
 	switch agent {
 	case "claude":
 		if sessionID != "" {
-			return deriveClaudeTranscriptPathByID(sessionID)
+			return deriveClaudeTranscriptPathByID(sessionID, cwd)
 		}
-		return deriveClaudeTranscriptPath()
+		return deriveClaudeTranscriptPath(cwd)
 	case "copilot":
 		if sessionID != "" {
 			return deriveCopilotTranscriptPathByID(sessionID)
@@ -112,14 +112,14 @@ func deriveTranscriptPath(agent, sessionID string) string {
 		return deriveCopilotTranscriptPath()
 	case "gemini":
 		if sessionID != "" {
-			return deriveGeminiTranscriptPathByID(sessionID)
+			return deriveGeminiTranscriptPathByID(sessionID, cwd)
 		}
-		return deriveGeminiTranscriptPath()
+		return deriveGeminiTranscriptPath(cwd)
 	case "cursor":
 		if sessionID != "" {
-			return deriveCursorTranscriptPathByID(sessionID)
+			return deriveCursorTranscriptPathByID(sessionID, cwd)
 		}
-		return deriveCursorTranscriptPath()
+		return deriveCursorTranscriptPath(cwd)
 	case "codex":
 		if sessionID != "" {
 			return deriveCodexTranscriptBySentinel(sessionID)
@@ -127,9 +127,9 @@ func deriveTranscriptPath(agent, sessionID string) string {
 		return deriveCodexTranscriptPath()
 	case "pi":
 		if sessionID != "" {
-			return piSessionPath(sessionID)
+			return piSessionPath(sessionID, cwd)
 		}
-		return derivePiTranscriptPath()
+		return derivePiTranscriptPath(cwd)
 	default:
 		return ""
 	}
@@ -137,12 +137,8 @@ func deriveTranscriptPath(agent, sessionID string) string {
 
 // deriveClaudeTranscriptPathByID returns the transcript path for a known session ID.
 // The file may not exist yet (the caller polls until it appears).
-func deriveClaudeTranscriptPathByID(sessionID string) string {
+func deriveClaudeTranscriptPathByID(sessionID, cwd string) string {
 	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	cwd, err := os.Getwd()
 	if err != nil {
 		return ""
 	}
@@ -150,13 +146,8 @@ func deriveClaudeTranscriptPathByID(sessionID string) string {
 	return filepath.Join(home, ".claude", "projects", projHash, sessionID+".jsonl")
 }
 
-func deriveClaudeTranscriptPath() string {
+func deriveClaudeTranscriptPath(cwd string) string {
 	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	// Claude project dir is CWD with "/" replaced by "-"
-	cwd, err := os.Getwd()
 	if err != nil {
 		return ""
 	}
@@ -229,12 +220,8 @@ func deriveCopilotTranscriptPath() string {
 
 // deriveGeminiTranscriptPathByID finds the transcript file whose sessionId
 // JSON field matches the given UUID.
-func deriveGeminiTranscriptPathByID(sessionID string) string {
+func deriveGeminiTranscriptPathByID(sessionID, cwd string) string {
 	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	cwd, err := os.Getwd()
 	if err != nil {
 		return ""
 	}
@@ -256,13 +243,8 @@ func deriveGeminiTranscriptPathByID(sessionID string) string {
 	return ""
 }
 
-func deriveGeminiTranscriptPath() string {
+func deriveGeminiTranscriptPath(cwd string) string {
 	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	// Gemini uses the CWD basename as the project name
-	cwd, err := os.Getwd()
 	if err != nil {
 		return ""
 	}
@@ -310,12 +292,8 @@ func extractGeminiSessionID(path string) string {
 
 // deriveCursorTranscriptPathByID returns the transcript path for a known session UUID.
 // Cursor uses two layouts: <uuid>.jsonl (old) or <uuid>/<uuid>.jsonl (new).
-func deriveCursorTranscriptPathByID(sessionID string) string {
+func deriveCursorTranscriptPathByID(sessionID, cwd string) string {
 	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	cwd, err := os.Getwd()
 	if err != nil {
 		return ""
 	}
@@ -334,16 +312,11 @@ func deriveCursorTranscriptPathByID(sessionID string) string {
 	return ""
 }
 
-func deriveCursorTranscriptPath() string {
+func deriveCursorTranscriptPath(cwd string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	// Cursor project dir uses CWD with "/" replaced by "-"
 	projHash := strings.ReplaceAll(cwd, "/", "-")
 	// Strip leading "-" (from absolute paths like /Users/...)
 	projHash = strings.TrimLeft(projHash, "-")
@@ -465,7 +438,10 @@ func deriveCodexTranscriptPath() string {
 // piSessionPath returns the transcript file path for a Pi session ID,
 // following Pi's convention: $PI_CODING_AGENT_DIR/sessions/<normalized-cwd>/<sessionID>.jsonl
 // PI_CODING_AGENT_DIR defaults to ~/.pi/agent.
-func piSessionPath(sessionID string) string {
+func piSessionPath(sessionID, cwd string) string {
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
 	baseDir := os.Getenv("PI_CODING_AGENT_DIR")
 	if baseDir == "" {
 		home, err := os.UserHomeDir()
@@ -474,10 +450,6 @@ func piSessionPath(sessionID string) string {
 		}
 		baseDir = filepath.Join(home, ".pi", "agent")
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
 	// Pi encodes CWD as: strip leading /, replace /\: with -, wrap in --
 	safePath := strings.TrimLeft(cwd, "/\\")
 	safePath = strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(safePath)
@@ -485,12 +457,8 @@ func piSessionPath(sessionID string) string {
 	return filepath.Join(baseDir, "sessions", safePath, sessionID+".jsonl")
 }
 
-func derivePiTranscriptPath() string {
+func derivePiTranscriptPath(cwd string) string {
 	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	cwd, err := os.Getwd()
 	if err != nil {
 		return ""
 	}

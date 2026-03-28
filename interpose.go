@@ -67,33 +67,31 @@ func formatToolDetail(toolName string, toolInput map[string]interface{}) string 
 
 // startInterposeSock creates a Unix socket listener for interpose permission
 // requests and returns the socket path. The listener is handled in a goroutine.
-// Returns empty string if setup fails.
-func startInterposeSock(relayID, baseURL, deviceID, project, agent string) (string, func()) {
+func startInterposeSock(relayID, agent string) (string, func(), error) {
 	// Unix socket paths are limited to ~104 bytes on macOS, keep it short
 	sockPath := "/tmp/gl-" + relayID[:8] + ".sock"
 
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
-		log.Printf("Interpose socket: failed to create %s: %v", sockPath, err)
-		return "", nil
+		return "", nil, fmt.Errorf("interpose socket %s: %w", sockPath, err)
 	}
 
-	go handleInterposeSock(listener, baseURL, deviceID, project, relayID, agent)
+	go handleInterposeSock(listener, agent)
 
 	cleanup := func() {
 		listener.Close()
 		// os.Remove not needed — listener.Close() removes the socket file
 	}
-	return sockPath, cleanup
+	return sockPath, cleanup, nil
 }
 
-func handleInterposeSock(listener net.Listener, baseURL, deviceID, project, relayID, agent string) {
+func handleInterposeSock(listener net.Listener, agent string) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			return // listener closed
 		}
-		go handleInterposeConn(conn, baseURL, deviceID, project, relayID, agent)
+		go handleInterposeConn(conn, agent)
 	}
 }
 
@@ -159,7 +157,7 @@ func isSafeCommand(cmd string) bool {
 	return false
 }
 
-func handleInterposeConn(conn net.Conn, baseURL, deviceID, project, relayID, agent string) {
+func handleInterposeConn(conn net.Conn, agent string) {
 	defer conn.Close()
 
 	// Try to receive with ancillary data (SCM_RIGHTS for seccomp fd)

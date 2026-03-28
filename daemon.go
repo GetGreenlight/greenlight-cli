@@ -53,6 +53,7 @@ type ipcResponse struct {
 	SessionID string          `json:"session_id,omitempty"`
 	RelayID   string          `json:"relay_id,omitempty"`
 	Message   string          `json:"message,omitempty"`
+	Version   string          `json:"version,omitempty"`
 	Sessions  []sessionInfo   `json:"sessions,omitempty"`
 	History   []sessionRecord `json:"history,omitempty"`
 }
@@ -456,6 +457,19 @@ func (d *Daemon) startDaemonWS() {
 	})
 
 	go d.daemonWS.Run()
+
+	// Wait for the WebSocket to connect before accepting IPC connections,
+	// so the first session_start message is sent over a live connection
+	// rather than queued and drained later.
+	for i := 0; i < 100; i++ {
+		if d.daemonWS.IsConnected() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !d.daemonWS.IsConnected() {
+		log.Printf("daemon: WARNING WebSocket not connected after 5s, proceeding anyway")
+	}
 	log.Printf("daemon: WebSocket started (device %s, session %s)", d.deviceID, d.sessionID)
 }
 

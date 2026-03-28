@@ -85,22 +85,12 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	cmdArgs := setup.Args
 	relayID := setup.RelayID
 
-	// Derive HTTP base URL
-	baseURL, err := serverBaseURL()
-	if err != nil {
-		return nil, err
-	}
-
 	// Register session with the server via daemon WS (no phone approval needed)
-	if d.daemonWS != nil {
-		if err := d.daemonWS.StartSession(relayID, proj, agentServerName(agent), cwd, version); err != nil {
-			return nil, fmt.Errorf("session start failed: %w", err)
-		}
-	} else {
-		// Fallback to HTTP enrollment if daemon WS is not connected
-		if err := enrollSession(baseURL, devID, relayID, proj, agentServerName(agent), cwd, ""); err != nil {
-			return nil, fmt.Errorf("enrollment failed: %w", err)
-		}
+	if d.daemonWS == nil {
+		return nil, fmt.Errorf("daemon WebSocket not connected")
+	}
+	if err := d.daemonWS.StartSession(relayID, proj, agentServerName(agent), cwd, version); err != nil {
+		return nil, fmt.Errorf("session start failed: %w", err)
 	}
 
 	installAgentFiles(agent, relayID)
@@ -126,7 +116,11 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	}
 
 	exportEnvs := buildExportEnvs(devID, relayID, proj, s.bridgePath, agent)
-	command, cmdArgs, interpose := setupInterpose(agent, command, cmdArgs, relayID, baseURL, devID, proj, cwd, exportEnvs)
+	command, cmdArgs, interpose, err := setupInterpose(agent, command, cmdArgs, relayID, cwd, exportEnvs)
+	if err != nil {
+		s.cleanup()
+		return nil, fmt.Errorf("interpose setup failed: %w", err)
+	}
 	s.libPath = interpose.LibPath
 	s.libExtracted = interpose.LibExtracted
 	s.interposeSock = interpose.SockPath
@@ -169,7 +163,7 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	startTime := time.Now()
 	var transcriptCtx context.Context
 	transcriptCtx, s.transcriptCancel = context.WithCancel(context.Background())
-	go startTranscriptStreamer(transcriptCtx, agent, relayID, setup.AgentSessionID, s.bridgePath, startTime)
+	go startTranscriptStreamer(transcriptCtx, agent, relayID, setup.AgentSessionID, s.bridgePath, cwd, startTime)
 
 	// Note: don't start the relay yet — wait until a client attaches
 	// so no PTY output is lost. runRelay() is called from AttachClient.
@@ -315,8 +309,9 @@ func (s *Session) cleanup() {
 	}
 	promptRelay.mu.Unlock()
 
-	// Unregister from daemon's shared WebSocket
+	// Notify server and unregister from daemon's shared WebSocket
 	if s.daemon != nil && s.daemon.daemonWS != nil {
+		s.daemon.daemonWS.EndSession(s.relayID)
 		s.daemon.daemonWS.UnregisterSession(s.relayID)
 	}
 }
