@@ -39,8 +39,8 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(1)
+		runConnect(nil)
+		return
 	}
 
 	switch os.Args[1] {
@@ -61,9 +61,8 @@ func main() {
 	case "help", "--help", "-h":
 		printUsage()
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight: unknown command %q\n\n", os.Args[1])
-		printUsage()
-		os.Exit(1)
+		// Default to connect, allowing flags like --agent, --project, --device-id
+		runConnect(os.Args[1:])
 	}
 }
 
@@ -82,12 +81,15 @@ func printVersion() {
 func printUsage() {
 	fmt.Fprintf(os.Stderr, `%s
 
-Usage: greenlight <command> [flags]
+Usage: greenlight [flags]
+       greenlight <command> [flags]
+
+When no command is given, 'connect' is used by default.
 
 Commands:
   connect    Start an agent session with a remote relay to the Greenlight app
   register   Register a device ID for the Greenlight app
-  agent      Get or set the default agent runtime (claude, codex, copilot, cursor, pi)
+  agent      Get or set the default agent runtime (claude, codex, copilot, cursor, gemini, pi)
   daemon     Manage the background daemon (start, stop, status)
   update     Update greenlight to the latest version
   version    Print version and build settings

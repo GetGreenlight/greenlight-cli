@@ -504,13 +504,13 @@ func runAgent(args []string) {
 		fmt.Fprintf(os.Stderr, "Usage: greenlight agent [name]\n\n")
 		fmt.Fprintf(os.Stderr, "Without arguments, prints the current default agent.\n")
 		fmt.Fprintf(os.Stderr, "With a name, sets the default agent in ~/.greenlight/config.\n\n")
-		fmt.Fprintf(os.Stderr, "Supported agents: claude, codex, copilot, cursor, pi\n")
+		fmt.Fprintf(os.Stderr, "Supported agents: claude, codex, copilot, cursor, gemini, pi\n")
 		os.Exit(0)
 	}
 
 	name := args[0]
 	if !knownAgents[name] {
-		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, codex, copilot, cursor, pi)\n", name)
+		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, codex, copilot, cursor, gemini, pi)\n", name)
 		os.Exit(1)
 	}
 
