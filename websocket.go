@@ -155,6 +155,7 @@ func (c *WSClient) SendText(data []byte) {
 	c.connMu.Unlock()
 
 	if conn == nil {
+		log.Printf("ws: SendText queued (no connection), %d bytes", len(data))
 		c.enqueueText(data)
 		return
 	}

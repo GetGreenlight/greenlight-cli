@@ -32,6 +32,7 @@ type Session struct {
 
 	interposeSock  string
 	interposeClean func()
+	interposeRelay *interposeRelay
 
 	bridgePath      string
 	bridgeDone      chan struct{}
@@ -125,6 +126,7 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	s.libExtracted = interpose.LibExtracted
 	s.interposeSock = interpose.SockPath
 	s.interposeClean = interpose.SockCleanup
+	s.interposeRelay = interpose.Relay
 
 	// Create the relay (PTY only, no per-session WebSocket) in daemon mode
 	r, err := NewDaemon(command, cmdArgs, exportEnvs, cwd, req.Winsize, req.Env)
@@ -155,9 +157,7 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	}
 
 	// Set up prompt relay so interpose can show prompts
-	promptRelay.mu.Lock()
-	promptRelay.r = r
-	promptRelay.mu.Unlock()
+	s.interposeRelay.SetRelay(r)
 
 	// Start transcript streamer
 	startTime := time.Now()
@@ -303,11 +303,9 @@ func (s *Session) cleanup() {
 		os.Remove(s.bridgePath)
 	}
 
-	promptRelay.mu.Lock()
-	if promptRelay.r == s.relay {
-		promptRelay.r = nil
+	if s.interposeRelay != nil {
+		s.interposeRelay.ClearRelay(s.relay)
 	}
-	promptRelay.mu.Unlock()
 
 	// Notify server and unregister from daemon's shared WebSocket
 	if s.daemon != nil && s.daemon.daemonWS != nil {

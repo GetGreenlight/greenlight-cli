@@ -15,11 +15,13 @@ import (
 // as a JSON transcript message. Blocks until done is closed or an error occurs.
 // After done is closed, drains any remaining lines before returning.
 func tailBridge(path string, ws WSConn, done <-chan struct{}, agent string) {
+	log.Printf("bridge: starting tail for %s (agent=%s)", path, agent)
 	// Wait for the bridge file to appear (hook creates it)
 	var f *os.File
 	for {
 		select {
 		case <-done:
+			log.Printf("bridge: done before file appeared: %s", path)
 			return
 		default:
 		}
@@ -31,12 +33,14 @@ func tailBridge(path string, ws WSConn, done <-chan struct{}, agent string) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	defer f.Close()
+	log.Printf("bridge: opened %s", path)
 
 	// Seek to end — no backfill, fresh session
 	f.Seek(0, io.SeekEnd)
 
 	reader := bufio.NewReader(f)
 	var partial string
+	var linesSent int
 	stopping := false
 	for {
 		if stopping {
@@ -79,6 +83,10 @@ func tailBridge(path string, ws WSConn, done <-chan struct{}, agent string) {
 			if fullLine != "" {
 				msg := fmt.Sprintf(`{"type":"transcript","agent":%q,"data":%s}`, agent, fullLine)
 				ws.SendText([]byte(msg))
+				linesSent++
+				if linesSent == 1 {
+					log.Printf("bridge: first transcript line sent (%d bytes)", len(msg))
+				}
 			}
 		} else if line != "" {
 			// Partial line (no newline yet) — buffer it

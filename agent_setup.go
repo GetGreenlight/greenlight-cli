@@ -24,6 +24,7 @@ type InterposeSetup struct {
 	LibExtracted bool
 	SockPath     string
 	SockCleanup  func()
+	Relay        *interposeRelay // per-session relay reference; caller must call SetRelay
 }
 
 // buildAgentCommand constructs the agent binary command, flags, session IDs,
@@ -199,12 +200,13 @@ func setupInterpose(agent, command string, args []string, relayID string, cwd st
 	}
 
 	// Start permission socket for interpose library
-	sockPath, sockCleanup, err := startInterposeSock(relayID, agentServerName(agent))
+	sockPath, sockCleanup, ir, err := startInterposeSock(relayID, agentServerName(agent))
 	if err != nil {
 		return "", nil, nil, err
 	}
 	setup.SockPath = sockPath
 	setup.SockCleanup = sockCleanup
+	setup.Relay = ir
 	exportEnvs["GREENLIGHT_INTERPOSE_SOCK"] = sockPath
 	log.Printf("Interpose socket: %s", sockPath)
 	log.Printf("Interpose library: %s", setup.LibPath)

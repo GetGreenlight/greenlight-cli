@@ -86,17 +86,17 @@ func seccompPermCacheStore(path string) {
 // runSeccompSupervisor receives seccomp notifications for write-mode openat,
 // renameat, and renameat2 syscalls. It reads the path from /proc/<pid>/mem,
 // applies permission checks, and allows or denies each syscall.
-func runSeccompSupervisor(notifFd int, agent string) {
+func runSeccompSupervisor(notifFd int, agent string, ir *interposeRelay) {
 	log.Printf("Seccomp supervisor started on fd %d", notifFd)
 
 	// Lock OS thread — the blocking ioctl needs a dedicated thread
 	// so Go's runtime scheduler isn't starved.
 	go func() {
-		seccompSupervisorLoop(notifFd, agent)
+		seccompSupervisorLoop(notifFd, agent, ir)
 	}()
 }
 
-func seccompSupervisorLoop(notifFd int, agent string) {
+func seccompSupervisorLoop(notifFd int, agent string, ir *interposeRelay) {
 	for {
 		var notif seccompNotif
 		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
@@ -112,7 +112,7 @@ func seccompSupervisorLoop(notifFd int, agent string) {
 			continue
 		}
 
-		allow := handleSeccompNotif(notifFd, &notif, agent)
+		allow := handleSeccompNotif(notifFd, &notif, agent, ir)
 
 		var resp seccompNotifResp
 		resp.ID = notif.ID
@@ -134,18 +134,18 @@ func seccompSupervisorLoop(notifFd int, agent string) {
 }
 
 // handleSeccompNotif processes a single notification. Returns true to allow.
-func handleSeccompNotif(notifFd int, notif *seccompNotif, agent string) bool {
+func handleSeccompNotif(notifFd int, notif *seccompNotif, agent string, ir *interposeRelay) bool {
 	switch int(notif.Data.Nr) {
 	case sysOpenat:
-		return handleSeccompOpenat(notifFd, notif, agent)
+		return handleSeccompOpenat(notifFd, notif, agent, ir)
 	case sysRenameat, sysRenameat2:
-		return handleSeccompRename(notifFd, notif, agent)
+		return handleSeccompRename(notifFd, notif, agent, ir)
 	default:
 		return true
 	}
 }
 
-func handleSeccompOpenat(notifFd int, notif *seccompNotif, agent string) bool {
+func handleSeccompOpenat(notifFd int, notif *seccompNotif, agent string, ir *interposeRelay) bool {
 	pid := notif.PID
 	dirfd := int32(notif.Data.Args[0])
 	pathPtr := notif.Data.Args[1]
@@ -202,10 +202,10 @@ func handleSeccompOpenat(notifFd int, notif *seccompNotif, agent string) bool {
 
 	log.Printf("Seccomp: %s %s (pid %d)", toolName, displayPath, pid)
 
-	return seccompRequestPermission(toolName, toolInput, displayPath, agent)
+	return seccompRequestPermission(toolName, toolInput, displayPath, agent, ir)
 }
 
-func handleSeccompRename(notifFd int, notif *seccompNotif, agent string) bool {
+func handleSeccompRename(notifFd int, notif *seccompNotif, agent string, ir *interposeRelay) bool {
 	pid := notif.PID
 	newdirfd := int32(notif.Data.Args[2])
 	newpathPtr := notif.Data.Args[3]
@@ -268,15 +268,13 @@ func handleSeccompRename(notifFd int, notif *seccompNotif, agent string) bool {
 
 	log.Printf("Seccomp: rename → %s %s (pid %d)", toolName, newPath, pid)
 
-	return seccompRequestPermission(toolName, toolInput, newPath, agent)
+	return seccompRequestPermission(toolName, toolInput, newPath, agent, ir)
 }
 
 // seccompRequestPermission sends a permission request through the same
 // racePermission path used by LD_PRELOAD interpose requests.
-func seccompRequestPermission(toolName string, toolInput map[string]interface{}, path, agent string) bool {
-	promptRelay.mu.Lock()
-	relay := promptRelay.r
-	promptRelay.mu.Unlock()
+func seccompRequestPermission(toolName string, toolInput map[string]interface{}, path, agent string, ir *interposeRelay) bool {
+	relay := ir.GetRelay()
 
 	if relay == nil || relay.wsConn == nil {
 		log.Printf("Seccomp: no relay available, denying %s %s", toolName, path)

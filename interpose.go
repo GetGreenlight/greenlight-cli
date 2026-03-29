@@ -39,11 +39,32 @@ type interposeResponse struct {
 }
 
 
-// promptRelay holds a reference to the active Relay for terminal permission prompts.
-// Set by runConnect after the relay is created, cleared on exit.
-var promptRelay struct {
+// interposeRelay is a per-socket reference to the session's Relay.
+// Created by startInterposeSock, set via SetRelay after the Relay is created.
+type interposeRelay struct {
 	mu sync.Mutex
 	r  *Relay
+}
+
+func (ir *interposeRelay) SetRelay(r *Relay) {
+	ir.mu.Lock()
+	ir.r = r
+	ir.mu.Unlock()
+}
+
+func (ir *interposeRelay) ClearRelay(r *Relay) {
+	ir.mu.Lock()
+	if ir.r == r {
+		ir.r = nil
+	}
+	ir.mu.Unlock()
+}
+
+func (ir *interposeRelay) GetRelay() *Relay {
+	ir.mu.Lock()
+	r := ir.r
+	ir.mu.Unlock()
+	return r
 }
 
 // formatToolDetail returns a human-readable summary of the tool input for display.
@@ -66,32 +87,45 @@ func formatToolDetail(toolName string, toolInput map[string]interface{}) string 
 }
 
 // startInterposeSock creates a Unix socket listener for interpose permission
-// requests and returns the socket path. The listener is handled in a goroutine.
-func startInterposeSock(relayID, agent string) (string, func(), error) {
+// requests and returns the socket path and a per-session relay reference.
+// The caller must call SetRelay on the returned interposeRelay once the
+// Relay is created.
+func startInterposeSock(relayID, agent string) (string, func(), *interposeRelay, error) {
 	// Unix socket paths are limited to ~104 bytes on macOS, keep it short
 	sockPath := "/tmp/gl-" + relayID[:8] + ".sock"
 
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("interpose socket %s: %w", sockPath, err)
+		// If the socket file exists but nobody is listening, it's stale — remove and retry.
+		if conn, dialErr := net.DialTimeout("unix", sockPath, 500*time.Millisecond); dialErr != nil {
+			os.Remove(sockPath)
+			listener, err = net.Listen("unix", sockPath)
+		} else {
+			conn.Close()
+			// Socket is live — another session owns it
+		}
+		if err != nil {
+			return "", nil, nil, fmt.Errorf("interpose socket %s: %w", sockPath, err)
+		}
 	}
 
-	go handleInterposeSock(listener, agent)
+	ir := &interposeRelay{}
+	go handleInterposeSock(listener, agent, ir)
 
 	cleanup := func() {
 		listener.Close()
 		// os.Remove not needed — listener.Close() removes the socket file
 	}
-	return sockPath, cleanup, nil
+	return sockPath, cleanup, ir, nil
 }
 
-func handleInterposeSock(listener net.Listener, agent string) {
+func handleInterposeSock(listener net.Listener, agent string, ir *interposeRelay) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			return // listener closed
 		}
-		go handleInterposeConn(conn, agent)
+		go handleInterposeConn(conn, agent, ir)
 	}
 }
 
@@ -157,7 +191,7 @@ func isSafeCommand(cmd string) bool {
 	return false
 }
 
-func handleInterposeConn(conn net.Conn, agent string) {
+func handleInterposeConn(conn net.Conn, agent string, ir *interposeRelay) {
 	defer conn.Close()
 
 	// Try to receive with ancillary data (SCM_RIGHTS for seccomp fd)
@@ -177,7 +211,7 @@ func handleInterposeConn(conn net.Conn, agent string) {
 	// Handle seccomp fd handoff (Linux only)
 	if req.Type == "seccomp_fd" && seccompFd >= 0 {
 		log.Printf("Interpose: received seccomp notification fd %d", seccompFd)
-		go runSeccompSupervisor(seccompFd, agent)
+		go runSeccompSupervisor(seccompFd, agent, ir)
 		return
 	}
 
@@ -206,9 +240,7 @@ func handleInterposeConn(conn net.Conn, agent string) {
 	}
 
 	// Get the relay for WebSocket and terminal prompt access
-	promptRelay.mu.Lock()
-	relay := promptRelay.r
-	promptRelay.mu.Unlock()
+	relay := ir.GetRelay()
 
 	if relay == nil || relay.wsConn == nil {
 		log.Printf("Interpose: no relay/websocket available, denying")
@@ -216,7 +248,10 @@ func handleInterposeConn(conn net.Conn, agent string) {
 		return
 	}
 
-	respond(conn, racePermission(relay, toolName, toolInput, payload))
+	resp := racePermission(relay, toolName, toolInput, payload)
+	log.Printf("Interpose: %s %s → %v", toolName, interposeRequestSummary(req),
+		map[bool]string{true: "allow", false: "deny"}[resp.Allow])
+	respond(conn, resp)
 }
 
 // wsPermission sends a permission request over the WebSocket and waits for
@@ -280,12 +315,13 @@ func racePermission(relay *Relay, toolName string, toolInput map[string]interfac
 	defer wsCancel()
 
 	go func() {
+		log.Printf("Interpose: sending WS permission request %s for %s", requestID, toolName)
 		r, err := wsPermission(wsCtx, ws, requestID, payload)
 		if err != nil {
 			if wsCtx.Err() != nil {
 				return // cancelled by terminal
 			}
-			log.Printf("Interpose: WS permission error: %v", err)
+			log.Printf("Interpose: WS permission error for %s (req %s): %v", toolName, requestID, err)
 			ch <- result{resp: interposeResponse{Allow: false}, source: "server"}
 			return
 		}
@@ -326,7 +362,8 @@ func racePermission(relay *Relay, toolName string, toolInput map[string]interfac
 			if promptCtx.Err() != nil {
 				return // ctx cancelled, server won
 			}
-			log.Printf("Interpose: ShowPrompt error: %v", err)
+			log.Printf("Interpose: ShowPrompt error for %s (req %s): %v (daemon=%v)",
+				toolName, requestID, err, relay.daemonMode)
 			return
 		}
 		outcome := terminalOutcomes[choice]
