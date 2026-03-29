@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -93,6 +94,12 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 	}
 	defer restoreTerminal(origTermios)
 
+	// Mutex for writing frames to the daemon connection. Multiple
+	// goroutines write (stdin, signals, query responses) and writeFrame
+	// does two Write() calls per frame (header + payload) which can
+	// interleave without serialization.
+	var connMu sync.Mutex
+
 	// Handle SIGWINCH — forward resize to daemon
 	winchCh := make(chan os.Signal, 1)
 	signal.Notify(winchCh, syscall.SIGWINCH)
@@ -100,7 +107,9 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 		for range winchCh {
 			if ws, err := getWinsize(os.Stdin.Fd()); err == nil {
 				resizeData, _ := json.Marshal(ipcWinsize{Rows: ws.Row, Cols: ws.Col})
+				connMu.Lock()
 				writeFrame(conn, frameResize, resizeData)
+				connMu.Unlock()
 			}
 		}
 	}()
@@ -115,7 +124,9 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 				sigName = "INT"
 			}
 			sigData, _ := json.Marshal(map[string]string{"signal": sigName})
+			connMu.Lock()
 			writeFrame(conn, frameSignal, sigData)
+			connMu.Unlock()
 		}
 	}()
 
@@ -125,17 +136,117 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 	var promptActive atomic.Bool
 
 	// Stdin → daemon (send user keystrokes as frameStdin, or framePromptResp during prompts)
+	//
+	// Terminal query responses (DA1 \033[?1;2c, OSC 10, etc.) arrive on
+	// stdin as escape sequences. We buffer escape sequence bytes and only
+	// forward or absorb when the sequence completes. This prevents partial
+	// sequences from reaching the agent. We also filter prompt keystrokes
+	// from escape sequences to prevent auto-approval.
 	go func() {
-		buf := make([]byte, 1) // single byte for prompt keystroke detection
+		buf := make([]byte, 1)
+
+		// Escape sequence state — tracked on every byte.
+		inEscape := false
+		inCSI := false
+		inOSC := false
+		prevWasEsc := false
+		csiPrefix := byte(0)  // first byte after \033[ if ?/>/=
+		oscCmd := 0            // OSC command number (10, 11, 12, etc.)
+		oscCmdDone := false    // true once ';' seen (stop accumulating digits)
+		var seqBuf []byte      // buffered bytes for current escape sequence
+
 		for {
 			n, err := os.Stdin.Read(buf)
 			if n > 0 {
-				if promptActive.Load() && buf[0] >= '1' && buf[0] <= '4' {
+				b := buf[0]
+
+				// Track escape sequence state.
+				inSeq := false
+				seqDone := false    // sequence just completed this byte
+				isResponse := false // this sequence is a terminal response
+
+				if inCSI {
+					inSeq = true
+					if b >= 0x40 && b <= 0x7E { // final byte
+						seqDone = true
+						if b == 'c' && (csiPrefix == '?' || csiPrefix == '>') {
+							isResponse = true
+						}
+						inCSI = false
+						inEscape = false
+					} else if csiPrefix == 0 && (b == '?' || b == '>' || b == '=') {
+						csiPrefix = b
+					}
+				} else if inOSC {
+					inSeq = true
+					terminated := false
+					if b == 0x07 { // BEL terminates OSC
+						terminated = true
+					} else if prevWasEsc && b == '\\' { // ESC \ (ST)
+						terminated = true
+					}
+					prevWasEsc = (b == 0x1b)
+					if terminated {
+						seqDone = true
+						if oscCmd == 10 || oscCmd == 11 || oscCmd == 12 {
+							isResponse = true
+						}
+						inOSC = false
+						inEscape = false
+					} else {
+						// Accumulate OSC command number (before ';')
+						if !oscCmdDone && b >= '0' && b <= '9' {
+							oscCmd = oscCmd*10 + int(b-'0')
+						} else if b == ';' {
+							oscCmdDone = true
+						}
+					}
+				} else if inEscape {
+					inSeq = true
+					switch b {
+					case '[':
+						inCSI = true
+						csiPrefix = 0
+					case ']':
+						inOSC = true
+						oscCmd = 0
+						oscCmdDone = false
+					default:
+						// Two-byte escape — sequence done
+						seqDone = true
+						inEscape = false
+					}
+				} else if b == 0x1b {
+					inEscape = true
+					prevWasEsc = false
+					inSeq = true
+					seqBuf = seqBuf[:0] // start new sequence
+				}
+
+				if inSeq {
+					// Buffer escape sequence bytes
+					seqBuf = append(seqBuf, b)
+
+					if seqDone {
+						if !isResponse {
+							// Not a terminal response — forward buffered sequence
+							connMu.Lock()
+							writeFrame(conn, frameStdin, seqBuf)
+							connMu.Unlock()
+						}
+						// Response sequences are silently dropped
+						seqBuf = seqBuf[:0]
+					}
+				} else if promptActive.Load() && b >= '1' && b <= '4' {
 					promptActive.Store(false)
 					clearPrompt()
+					connMu.Lock()
 					writeFrame(conn, framePromptResp, buf[:1])
+					connMu.Unlock()
 				} else {
+					connMu.Lock()
 					writeFrame(conn, frameStdin, buf[:n])
+					connMu.Unlock()
 				}
 			}
 			if err != nil {
@@ -289,3 +400,4 @@ func restoreTerminal(orig *syscall.Termios) {
 		uintptr(ptrOf(orig)),
 	)
 }
+

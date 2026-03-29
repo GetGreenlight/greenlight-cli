@@ -351,19 +351,13 @@ func racePermission(relay *Relay, toolName string, toolInput map[string]interfac
 	var terminalOutcomes = []string{"allow", "always_allow", "deny", "deny_stop"}
 
 	go func() {
-		var choice int
-		var err error
-		if relay.daemonMode {
-			choice, err = relay.ShowPromptDaemon(promptCtx, toolName, detail)
-		} else {
-			choice, err = relay.ShowPrompt(promptCtx, toolName, detail)
-		}
+		choice, err := relay.ShowPromptDaemon(promptCtx, toolName, detail)
 		if err != nil {
 			if promptCtx.Err() != nil {
 				return // ctx cancelled, server won
 			}
-			log.Printf("Interpose: ShowPrompt error for %s (req %s): %v (daemon=%v)",
-				toolName, requestID, err, relay.daemonMode)
+			log.Printf("Interpose: ShowPromptDaemon error for %s (req %s): %v",
+				toolName, requestID, err)
 			return
 		}
 		outcome := terminalOutcomes[choice]
