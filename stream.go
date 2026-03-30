@@ -23,6 +23,10 @@ func runStream(args []string) {
 	bridge := fs.String("bridge", "", "Bridge file path")
 	agentFlag := fs.String("agent", "", "Agent runtime (claude, gemini)")
 	fs.Parse(args)
+	if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "greenlight stream: unexpected argument %q\n", fs.Arg(0))
+		os.Exit(1)
+	}
 
 	if *transcriptPath == "" || *sessionID == "" || *bridge == "" {
 		fmt.Fprintf(os.Stderr, "greenlight stream: missing required flags (--transcript, --session-id, --bridge)\n")

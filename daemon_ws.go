@@ -4,6 +4,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -54,6 +56,13 @@ func NewDaemonWS(url, deviceID string) *DaemonWS {
 
 	d.ws.controlFunc = func(data []byte) {
 		d.routeControlFrame(data)
+	}
+
+	// Catch any text frame not matched by routePermissionResponse.
+	// The server tags phone input with relay_id so we can route to
+	// the correct session's PTY.
+	d.ws.textFrameFunc = func(data []byte) bool {
+		return d.handleTextFrame(data)
 	}
 
 	return d
@@ -188,6 +197,96 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 	default:
 		log.Printf("daemon-ws: unknown control message: %s", msg.Type)
 	}
+}
+
+// handleTextFrame handles text frames not matched by routePermissionResponse.
+// It tries to parse JSON with a relay_id and route the content as PTY input
+// to the matching session. Returns true if the frame was consumed.
+func (d *DaemonWS) handleTextFrame(data []byte) bool {
+	if len(data) == 0 || data[0] != '{' {
+		return false
+	}
+
+	var msg struct {
+		Type    string `json:"type"`
+		RelayID string `json:"relay_id"`
+		Text    string `json:"text"`
+		Data    string `json:"data"`
+	}
+	if json.Unmarshal(data, &msg) != nil || msg.RelayID == "" {
+		return false
+	}
+
+	d.mu.RLock()
+	sw := d.sessions[msg.RelayID]
+	d.mu.RUnlock()
+	if sw == nil || sw.injectFunc == nil {
+		log.Printf("daemon-ws: text frame for unknown session %s", msg.RelayID)
+		return false
+	}
+
+	// Extract text content — server may use "text" or "data" field.
+	content := msg.Text
+	if content == "" {
+		content = msg.Data
+	}
+	if content == "" {
+		log.Printf("daemon-ws: text frame for %s has no text/data field", msg.RelayID)
+		return true // consumed but nothing to inject
+	}
+
+	// The server base64-encodes the text for the daemon WebSocket.
+	// Decode it before injecting into the PTY.
+	decoded, err := base64.StdEncoding.DecodeString(content)
+	if err != nil {
+		// Not base64 — use as-is (plain text fallback).
+		decoded = []byte(content)
+	}
+
+	// The server wraps both input and control messages as type "binary".
+	// After decoding, check if the payload is a known control message
+	// (e.g. {"type":"kill"}) and route it instead of injecting as text.
+	if len(decoded) > 0 && decoded[0] == '{' {
+		var ctrl struct{ Type string `json:"type"` }
+		if json.Unmarshal(decoded, &ctrl) == nil {
+			switch ctrl.Type {
+			case "kill", "wake", "session_history", "session_transcript":
+				var full map[string]interface{}
+				if json.Unmarshal(decoded, &full) == nil {
+					if _, ok := full["relay_id"]; !ok {
+						full["relay_id"] = msg.RelayID
+					}
+					if tagged, err := json.Marshal(full); err == nil {
+						d.routeControlFrame(tagged)
+						return true
+					}
+				}
+			}
+		}
+	}
+
+	// Convert \n to \r for raw PTY mode (Enter = \r, not \n).
+	input := bytes.ReplaceAll(decoded, []byte{'\n'}, []byte{'\r'})
+
+	// Strip trailing \r — send it separately after a brief delay so TUI
+	// apps don't treat the whole thing as a paste.
+	text := bytes.TrimRight(input, "\r")
+	needsSubmit := len(text) < len(input) || len(text) > 0
+
+	if len(text) > 0 {
+		if err := sw.injectFunc(text); err != nil {
+			log.Printf("daemon-ws: inject error for %s: %v", msg.RelayID, err)
+		}
+	}
+
+	if needsSubmit {
+		time.Sleep(50 * time.Millisecond)
+		if err := sw.injectFunc([]byte{'\r'}); err != nil {
+			log.Printf("daemon-ws: inject error for %s: %v", msg.RelayID, err)
+		}
+	}
+
+	return true
 }
 
 // handleSessionHistory loads persisted session records and sends them back to the server.

@@ -25,6 +25,10 @@ func runConnect(args []string) {
 	project := fs.String("project", "", "Project name (overrides GREENLIGHT_PROJECT env and config file)")
 	agentFlag := fs.String("agent", "", "Agent runtime: claude, codex, copilot, cursor, gemini, pi (overrides GREENLIGHT_AGENT env and config file)")
 	fs.Parse(args)
+	if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "greenlight connect: unexpected argument %q\nRun 'greenlight connect --help' for usage.\n", fs.Arg(0))
+		os.Exit(1)
+	}
 
 	if wsURL == "" {
 		fmt.Fprintf(os.Stderr, "greenlight: no relay server URL configured (binary must be built with -ldflags)\n")

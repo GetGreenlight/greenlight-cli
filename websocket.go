@@ -36,7 +36,8 @@ type WSClient struct {
 	mode        WSMode
 	inject      func([]byte) error
 	killFunc    func()
-	controlFunc func([]byte) // optional handler for binary control messages
+	controlFunc    func([]byte) // optional handler for binary control messages
+	textFrameFunc  func([]byte) bool // optional handler for unrouted text frames; returns true if consumed
 
 	done chan struct{}
 	wg   sync.WaitGroup
@@ -398,7 +399,13 @@ func (c *WSClient) connectAndRead() error {
 			continue
 		}
 
-		if len(data) > 0 && c.mode != WSModeW {
+		// Let the text frame handler try first (used by daemon WS to
+		// route input to the correct session by relay_id).
+		if c.textFrameFunc != nil && c.textFrameFunc(data) {
+			continue
+		}
+
+		if len(data) > 0 && c.mode != WSModeW && c.inject != nil {
 			// In raw mode, Enter is \r (0x0D), not \n (0x0A).
 			data = bytes.ReplaceAll(data, []byte{'\n'}, []byte{'\r'})
 

@@ -29,6 +29,10 @@ func runUpdate(args []string) {
 	check := fs.Bool("check", false, "Check for updates without downloading")
 	force := fs.Bool("force", false, "Skip confirmation for active sessions")
 	fs.Parse(args)
+	if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "greenlight update: unexpected argument %q\nRun 'greenlight update --help' for usage.\n", fs.Arg(0))
+		os.Exit(1)
+	}
 
 	currentVersion := version
 	if currentVersion == "" {

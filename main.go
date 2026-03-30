@@ -61,7 +61,12 @@ func main() {
 	case "help", "--help", "-h":
 		printUsage()
 	default:
-		// Default to connect, allowing flags like --agent, --project, --device-id
+		// If it looks like a subcommand (no leading dash), it's an error.
+		// Otherwise fall through to connect for flags like --agent.
+		if len(os.Args[1]) > 0 && os.Args[1][0] != '-' {
+			fmt.Fprintf(os.Stderr, "greenlight: unknown command %q\nRun 'greenlight help' for usage.\n", os.Args[1])
+			os.Exit(1)
+		}
 		runConnect(os.Args[1:])
 	}
 }
