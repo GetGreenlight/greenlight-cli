@@ -104,12 +104,11 @@ func seccompSupervisorLoop(notifFd int, agent string, ir *interposeRelay) {
 			uintptr(seccompIoctlNotifRecv),
 			uintptr(unsafe.Pointer(&notif)))
 		if errno != 0 {
-			if errno == syscall.EBADF || errno == syscall.ENODEV {
-				log.Printf("Seccomp supervisor: fd closed, exiting")
-				return
+			if errno == syscall.EINTR {
+				continue
 			}
-			log.Printf("Seccomp supervisor: recv error: %v", errno)
-			continue
+			log.Printf("Seccomp supervisor: recv error: %v, exiting", errno)
+			return
 		}
 
 		allow := handleSeccompNotif(notifFd, &notif, agent, ir)
