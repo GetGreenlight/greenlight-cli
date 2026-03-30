@@ -242,7 +242,11 @@ func (s *Session) AttachClient(conn net.Conn) {
 		case frameResize:
 			var ws ipcWinsize
 			if json.Unmarshal(payload, &ws) == nil {
-				winsize := &Winsize{Row: ws.Rows, Col: ws.Cols}
+				rows := ws.Rows
+				if rows > promptHeight {
+					rows -= promptHeight
+				}
+				winsize := &Winsize{Row: rows, Col: ws.Cols}
 				setWinsize(s.relay.master.Fd(), winsize)
 			}
 
@@ -323,9 +327,15 @@ func NewDaemon(command string, args []string, exportEnvs map[string]string, cwd 
 		return nil, fmt.Errorf("openPTY: %w", err)
 	}
 
-	// Set initial window size if provided
+	// Set initial window size if provided.
+	// Reserve promptHeight rows at the bottom of the client terminal for
+	// permission prompts so the agent never renders into that area.
 	if winsize != nil {
-		ws := &Winsize{Row: winsize.Rows, Col: winsize.Cols}
+		rows := winsize.Rows
+		if rows > promptHeight {
+			rows -= promptHeight
+		}
+		ws := &Winsize{Row: rows, Col: winsize.Cols}
 		setWinsize(master.Fd(), ws)
 	}
 

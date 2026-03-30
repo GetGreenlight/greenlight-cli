@@ -92,13 +92,30 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 		fmt.Fprintf(os.Stderr, "greenlight: failed to set raw mode: %v\n", err)
 		os.Exit(1)
 	}
-	defer restoreTerminal(origTermios)
+	defer func() {
+		resetScrollRegion()
+		restoreTerminal(origTermios)
+	}()
+
+	// Clear screen and reserve the bottom promptHeight rows for permission
+	// prompts by setting a scroll region that confines agent output above them.
+	if ws, err := getWinsize(os.Stdin.Fd()); err == nil && ws.Row > promptHeight {
+		fmt.Fprintf(os.Stdout, "\033[2J\033[H\033[1;%dr", ws.Row-promptHeight)
+	}
 
 	// Mutex for writing frames to the daemon connection. Multiple
 	// goroutines write (stdin, signals, query responses) and writeFrame
 	// does two Write() calls per frame (header + payload) which can
 	// interleave without serialization.
 	var connMu sync.Mutex
+
+	// promptActive is set when a permission prompt is showing.
+	// The stdin goroutine checks this to route keystrokes to promptResp
+	// instead of stdin frames.
+	var promptActive atomic.Bool
+
+	// Cache last prompt content for redraw on resize.
+	var lastPromptTool, lastPromptDetail string
 
 	// Handle SIGWINCH — forward resize to daemon
 	winchCh := make(chan os.Signal, 1)
@@ -110,6 +127,14 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 				connMu.Lock()
 				writeFrame(conn, frameResize, resizeData)
 				connMu.Unlock()
+				// Update scroll region to match new terminal size.
+				if ws.Row > promptHeight {
+					fmt.Fprintf(os.Stdout, "\033[1;%dr", ws.Row-promptHeight)
+				}
+				// Redraw prompt if active.
+				if promptActive.Load() {
+					drawPrompt(lastPromptTool, lastPromptDetail)
+				}
 			}
 		}
 	}()
@@ -129,11 +154,6 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 			connMu.Unlock()
 		}
 	}()
-
-	// promptActive is set when a permission prompt is showing.
-	// The stdin goroutine checks this to route keystrokes to promptResp
-	// instead of stdin frames.
-	var promptActive atomic.Bool
 
 	// Stdin → daemon (send user keystrokes as frameStdin, or framePromptResp during prompts)
 	//
@@ -277,6 +297,8 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 				Detail   string `json:"detail"`
 			}
 			if json.Unmarshal(payload, &prompt) == nil {
+				lastPromptTool = prompt.ToolName
+				lastPromptDetail = prompt.Detail
 				promptActive.Store(true)
 				drawPrompt(prompt.ToolName, prompt.Detail)
 			}
@@ -302,6 +324,7 @@ done:
 
 	// Restore terminal before exiting (defer handles the normal return path,
 	// but os.Exit skips defers so we restore explicitly here too)
+	resetScrollRegion()
 	restoreTerminal(origTermios)
 
 	if exitCode != 0 {
@@ -311,8 +334,9 @@ done:
 
 const promptHeight uint16 = 4
 
-// drawPrompt draws a permission prompt at the bottom of the terminal.
-// The stdin goroutine handles input; clearPrompt removes the UI.
+// drawPrompt draws a permission prompt in the reserved area below the
+// scroll region. The scroll region is set once at session start and on
+// resize, so this function only writes into the reserved rows.
 func drawPrompt(toolName, detail string) {
 	ws, err := getWinsize(os.Stdin.Fd())
 	if err != nil || ws.Row < 10 {
@@ -320,6 +344,9 @@ func drawPrompt(toolName, detail string) {
 	}
 
 	agentRows := ws.Row - promptHeight
+
+	// Save cursor, draw prompt in the reserved area, then restore cursor.
+	fmt.Fprintf(os.Stdout, "\0337") // DECSC
 	sep := strings.Repeat("─", int(ws.Col))
 	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K\033[2m%s\033[0m", agentRows+1, sep)
 
@@ -335,18 +362,45 @@ func drawPrompt(toolName, detail string) {
 	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K%s", agentRows+2, line)
 	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K [1] Allow  [2] Always allow  [3] Deny  [4] Deny & stop", agentRows+3)
 	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K Choice: ", agentRows+4)
+	fmt.Fprintf(os.Stdout, "\0338") // DECRC
 }
 
-// clearPrompt removes the permission prompt from the terminal.
+// clearPrompt clears the reserved prompt area below the scroll region.
+// The scroll region itself is not modified — it stays permanently set.
 func clearPrompt() {
 	ws, err := getWinsize(os.Stdin.Fd())
 	if err != nil {
 		return
 	}
 	agentRows := ws.Row - promptHeight
+	fmt.Fprintf(os.Stdout, "\0337") // DECSC
 	for i := uint16(0); i < promptHeight; i++ {
 		fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K", agentRows+1+i)
 	}
+	fmt.Fprintf(os.Stdout, "\0338") // DECRC
+}
+
+// resetScrollRegion moves the cursor below the agent scroll region, clears the
+// reserved prompt area, and resets the scroll region to full terminal. This
+// preserves the agent's exit output so it remains visible after greenlight exits.
+func resetScrollRegion() {
+	ws, err := getWinsize(os.Stdin.Fd())
+	if err != nil {
+		fmt.Fprintf(os.Stdout, "\033[r")
+		return
+	}
+	agentRows := ws.Row - promptHeight
+	// Clear the reserved prompt area.
+	for i := uint16(0); i < promptHeight; i++ {
+		fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K", agentRows+1+i)
+	}
+	// Move cursor to just below the agent area so the shell prompt
+	// appears after the agent's output.
+	fmt.Fprintf(os.Stdout, "\033[%d;1H", agentRows+1)
+	// Reset scroll region.
+	fmt.Fprintf(os.Stdout, "\033[r")
+	// Re-position cursor after reset (some terminals move cursor on DECSTBM reset).
+	fmt.Fprintf(os.Stdout, "\033[%d;1H", agentRows+1)
 }
 
 // setRawTerminal puts os.Stdin into raw mode and returns the original termios
