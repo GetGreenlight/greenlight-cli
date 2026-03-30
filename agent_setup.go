@@ -67,6 +67,8 @@ func buildAgentCommand(agent, resume string) (*AgentSetup, error) {
 		}
 	case "cursor":
 		cmdArgs = append(cmdArgs, "--yolo")
+	case "gemini":
+		cmdArgs = append(cmdArgs, "--yolo")
 	case "codex":
 		cmdArgs = append(cmdArgs, "--dangerously-bypass-approvals-and-sandbox")
 	case "claude":
@@ -136,14 +138,8 @@ func resolveDeviceAndProject(deviceID, project, cwd string) (string, string, err
 	return devID, proj, nil
 }
 
-// installAgentFiles installs agent-specific configuration files (gemini policy,
-// instruction files for agents that use them).
+// installAgentFiles installs agent-specific instruction files for agents that use them.
 func installAgentFiles(agent, relayID string) {
-	if agent == "gemini" {
-		if err := installGeminiPolicy(); err != nil {
-			log.Printf("Warning: failed to install gemini policy: %v", err)
-		}
-	}
 	if agent == "gemini" || agent == "copilot" || agent == "cursor" || agent == "codex" {
 		if err := installGreenlightInstructions(agent, relayID); err != nil {
 			log.Printf("Warning: failed to install agent instructions: %v", err)

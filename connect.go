@@ -200,18 +200,14 @@ func writeConnectPid(relayID, agent, cwd string) string {
 	return p
 }
 
-// cleanupAgentFiles removes agent-specific files (e.g. gemini policy) if no
-// other greenlight connect sessions are active for the same agent and project dir.
+// cleanupAgentFiles removes agent-specific files if no other greenlight
+// connect sessions are active for the same agent and project dir.
 func cleanupAgentFiles(agent, cwd string) {
 	if hasOtherSessions(agent, cwd) {
 		return
 	}
 	switch agent {
 	case "gemini":
-		policyPath := filepath.Join(cwd, ".gemini", "policies", "greenlight.toml")
-		if err := os.Remove(policyPath); err == nil {
-			log.Printf("Removed gemini policy %s", policyPath)
-		}
 		removeGreenlightInstructions(filepath.Join(cwd, "GEMINI.md"))
 	case "copilot":
 		removeGreenlightInstructions(filepath.Join(cwd, ".github", "copilot-instructions.md"))

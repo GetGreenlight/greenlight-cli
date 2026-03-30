@@ -9,30 +9,6 @@ import (
 	"strings"
 )
 
-// installGeminiPolicy creates a policy file that auto-approves all tools,
-// letting interpose handle permissions instead of the gemini CLI's built-in prompt.
-func installGeminiPolicy() error {
-	policyDir := filepath.Join(".gemini", "policies")
-	if err := os.MkdirAll(policyDir, 0755); err != nil {
-		return err
-	}
-
-	policyPath := filepath.Join(policyDir, "greenlight.toml")
-
-	policy := `# Greenlight: auto-approve tools so interpose handles permissions
-[[rule]]
-toolName = "*"
-decision = "allow"
-priority = 999
-`
-	if err := os.WriteFile(policyPath, []byte(policy), 0644); err != nil {
-		return err
-	}
-
-	log.Printf("Installed gemini policy in %s", policyPath)
-	return nil
-}
-
 // installGreenlightInstructions creates an agent-specific instruction file
 // that teaches the agent how to interpret [GREENLIGHT] permission denial messages.
 // For codex, relayID is embedded as a sentinel so we can match the transcript
