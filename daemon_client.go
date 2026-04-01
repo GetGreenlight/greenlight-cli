@@ -93,14 +93,18 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 		os.Exit(1)
 	}
 	defer func() {
-		resetScrollRegion()
+		stdoutMu.Lock()
+		resetScrollRegionLocked()
+		stdoutMu.Unlock()
 		restoreTerminal(origTermios)
 	}()
 
 	// Clear screen and reserve the bottom promptHeight rows for permission
 	// prompts by setting a scroll region that confines agent output above them.
 	if ws, err := getWinsize(os.Stdin.Fd()); err == nil && ws.Row > promptHeight {
+		stdoutMu.Lock()
 		fmt.Fprintf(os.Stdout, "\033[2J\033[H\033[1;%dr", ws.Row-promptHeight)
+		stdoutMu.Unlock()
 	}
 
 	// Mutex for writing frames to the daemon connection. Multiple
@@ -127,14 +131,17 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 				connMu.Lock()
 				writeFrame(conn, frameResize, resizeData)
 				connMu.Unlock()
-				// Update scroll region to match new terminal size.
+				// Update scroll region and redraw prompt under stdoutMu
+				// to prevent interleaving with agent output frames.
+				stdoutMu.Lock()
 				if ws.Row > promptHeight {
-					fmt.Fprintf(os.Stdout, "\033[1;%dr", ws.Row-promptHeight)
+					// DECSTBM moves cursor to home — save/restore around it.
+					fmt.Fprintf(os.Stdout, "\0337\033[1;%dr\0338", ws.Row-promptHeight)
 				}
-				// Redraw prompt if active.
 				if promptActive.Load() {
-					drawPrompt(lastPromptTool, lastPromptDetail)
+					drawPromptLocked(lastPromptTool, lastPromptDetail)
 				}
+				stdoutMu.Unlock()
 			}
 		}
 	}()
@@ -259,7 +266,9 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 					}
 				} else if promptActive.Load() && b >= '1' && b <= '4' {
 					promptActive.Store(false)
-					clearPrompt()
+					stdoutMu.Lock()
+					clearPromptLocked()
+					stdoutMu.Unlock()
 					connMu.Lock()
 					writeFrame(conn, framePromptResp, buf[:1])
 					connMu.Unlock()
@@ -288,7 +297,9 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 
 		switch frameType {
 		case frameStdout:
+			stdoutMu.Lock()
 			os.Stdout.Write(payload)
+			stdoutMu.Unlock()
 
 		case framePrompt:
 			// Display permission prompt locally
@@ -300,14 +311,18 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 				lastPromptTool = prompt.ToolName
 				lastPromptDetail = prompt.Detail
 				promptActive.Store(true)
-				drawPrompt(prompt.ToolName, prompt.Detail)
+				stdoutMu.Lock()
+				drawPromptLocked(prompt.ToolName, prompt.Detail)
+				stdoutMu.Unlock()
 			}
 
 		case framePromptCancel:
 			// Server won the race — clear the prompt
 			if promptActive.Load() {
 				promptActive.Store(false)
-				clearPrompt()
+				stdoutMu.Lock()
+				clearPromptLocked()
+				stdoutMu.Unlock()
 			}
 
 		case frameExit:
@@ -324,7 +339,9 @@ done:
 
 	// Restore terminal before exiting (defer handles the normal return path,
 	// but os.Exit skips defers so we restore explicitly here too)
-	resetScrollRegion()
+	stdoutMu.Lock()
+	resetScrollRegionLocked()
+	stdoutMu.Unlock()
 	restoreTerminal(origTermios)
 
 	if exitCode != 0 {
@@ -334,10 +351,18 @@ done:
 
 const promptHeight uint16 = 4
 
-// drawPrompt draws a permission prompt in the reserved area below the
+// stdoutMu serializes writes to os.Stdout in the daemon client. The SIGWINCH
+// goroutine, the output loop, and prompt drawing all write escape sequences
+// and agent output to stdout — without serialization, interleaved writes
+// corrupt the terminal display (e.g. scroll-region escapes spliced into
+// agent output mid-stream).
+var stdoutMu sync.Mutex
+
+// drawPromptLocked draws a permission prompt in the reserved area below the
 // scroll region. The scroll region is set once at session start and on
 // resize, so this function only writes into the reserved rows.
-func drawPrompt(toolName, detail string) {
+// Caller must hold stdoutMu.
+func drawPromptLocked(toolName, detail string) {
 	ws, err := getWinsize(os.Stdin.Fd())
 	if err != nil || ws.Row < 10 {
 		return
@@ -365,9 +390,10 @@ func drawPrompt(toolName, detail string) {
 	fmt.Fprintf(os.Stdout, "\0338") // DECRC
 }
 
-// clearPrompt clears the reserved prompt area below the scroll region.
+// clearPromptLocked clears the reserved prompt area below the scroll region.
 // The scroll region itself is not modified — it stays permanently set.
-func clearPrompt() {
+// Caller must hold stdoutMu.
+func clearPromptLocked() {
 	ws, err := getWinsize(os.Stdin.Fd())
 	if err != nil {
 		return
@@ -380,10 +406,11 @@ func clearPrompt() {
 	fmt.Fprintf(os.Stdout, "\0338") // DECRC
 }
 
-// resetScrollRegion moves the cursor below the agent scroll region, clears the
-// reserved prompt area, and resets the scroll region to full terminal. This
-// preserves the agent's exit output so it remains visible after greenlight exits.
-func resetScrollRegion() {
+// resetScrollRegionLocked moves the cursor below the agent scroll region,
+// clears the reserved prompt area, and resets the scroll region to full
+// terminal. This preserves the agent's exit output so it remains visible
+// after greenlight exits. Caller must hold stdoutMu.
+func resetScrollRegionLocked() {
 	ws, err := getWinsize(os.Stdin.Fd())
 	if err != nil {
 		fmt.Fprintf(os.Stdout, "\033[r")
