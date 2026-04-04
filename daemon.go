@@ -209,8 +209,8 @@ func ensureDaemon(deviceIDFlag string) error {
 		exePath = resolved
 	}
 
-	// Enroll the daemon before starting it (foreground, so the user sees progress)
-	var sessionID, deviceID string
+	// Resolve device ID and host ID, enrolling if this is the first run on this host
+	var hostID, deviceID string
 	if wsURL != "" {
 		// Resolve device ID: flag > env > config (same priority as connect)
 		deviceID = deviceIDFlag
@@ -221,15 +221,22 @@ func ensureDaemon(deviceIDFlag string) error {
 			deviceID = readConfigValue("device_id")
 		}
 		if deviceID != "" {
-			sessionID = generateUUID()
-			baseURL, err := serverBaseURL()
-			if err != nil {
-				return fmt.Errorf("cannot derive server URL: %w", err)
-			}
-			hostname, _ := os.Hostname()
-			fmt.Fprintf(os.Stderr, "greenlight: enrolling daemon (approve on your phone)...\n")
-			if err := enrollSession(baseURL, deviceID, sessionID, "", "", "", hostname); err != nil {
-				return fmt.Errorf("daemon enrollment failed: %w", err)
+			// Use persisted host_id if available; otherwise generate and enroll
+			hostID = readConfigValue("host_id")
+			if hostID == "" {
+				hostID = generateUUID()
+				baseURL, err := serverBaseURL()
+				if err != nil {
+					return fmt.Errorf("cannot derive server URL: %w", err)
+				}
+				hostname, _ := os.Hostname()
+				fmt.Fprintf(os.Stderr, "greenlight: enrolling host (approve on your phone)...\n")
+				if err := enrollSession(baseURL, deviceID, hostID, "", "", "", hostname); err != nil {
+					return fmt.Errorf("host enrollment failed: %w", err)
+				}
+				if err := writeConfigValue("host_id", hostID); err != nil {
+					return fmt.Errorf("failed to persist host_id: %w", err)
+				}
 			}
 		}
 	}
@@ -239,10 +246,10 @@ func ensureDaemon(deviceIDFlag string) error {
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	// Pass enrolled session and device ID to the daemon via env
-	if sessionID != "" {
+	// Pass host ID and device ID to the daemon via env
+	if hostID != "" {
 		cmd.Env = append(os.Environ(),
-			"GREENLIGHT_DAEMON_SESSION_ID="+sessionID,
+			"GREENLIGHT_DAEMON_SESSION_ID="+hostID,
 			"GREENLIGHT_DEVICE_ID="+deviceID,
 		)
 	}
@@ -302,14 +309,17 @@ func runDaemonForeground() {
 
 	log.Printf("daemon: started (pid %d, socket %s)", os.Getpid(), sockPath)
 
-	// Resolve device ID and session ID (set by ensureDaemon after enrollment)
+	// Resolve device ID and host ID (set by ensureDaemon after enrollment, or from config)
 	d.deviceID = os.Getenv("GREENLIGHT_DEVICE_ID")
 	if d.deviceID == "" {
 		d.deviceID = readConfigValue("device_id")
 	}
 	d.sessionID = os.Getenv("GREENLIGHT_DAEMON_SESSION_ID")
+	if d.sessionID == "" && d.deviceID != "" {
+		d.sessionID = readConfigValue("host_id")
+	}
 	if d.sessionID != "" {
-		log.Printf("daemon: using pre-enrolled session %s", d.sessionID)
+		log.Printf("daemon: using host %s", d.sessionID)
 	}
 
 	// Start the multiplexed WebSocket — all sessions share this connection
@@ -446,6 +456,9 @@ func (d *Daemon) startDaemonWS() {
 	dialURL.Path = strings.TrimSuffix(dialURL.Path, "/relay") + "/daemon"
 	q := dialURL.Query()
 	q.Set("session_id", d.sessionID)
+	if hostname, err := os.Hostname(); err == nil {
+		q.Set("hostname", hostname)
+	}
 	if version != "" {
 		q.Set("version", version)
 	}

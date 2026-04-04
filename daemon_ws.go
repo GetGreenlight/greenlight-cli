@@ -40,6 +40,10 @@ type DaemonWS struct {
 type sessionWS struct {
 	daemon     *DaemonWS
 	relayID    string
+	project    string
+	agent      string
+	cwd        string
+	version    string
 	injectFunc func([]byte) error
 	killFunc   func()
 }
@@ -63,6 +67,11 @@ func NewDaemonWS(url, deviceID string) *DaemonWS {
 	// the correct session's PTY.
 	d.ws.textFrameFunc = func(data []byte) bool {
 		return d.handleTextFrame(data)
+	}
+
+	// On reconnect, re-register all active sessions with the server.
+	d.ws.reconnectFunc = func() {
+		d.reregisterSessions()
 	}
 
 	return d
@@ -115,6 +124,22 @@ func (d *DaemonWS) UnregisterSession(relayID string) {
 // for the server to acknowledge it. This replaces HTTP enrollment for
 // sessions within an already-enrolled daemon.
 func (d *DaemonWS) StartSession(relayID, project, agent, cwd, version string) error {
+	// Store metadata on the session handle so we can re-register on reconnect
+	d.mu.RLock()
+	sw := d.sessions[relayID]
+	d.mu.RUnlock()
+	if sw != nil {
+		sw.project = project
+		sw.agent = agent
+		sw.cwd = cwd
+		sw.version = version
+	}
+
+	return d.sendSessionStart(relayID, project, agent, cwd, version)
+}
+
+// sendSessionStart sends a session_start message and waits for ack.
+func (d *DaemonWS) sendSessionStart(relayID, project, agent, cwd, version string) error {
 	hostname, _ := os.Hostname()
 	data := map[string]string{
 		"project": project,
@@ -154,6 +179,29 @@ func (d *DaemonWS) StartSession(relayID, project, agent, cwd, version string) er
 		return nil
 	case <-time.After(10 * time.Second):
 		return fmt.Errorf("session_start timed out")
+	}
+}
+
+// reregisterSessions re-sends session_start for all active sessions after a reconnect.
+func (d *DaemonWS) reregisterSessions() {
+	d.mu.RLock()
+	sessions := make([]*sessionWS, 0, len(d.sessions))
+	for _, sw := range d.sessions {
+		sessions = append(sessions, sw)
+	}
+	d.mu.RUnlock()
+
+	if len(sessions) == 0 {
+		return
+	}
+
+	log.Printf("daemon-ws: reconnected, re-registering %d session(s)", len(sessions))
+	for _, sw := range sessions {
+		if err := d.sendSessionStart(sw.relayID, sw.project, sw.agent, sw.cwd, sw.version); err != nil {
+			log.Printf("daemon-ws: failed to re-register session %s: %v", sw.relayID, err)
+		} else {
+			log.Printf("daemon-ws: re-registered session %s", sw.relayID)
+		}
 	}
 }
 

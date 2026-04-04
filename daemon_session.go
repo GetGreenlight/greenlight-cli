@@ -145,6 +145,10 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	}
 	if d.daemonWS != nil {
 		sw := d.daemonWS.RegisterSession(relayID, r.Inject, killFunc)
+		sw.project = proj
+		sw.agent = agentServerName(agent)
+		sw.cwd = cwd
+		sw.version = version
 		r.wsConn = sw
 
 		// Start bridge tailer using the session's WS handle

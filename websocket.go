@@ -38,6 +38,7 @@ type WSClient struct {
 	killFunc    func()
 	controlFunc    func([]byte) // optional handler for binary control messages
 	textFrameFunc  func([]byte) bool // optional handler for unrouted text frames; returns true if consumed
+	reconnectFunc  func() // called after reconnecting (not on first connect)
 
 	done chan struct{}
 	wg   sync.WaitGroup
@@ -77,6 +78,7 @@ func (c *WSClient) Run() {
 	defer c.wg.Done()
 
 	var attempt int
+	firstConnect := true
 	for {
 		select {
 		case <-c.done:
@@ -85,7 +87,8 @@ func (c *WSClient) Run() {
 		}
 
 		connStart := time.Now()
-		err := c.connectAndRead()
+		err := c.connectAndRead(firstConnect)
+		firstConnect = false
 		if err == nil {
 			// Clean shutdown via Close()
 			return
@@ -319,7 +322,7 @@ func (c *WSClient) setConn(conn *websocket.Conn) {
 	c.connMu.Unlock()
 }
 
-func (c *WSClient) connectAndRead() error {
+func (c *WSClient) connectAndRead(firstConnect bool) error {
 	// Create a context that cancels when Close() is called,
 	// so conn.Read unblocks immediately on shutdown.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -357,6 +360,12 @@ func (c *WSClient) connectAndRead() error {
 
 	// Drain any text messages that were queued during disconnection.
 	c.drainTextQueue(conn)
+
+	// On reconnect, notify the owner so it can re-register state (e.g. sessions).
+	// Run in a goroutine so the read loop below can process ack responses.
+	if !firstConnect && c.reconnectFunc != nil {
+		go c.reconnectFunc()
+	}
 
 	// Read loop: text frames are relay input (PTY injection),
 	// binary frames are control messages from the server.
