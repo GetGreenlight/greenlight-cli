@@ -221,22 +221,22 @@ func ensureDaemon(deviceIDFlag string) error {
 			deviceID = readConfigValue("device_id")
 		}
 		if deviceID != "" {
-			// Use persisted host_id if available; otherwise generate and enroll
+			// Use persisted host_id if available; otherwise generate a new one
 			hostID = readConfigValue("host_id")
 			if hostID == "" {
 				hostID = generateUUID()
-				baseURL, err := serverBaseURL()
-				if err != nil {
-					return fmt.Errorf("cannot derive server URL: %w", err)
-				}
-				hostname, _ := os.Hostname()
-				fmt.Fprintf(os.Stderr, "greenlight: enrolling host (approve on your phone)...\n")
-				if err := enrollSession(baseURL, deviceID, hostID, "", "", "", hostname); err != nil {
-					return fmt.Errorf("host enrollment failed: %w", err)
-				}
-				if err := writeConfigValue("host_id", hostID); err != nil {
-					return fmt.Errorf("failed to persist host_id: %w", err)
-				}
+			}
+			baseURL, err := serverBaseURL()
+			if err != nil {
+				return fmt.Errorf("cannot derive server URL: %w", err)
+			}
+			hostname, _ := os.Hostname()
+			fmt.Fprintf(os.Stderr, "greenlight: enrolling host (approve on your phone)...\n")
+			if err := enrollSession(baseURL, deviceID, hostID, "", "", "", hostname); err != nil {
+				return fmt.Errorf("host enrollment failed: %w", err)
+			}
+			if err := writeConfigValue("host_id", hostID); err != nil {
+				return fmt.Errorf("failed to persist host_id: %w", err)
 			}
 		}
 	}
