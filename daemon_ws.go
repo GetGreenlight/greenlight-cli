@@ -365,21 +365,30 @@ func (d *DaemonWS) handleSessionTranscript(data []byte) {
 		return
 	}
 
+	var transcriptPath string
+
 	convID := lookupConversationID(msg.RelayID)
+
+	// Try live session first (no saved record yet)
+	d.mu.RLock()
+	sw := d.sessions[msg.RelayID]
+	d.mu.RUnlock()
+	if sw != nil && convID != "" {
+		transcriptPath = deriveTranscriptPath(sw.agent, convID, sw.cwd)
+	}
+
+	// Fall back to completed session record
+	if transcriptPath == "" && convID != "" {
+		if rec, err := loadSessionRecord(convID); err == nil {
+			transcriptPath = deriveTranscriptPath(rec.Agent, convID, rec.Cwd)
+		}
+	}
+
 	if convID == "" {
 		log.Printf("daemon-ws: session_transcript: no conversation ID for relay %s", msg.RelayID)
 		d.sendTranscriptResponse(msg.RelayID, nil, "no conversation ID found for relay_id")
 		return
 	}
-
-	rec, err := loadSessionRecord(convID)
-	if err != nil {
-		log.Printf("daemon-ws: session_transcript: failed to load session record %s: %v", convID, err)
-		d.sendTranscriptResponse(msg.RelayID, nil, fmt.Sprintf("session record not found: %v", err))
-		return
-	}
-
-	transcriptPath := deriveTranscriptPath(rec.Agent, convID, rec.Cwd)
 	if transcriptPath == "" {
 		log.Printf("daemon-ws: session_transcript: could not derive transcript path for %s", convID)
 		d.sendTranscriptResponse(msg.RelayID, nil, "could not derive transcript path")
