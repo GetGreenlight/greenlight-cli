@@ -274,8 +274,8 @@ func (c *WSClient) routePermissionResponse(data []byte) bool {
 		return true
 	}
 
-	// Route control messages (session_history, wake) to the control handler
-	if msg.Type == "session_history" || msg.Type == "wake" {
+	// Route control messages to the control handler
+	if msg.Type == "session_history" || msg.Type == "session_transcript" || msg.Type == "wake" {
 		if c.controlFunc != nil {
 			c.controlFunc(data)
 		}
