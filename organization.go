@@ -78,17 +78,17 @@ func runOrganization(args []string) {
 		os.Exit(0)
 	}
 	switch args[0] {
-	case "org":
+	case "organizations":
 		runOrganizationOrg(args[1:])
-	case "wd":
+	case "working_directories":
 		runOrganizationWD(args[1:])
-	case "job":
+	case "agent_job_descriptions":
 		runOrganizationJob(args[1:])
-	case "pos":
+	case "organization_positions":
 		runOrganizationPos(args[1:])
-	case "agent":
+	case "ai_agent_instances":
 		runOrganizationAgent(args[1:])
-	case "model":
+	case "ai_brain_models":
 		runOrganizationModel(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "greenlight organization: unknown entity %q\nRun 'greenlight organization --help' for usage.\n", args[0])
@@ -100,12 +100,12 @@ func printOrganizationUsage() {
 	fmt.Fprintf(os.Stderr, `Usage: greenlight organization <entity> <command> [flags]
 
 Entities:
-  org      Organizations
-  wd       Working directories
-  job      Agent job descriptions
-  pos      Organization positions
-  agent    AI agent instances
-  model    AI brain models (read-only)
+  organizations          Organizations
+  working_directories    Working directories
+  agent_job_descriptions Agent job descriptions
+  organization_positions Organization positions
+  ai_agent_instances     AI agent instances
+  ai_brain_models        AI brain models (read-only)
 
 Run 'greenlight organization <entity> --help' for details.
 `)
@@ -117,7 +117,7 @@ Run 'greenlight organization <entity> --help' for details.
 
 func runOrganizationOrg(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight organization org <list|get|create|update|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight organization organizations <list|get|create|update|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -200,7 +200,7 @@ func runOrganizationOrg(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight organization org: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight organization organizations: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -211,7 +211,7 @@ func runOrganizationOrg(args []string) {
 
 func runOrganizationWD(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight organization wd <list|get|create|update|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight organization working_directories <list|get|create|update|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -326,7 +326,7 @@ func runOrganizationWD(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight organization wd: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight organization working_directories: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -337,7 +337,7 @@ func runOrganizationWD(args []string) {
 
 func runOrganizationJob(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight organization job <list|get|create|update|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight organization agent_job_descriptions <list|get|create|update|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -447,7 +447,7 @@ func runOrganizationJob(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight organization job: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight organization agent_job_descriptions: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -458,7 +458,7 @@ func runOrganizationJob(args []string) {
 
 func runOrganizationPos(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight organization pos <list|get|create|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight organization organization_positions <list|get|create|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -545,7 +545,7 @@ func runOrganizationPos(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight organization pos: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight organization organization_positions: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -556,7 +556,7 @@ func runOrganizationPos(args []string) {
 
 func runOrganizationAgent(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight organization agent <list|get|create|retire|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight organization ai_agent_instances <list|get|create|retire|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -662,7 +662,7 @@ func runOrganizationAgent(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight organization agent: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight organization ai_agent_instances: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -673,7 +673,7 @@ func runOrganizationAgent(args []string) {
 
 func runOrganizationModel(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight organization model <list|get>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight organization ai_brain_models <list|get>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -706,7 +706,7 @@ func runOrganizationModel(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight organization model: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight organization ai_brain_models: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
