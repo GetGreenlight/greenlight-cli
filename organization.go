@@ -78,7 +78,7 @@ func runOrganization(args []string) {
 		os.Exit(0)
 	}
 	switch args[0] {
-	case "organizations":
+	case "organization":
 		runOrganizationOrg(args[1:])
 	case "wd":
 		runOrganizationWD(args[1:])
@@ -100,7 +100,7 @@ func printOrganizationUsage() {
 	fmt.Fprintf(os.Stderr, `Usage: greenlight organization <entity> <command> [flags]
 
 Entities:
-  organizations    Organizations
+  organization     Organizations
   wd               Working directories
   job_description  Agent job descriptions
   position         Organization positions
@@ -117,7 +117,7 @@ Run 'greenlight organization <entity> --help' for details.
 
 func runOrganizationOrg(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight organization organizations <list|get|create|update|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight organization organization <list|get|create|update|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -200,7 +200,7 @@ func runOrganizationOrg(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight organization organizations: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight organization organization: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
