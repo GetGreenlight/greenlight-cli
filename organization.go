@@ -68,6 +68,17 @@ func printJSON(v json.RawMessage) {
 	fmt.Println(string(v))
 }
 
+// workingOrgID returns the organization_id from ~/.greenlight/config, or 0 if not set.
+func workingOrgID() int {
+	v := readConfigValue("organization_id")
+	if v == "" {
+		return 0
+	}
+	var id int
+	fmt.Sscanf(v, "%d", &id)
+	return id
+}
+
 // =============================================================================
 // runOrganization — entry point
 // =============================================================================
@@ -117,7 +128,7 @@ Run 'greenlight organization <entity> --help' for details.
 
 func runOrganizationOrg(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight organization organization <list|get|create|update|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight organization organization <list|get|create|update|delete|use>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -199,6 +210,19 @@ func runOrganizationOrg(args []string) {
 			os.Exit(1)
 		}
 		printJSON(data)
+	case "use":
+		fs := flag.NewFlagSet("org use", flag.ExitOnError)
+		id := fs.Int("id", 0, "Organization ID to set as working organization")
+		fs.Parse(args[1:])
+		if *id == 0 {
+			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
+			os.Exit(1)
+		}
+		if err := writeConfigValue("organization_id", fmt.Sprintf("%d", *id)); err != nil {
+			fmt.Fprintf(os.Stderr, "greenlight: failed to save organization_id: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Working organization set to %d.\n", *id)
 	default:
 		fmt.Fprintf(os.Stderr, "greenlight organization organization: unknown command %q\n", args[0])
 		os.Exit(1)
@@ -252,6 +276,9 @@ func runOrganizationWD(args []string) {
 
 		reader := bufio.NewReader(os.Stdin)
 
+		if *orgID == 0 {
+			*orgID = workingOrgID()
+		}
 		if *orgID == 0 {
 			id, err := selectOrganization()
 			if err != nil {
@@ -379,6 +406,9 @@ func runOrganizationJob(args []string) {
 
 		reader := bufio.NewReader(os.Stdin)
 		if *orgID == 0 {
+			*orgID = workingOrgID()
+		}
+		if *orgID == 0 {
 			id, err := selectOrganization()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
@@ -499,6 +529,9 @@ func runOrganizationPos(args []string) {
 		fs.Parse(args[1:])
 
 		if *orgID == 0 {
+			*orgID = workingOrgID()
+		}
+		if *orgID == 0 {
 			id, err := selectOrganization()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
@@ -604,6 +637,9 @@ func runOrganizationAgent(args []string) {
 		harnessID := fs.Int("harness", 0, "Harness ID (optional)")
 		fs.Parse(args[1:])
 
+		if *orgID == 0 {
+			*orgID = workingOrgID()
+		}
 		if *orgID == 0 {
 			id, err := selectOrganization()
 			if err != nil {

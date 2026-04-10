@@ -148,6 +148,9 @@ func selectAgentJobDescription(orgID int) (int, error) {
 
 func createAgentJobDescriptionInteractive(orgID int) (int, error) {
 	if orgID == 0 {
+		orgID = workingOrgID()
+	}
+	if orgID == 0 {
 		var err error
 		orgID, err = selectOrganization()
 		if err != nil {
@@ -230,6 +233,9 @@ func selectWorkingDirectory(orgID int) (int, error) {
 }
 
 func createWorkingDirectoryInteractive(orgID int) (int, error) {
+	if orgID == 0 {
+		orgID = workingOrgID()
+	}
 	if orgID == 0 {
 		var err error
 		orgID, err = selectOrganization()
@@ -316,6 +322,9 @@ func selectOrganizationPosition(orgID int) (int, error) {
 }
 
 func createOrganizationPositionInteractive(orgID int) (int, error) {
+	if orgID == 0 {
+		orgID = workingOrgID()
+	}
 	if orgID == 0 {
 		var err error
 		orgID, err = selectOrganization()
