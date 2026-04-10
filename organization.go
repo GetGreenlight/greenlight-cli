@@ -241,13 +241,16 @@ func runOrganizationWD(args []string) {
 	switch args[0] {
 	case "list":
 		fs := flag.NewFlagSet("wd list", flag.ExitOnError)
-		orgID := fs.Int("org", 0, "Filter by organization ID")
+		orgID := fs.Int("org", 0, "Organization ID (defaults to working org from config)")
 		fs.Parse(args[1:])
-		payload := map[string]interface{}{}
-		if *orgID != 0 {
-			payload["organization_id"] = *orgID
+		if *orgID == 0 {
+			*orgID = workingOrgID()
 		}
-		data, err := sendWSRequest("list_working_directories", payload)
+		if *orgID == 0 {
+			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight organization organization use --id <ID>')\n")
+			os.Exit(1)
+		}
+		data, err := sendWSRequest("list_working_directories", map[string]interface{}{"organization_id": *orgID})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 			os.Exit(1)
@@ -370,13 +373,16 @@ func runOrganizationJob(args []string) {
 	switch args[0] {
 	case "list":
 		fs := flag.NewFlagSet("job list", flag.ExitOnError)
-		orgID := fs.Int("org", 0, "Filter by organization ID")
+		orgID := fs.Int("org", 0, "Organization ID (defaults to working org from config)")
 		fs.Parse(args[1:])
-		payload := map[string]interface{}{}
-		if *orgID != 0 {
-			payload["organization_id"] = *orgID
+		if *orgID == 0 {
+			*orgID = workingOrgID()
 		}
-		data, err := sendWSRequest("list_agent_job_descriptions", payload)
+		if *orgID == 0 {
+			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight organization organization use --id <ID>')\n")
+			os.Exit(1)
+		}
+		data, err := sendWSRequest("list_agent_job_descriptions", map[string]interface{}{"organization_id": *orgID})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 			os.Exit(1)
@@ -494,13 +500,16 @@ func runOrganizationPos(args []string) {
 	switch args[0] {
 	case "list":
 		fs := flag.NewFlagSet("pos list", flag.ExitOnError)
-		orgID := fs.Int("org", 0, "Filter by organization ID")
+		orgID := fs.Int("org", 0, "Organization ID (defaults to working org from config)")
 		fs.Parse(args[1:])
-		payload := map[string]interface{}{}
-		if *orgID != 0 {
-			payload["organization_id"] = *orgID
+		if *orgID == 0 {
+			*orgID = workingOrgID()
 		}
-		data, err := sendWSRequest("list_organization_positions", payload)
+		if *orgID == 0 {
+			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight organization organization use --id <ID>')\n")
+			os.Exit(1)
+		}
+		data, err := sendWSRequest("list_organization_positions", map[string]interface{}{"organization_id": *orgID})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 			os.Exit(1)
@@ -602,13 +611,16 @@ func runOrganizationAgent(args []string) {
 	switch args[0] {
 	case "list":
 		fs := flag.NewFlagSet("agent list", flag.ExitOnError)
-		orgID := fs.Int("org", 0, "Filter by organization ID")
+		orgID := fs.Int("org", 0, "Organization ID (defaults to working org from config)")
 		fs.Parse(args[1:])
-		payload := map[string]interface{}{}
-		if *orgID != 0 {
-			payload["organization_id"] = *orgID
+		if *orgID == 0 {
+			*orgID = workingOrgID()
 		}
-		data, err := sendWSRequest("list_ai_agent_instances", payload)
+		if *orgID == 0 {
+			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight organization organization use --id <ID>')\n")
+			os.Exit(1)
+		}
+		data, err := sendWSRequest("list_ai_agent_instances", map[string]interface{}{"organization_id": *orgID})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 			os.Exit(1)
@@ -729,13 +741,16 @@ func runOrganizationModel(args []string) {
 	switch args[0] {
 	case "list":
 		fs := flag.NewFlagSet("model list", flag.ExitOnError)
-		orgID := fs.Int("org", 0, "Filter by organization ID")
+		orgID := fs.Int("org", 0, "Organization ID (defaults to working org from config)")
 		fs.Parse(args[1:])
-		payload := map[string]interface{}{}
-		if *orgID != 0 {
-			payload["organization_id"] = *orgID
+		if *orgID == 0 {
+			*orgID = workingOrgID()
 		}
-		data, err := sendWSRequest("list_ai_brain_models", payload)
+		if *orgID == 0 {
+			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight organization organization use --id <ID>')\n")
+			os.Exit(1)
+		}
+		data, err := sendWSRequest("list_ai_brain_models", map[string]interface{}{"organization_id": *orgID})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 			os.Exit(1)
