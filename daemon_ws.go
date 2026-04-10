@@ -242,6 +242,10 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 		d.handleSessionHistory()
 	case "session_transcript":
 		d.handleSessionTranscript(data)
+	case "history_entry":
+		d.handleHistoryEntry(data)
+	case "project_history":
+		d.handleProjectHistory(data)
 	default:
 		log.Printf("daemon-ws: unknown control message: %s", msg.Type)
 	}
@@ -352,6 +356,45 @@ func (d *DaemonWS) handleSessionHistory() {
 		return
 	}
 	d.ws.SendText(data)
+}
+
+// handleHistoryEntry stores a permission request outcome from the server.
+func (d *DaemonWS) handleHistoryEntry(data []byte) {
+	var msg struct {
+		Project string       `json:"project"`
+		Entry   historyEntry `json:"entry"`
+	}
+	if json.Unmarshal(data, &msg) != nil || msg.Project == "" {
+		return
+	}
+	appendHistoryEntry(msg.Project, msg.Entry)
+}
+
+// handleProjectHistory returns stored history entries for a project.
+func (d *DaemonWS) handleProjectHistory(data []byte) {
+	var msg struct {
+		Project string `json:"project"`
+	}
+	if json.Unmarshal(data, &msg) != nil || msg.Project == "" {
+		return
+	}
+
+	entries := listProjectHistory(msg.Project, 200)
+	if entries == nil {
+		entries = []historyEntry{}
+	}
+
+	resp := map[string]interface{}{
+		"type":    "project_history_response",
+		"project": msg.Project,
+		"entries": entries,
+	}
+	respData, err := json.Marshal(resp)
+	if err != nil {
+		log.Printf("daemon-ws: failed to marshal project history: %v", err)
+		return
+	}
+	d.ws.SendText(respData)
 }
 
 // handleSessionTranscript loads a transcript file for a session and sends the entries back.
