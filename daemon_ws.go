@@ -464,6 +464,35 @@ func (sw *sessionWS) RemovePending(requestID string) {
 	sw.daemon.ws.RemovePending(requestID)
 }
 
+// SendWSRequest sends a household CRUD request to the server over the daemon
+// WebSocket and waits for the response. correlationID must be unique per call.
+func (d *DaemonWS) SendWSRequest(correlationID, msgType string, data json.RawMessage) ([]byte, error) {
+	msg := map[string]interface{}{
+		"type":           "ws_request",
+		"correlation_id": correlationID,
+		"msg_type":       msgType,
+	}
+	if len(data) > 0 {
+		msg["data"] = json.RawMessage(data)
+	}
+	msgBytes, err := json.Marshal(msg)
+	if err != nil {
+		return nil, err
+	}
+
+	ch := d.ws.RegisterPending(correlationID)
+	defer d.ws.RemovePending(correlationID)
+
+	d.ws.SendText(msgBytes)
+
+	select {
+	case resp := <-ch:
+		return resp, nil
+	case <-time.After(30 * time.Second):
+		return nil, fmt.Errorf("ws_request timed out")
+	}
+}
+
 // Send is a no-op — PTY output is not sent to the server.
 func (sw *sessionWS) Send(data []byte) {}
 

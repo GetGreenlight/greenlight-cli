@@ -36,26 +36,29 @@ const (
 
 // ipcRequest is the JSON control message sent by the client to the daemon.
 type ipcRequest struct {
-	Type     string            `json:"type"`               // connect, status, stop, update_shutdown
-	Agent    string            `json:"agent,omitempty"`
-	DeviceID string            `json:"device_id,omitempty"`
-	Project  string            `json:"project,omitempty"`
-	Resume   string            `json:"resume,omitempty"`
-	Cwd      string            `json:"cwd,omitempty"`
-	Winsize  *ipcWinsize       `json:"winsize,omitempty"`
-	Env      map[string]string `json:"env,omitempty"`
-	Force    bool              `json:"force,omitempty"`
+	Type      string            `json:"type"`               // connect, status, stop, update_shutdown, ws_request
+	Agent     string            `json:"agent,omitempty"`
+	DeviceID  string            `json:"device_id,omitempty"`
+	Project   string            `json:"project,omitempty"`
+	Resume    string            `json:"resume,omitempty"`
+	Cwd       string            `json:"cwd,omitempty"`
+	Winsize   *ipcWinsize       `json:"winsize,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	Force     bool              `json:"force,omitempty"`
+	WSMsgType string            `json:"ws_msg_type,omitempty"` // for ws_request: the CRUD message type
+	WSData    json.RawMessage   `json:"ws_data,omitempty"`     // for ws_request: the payload
 }
 
 // ipcResponse is the JSON control message sent by the daemon to the client.
 type ipcResponse struct {
-	Type      string          `json:"type"`                 // session_started, error, status_response, ok
+	Type      string          `json:"type"`                 // session_started, error, status_response, ok, ws_response
 	SessionID string          `json:"session_id,omitempty"`
 	RelayID   string          `json:"relay_id,omitempty"`
 	Message   string          `json:"message,omitempty"`
 	Version   string          `json:"version,omitempty"`
 	Sessions  []sessionInfo   `json:"sessions,omitempty"`
 	History   []sessionRecord `json:"history,omitempty"`
+	Data      json.RawMessage `json:"data,omitempty"` // for ws_response: the server response payload
 }
 
 type ipcWinsize struct {
@@ -519,9 +522,31 @@ func (d *Daemon) handleConn(conn net.Conn) {
 		d.handleUpdateShutdown(conn, req)
 	case "session_history":
 		sendControl(conn, ipcResponse{Type: "session_history_response", History: listSessionRecords()})
+	case "ws_request":
+		d.handleWSRequest(conn, req)
 	default:
 		sendControl(conn, ipcResponse{Type: "error", Message: "unknown request type"})
 	}
+}
+
+// handleWSRequest forwards a CRUD message to the server over the daemon WebSocket
+// and returns the response to the IPC client.
+func (d *Daemon) handleWSRequest(conn net.Conn, req ipcRequest) {
+	if d.daemonWS == nil {
+		sendControl(conn, ipcResponse{Type: "error", Message: "daemon WebSocket not available"})
+		return
+	}
+	if !d.daemonWS.IsConnected() {
+		sendControl(conn, ipcResponse{Type: "error", Message: "daemon WebSocket not connected"})
+		return
+	}
+	correlationID := generateUUID()
+	resp, err := d.daemonWS.SendWSRequest(correlationID, req.WSMsgType, req.WSData)
+	if err != nil {
+		sendControl(conn, ipcResponse{Type: "error", Message: err.Error()})
+		return
+	}
+	sendControl(conn, ipcResponse{Type: "ws_response", Data: json.RawMessage(resp)})
 }
 
 // handleStatus sends session information back to the client.

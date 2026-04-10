@@ -251,12 +251,27 @@ func (c *WSClient) routePermissionResponse(data []byte) bool {
 		return false
 	}
 	var msg struct {
-		Type      string `json:"type"`
-		RequestID string `json:"request_id"`
-		RelayID   string `json:"relay_id"`
+		Type          string `json:"type"`
+		RequestID     string `json:"request_id"`
+		RelayID       string `json:"relay_id"`
+		CorrelationID string `json:"correlation_id"`
 	}
 	if json.Unmarshal(data, &msg) != nil {
 		return false
+	}
+
+	// Route ws_request responses back to the waiting handler by correlation_id.
+	if msg.CorrelationID != "" {
+		c.pendingMu.Lock()
+		ch, ok := c.pending[msg.CorrelationID]
+		if ok {
+			delete(c.pending, msg.CorrelationID)
+		}
+		c.pendingMu.Unlock()
+		if ok {
+			ch <- data
+			return true
+		}
 	}
 
 	// Route session_started ack by relay_id
