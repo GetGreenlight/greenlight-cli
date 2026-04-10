@@ -253,12 +253,12 @@ func runOrganizationWD(args []string) {
 		reader := bufio.NewReader(os.Stdin)
 
 		if *orgID == 0 {
-			s := promptLine(reader, "Organization ID: ")
-			fmt.Sscanf(s, "%d", orgID)
-		}
-		if *orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: --org required\n")
-			os.Exit(1)
+			id, err := selectOrganization()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+				os.Exit(1)
+			}
+			*orgID = id
 		}
 		if *hostID == "" {
 			*hostID = readConfigValue("host_id")
@@ -379,12 +379,12 @@ func runOrganizationJob(args []string) {
 
 		reader := bufio.NewReader(os.Stdin)
 		if *orgID == 0 {
-			s := promptLine(reader, "Organization ID: ")
-			fmt.Sscanf(s, "%d", orgID)
-		}
-		if *orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: --org required\n")
-			os.Exit(1)
+			id, err := selectOrganization()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+				os.Exit(1)
+			}
+			*orgID = id
 		}
 		if *title == "" {
 			*title = promptLine(reader, "Title: ")
@@ -498,22 +498,29 @@ func runOrganizationPos(args []string) {
 		parentID := fs.Int("parent", 0, "Parent position ID (optional)")
 		fs.Parse(args[1:])
 
-		reader := bufio.NewReader(os.Stdin)
 		if *orgID == 0 {
-			s := promptLine(reader, "Organization ID: ")
-			fmt.Sscanf(s, "%d", orgID)
+			id, err := selectOrganization()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+				os.Exit(1)
+			}
+			*orgID = id
 		}
 		if *jobID == 0 {
-			s := promptLine(reader, "Agent job description ID: ")
-			fmt.Sscanf(s, "%d", jobID)
+			id, err := selectAgentJobDescription(*orgID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+				os.Exit(1)
+			}
+			*jobID = id
 		}
 		if *wdID == 0 {
-			s := promptLine(reader, "Working directory ID: ")
-			fmt.Sscanf(s, "%d", wdID)
-		}
-		if *orgID == 0 || *jobID == 0 || *wdID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: --org, --job, and --wd required\n")
-			os.Exit(1)
+			id, err := selectWorkingDirectory(*orgID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+				os.Exit(1)
+			}
+			*wdID = id
 		}
 
 		payload := map[string]interface{}{
@@ -597,22 +604,29 @@ func runOrganizationAgent(args []string) {
 		harnessID := fs.Int("harness", 0, "Harness ID (optional)")
 		fs.Parse(args[1:])
 
-		reader := bufio.NewReader(os.Stdin)
 		if *orgID == 0 {
-			s := promptLine(reader, "Organization ID: ")
-			fmt.Sscanf(s, "%d", orgID)
+			id, err := selectOrganization()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+				os.Exit(1)
+			}
+			*orgID = id
 		}
 		if *jobID == 0 {
-			s := promptLine(reader, "Agent job description ID: ")
-			fmt.Sscanf(s, "%d", jobID)
+			id, err := selectAgentJobDescription(*orgID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+				os.Exit(1)
+			}
+			*jobID = id
 		}
 		if *posID == 0 {
-			s := promptLine(reader, "Organization position ID: ")
-			fmt.Sscanf(s, "%d", posID)
-		}
-		if *orgID == 0 || *jobID == 0 || *posID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: --org, --job, and --pos required\n")
-			os.Exit(1)
+			id, err := selectOrganizationPosition(*orgID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+				os.Exit(1)
+			}
+			*posID = id
 		}
 
 		payload := map[string]interface{}{
