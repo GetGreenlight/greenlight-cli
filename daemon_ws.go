@@ -464,7 +464,7 @@ func (sw *sessionWS) RemovePending(requestID string) {
 	sw.daemon.ws.RemovePending(requestID)
 }
 
-// SendWSRequest sends a household CRUD request to the server over the daemon
+// SendWSRequest sends a organization CRUD request to the server over the daemon
 // WebSocket and waits for the response. correlationID must be unique per call.
 func (d *DaemonWS) SendWSRequest(correlationID, msgType string, data json.RawMessage) ([]byte, error) {
 	msg := map[string]interface{}{

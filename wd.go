@@ -223,7 +223,7 @@ func bearerClient() *http.Client {
 }
 
 func fetchHarnesses(baseURL, deviceID string) ([]apiHarness, error) {
-	req, _ := http.NewRequest("GET", baseURL+"/household/harnesses", nil)
+	req, _ := http.NewRequest("GET", baseURL+"/organization/harnesses", nil)
 	req.Header.Set("Authorization", "Bearer "+deviceID)
 	resp, err := bearerClient().Do(req)
 	if err != nil {
@@ -242,7 +242,7 @@ func fetchHarnesses(baseURL, deviceID string) ([]apiHarness, error) {
 }
 
 func fetchAIBrainModels(baseURL, deviceID string) ([]apiAIBrainModel, error) {
-	req, _ := http.NewRequest("GET", baseURL+"/household/ai_brain_models", nil)
+	req, _ := http.NewRequest("GET", baseURL+"/organization/ai_brain_models", nil)
 	req.Header.Set("Authorization", "Bearer "+deviceID)
 	resp, err := bearerClient().Do(req)
 	if err != nil {
@@ -273,7 +273,7 @@ func createWorkingDirectory(baseURL, deviceID, name, dirPath string, harnessID, 
 	if err != nil {
 		return nil, err
 	}
-	req, _ := http.NewRequest("POST", baseURL+"/household/working_directories", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", baseURL+"/organization/working_directories", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+deviceID)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := bearerClient().Do(req)

@@ -54,8 +54,8 @@ func main() {
 		runAgent(os.Args[2:])
 	case "daemon":
 		runDaemon(os.Args[2:])
-	case "household":
-		runHousehold(os.Args[2:])
+	case "organization":
+		runOrganization(os.Args[2:])
 	case "wd":
 		runWD(os.Args[2:])
 	case "update":
@@ -100,7 +100,7 @@ Commands:
   register   Register a device ID for the Greenlight app
   agent      Get or set the default agent runtime (claude, codex, copilot, cursor, gemini, pi)
   daemon     Manage the background daemon (start, stop, status)
-  household  Manage multi-agent household entities (org, wd, job, pos, agent, model)
+  organization  Manage multi-agent organization entities (org, wd, job, pos, agent, model)
   wd         Manage working directories (create, list)
   update     Update greenlight to the latest version
   version    Print version and build settings

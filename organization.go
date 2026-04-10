@@ -69,35 +69,35 @@ func printJSON(v json.RawMessage) {
 }
 
 // =============================================================================
-// runHousehold — entry point
+// runOrganization — entry point
 // =============================================================================
 
-func runHousehold(args []string) {
+func runOrganization(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		printHouseholdUsage()
+		printOrganizationUsage()
 		os.Exit(0)
 	}
 	switch args[0] {
 	case "org":
-		runHouseholdOrg(args[1:])
+		runOrganizationOrg(args[1:])
 	case "wd":
-		runHouseholdWD(args[1:])
+		runOrganizationWD(args[1:])
 	case "job":
-		runHouseholdJob(args[1:])
+		runOrganizationJob(args[1:])
 	case "pos":
-		runHouseholdPos(args[1:])
+		runOrganizationPos(args[1:])
 	case "agent":
-		runHouseholdAgent(args[1:])
+		runOrganizationAgent(args[1:])
 	case "model":
-		runHouseholdModel(args[1:])
+		runOrganizationModel(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight household: unknown entity %q\nRun 'greenlight household --help' for usage.\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight organization: unknown entity %q\nRun 'greenlight organization --help' for usage.\n", args[0])
 		os.Exit(1)
 	}
 }
 
-func printHouseholdUsage() {
-	fmt.Fprintf(os.Stderr, `Usage: greenlight household <entity> <command> [flags]
+func printOrganizationUsage() {
+	fmt.Fprintf(os.Stderr, `Usage: greenlight organization <entity> <command> [flags]
 
 Entities:
   org      Organizations
@@ -107,7 +107,7 @@ Entities:
   agent    AI agent instances
   model    AI brain models (read-only)
 
-Run 'greenlight household <entity> --help' for details.
+Run 'greenlight organization <entity> --help' for details.
 `)
 }
 
@@ -115,9 +115,9 @@ Run 'greenlight household <entity> --help' for details.
 // org — organizations
 // =============================================================================
 
-func runHouseholdOrg(args []string) {
+func runOrganizationOrg(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight household org <list|get|create|update|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight organization org <list|get|create|update|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -200,7 +200,7 @@ func runHouseholdOrg(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight household org: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight organization org: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -209,9 +209,9 @@ func runHouseholdOrg(args []string) {
 // wd — working directories
 // =============================================================================
 
-func runHouseholdWD(args []string) {
+func runOrganizationWD(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight household wd <list|get|create|update|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight organization wd <list|get|create|update|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -326,7 +326,7 @@ func runHouseholdWD(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight household wd: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight organization wd: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -335,9 +335,9 @@ func runHouseholdWD(args []string) {
 // job — agent job descriptions
 // =============================================================================
 
-func runHouseholdJob(args []string) {
+func runOrganizationJob(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight household job <list|get|create|update|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight organization job <list|get|create|update|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -447,7 +447,7 @@ func runHouseholdJob(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight household job: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight organization job: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -456,9 +456,9 @@ func runHouseholdJob(args []string) {
 // pos — organization positions
 // =============================================================================
 
-func runHouseholdPos(args []string) {
+func runOrganizationPos(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight household pos <list|get|create|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight organization pos <list|get|create|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -545,7 +545,7 @@ func runHouseholdPos(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight household pos: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight organization pos: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -554,9 +554,9 @@ func runHouseholdPos(args []string) {
 // agent — AI agent instances
 // =============================================================================
 
-func runHouseholdAgent(args []string) {
+func runOrganizationAgent(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight household agent <list|get|create|retire|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight organization agent <list|get|create|retire|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -662,7 +662,7 @@ func runHouseholdAgent(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight household agent: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight organization agent: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -671,9 +671,9 @@ func runHouseholdAgent(args []string) {
 // model — AI brain models (read-only)
 // =============================================================================
 
-func runHouseholdModel(args []string) {
+func runOrganizationModel(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight household model <list|get>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight organization model <list|get>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -706,7 +706,7 @@ func runHouseholdModel(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight household model: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight organization model: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
