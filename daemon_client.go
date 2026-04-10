@@ -86,6 +86,9 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 		os.Exit(1)
 	}
 
+	// These are set by the frame loop and read by the defer to print resume instructions.
+	var exitConvID, exitAgent string
+
 	// Enter raw mode on the local terminal
 	origTermios, err := setRawTerminal()
 	if err != nil {
@@ -97,6 +100,9 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 		resetScrollRegionLocked()
 		stdoutMu.Unlock()
 		restoreTerminal(origTermios)
+		if exitConvID != "" && agentSupportsResume(exitAgent) {
+			fmt.Fprintf(os.Stdout, "\nTo resume this conversation:\n  greenlight connect --resume %s\n", exitConvID)
+		}
 	}()
 
 	// Clear screen and reserve the bottom promptHeight rows for permission
@@ -326,9 +332,15 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 			}
 
 		case frameExit:
-			var exit struct{ Code int `json:"code"` }
+			var exit struct {
+				Code           int    `json:"code"`
+				ConversationID string `json:"conversation_id"`
+				Agent          string `json:"agent"`
+			}
 			json.Unmarshal(payload, &exit)
 			exitCode = exit.Code
+			exitConvID = exit.ConversationID
+			exitAgent = exit.Agent
 			goto done
 		}
 	}
@@ -337,16 +349,15 @@ done:
 	signal.Stop(winchCh)
 	signal.Stop(sigCh)
 
-	// Restore terminal before exiting (defer handles the normal return path,
-	// but os.Exit skips defers so we restore explicitly here too)
-	stdoutMu.Lock()
-	resetScrollRegionLocked()
-	stdoutMu.Unlock()
-	restoreTerminal(origTermios)
-
 	if exitCode != 0 {
+		// Restore terminal explicitly here since os.Exit skips defers.
+		stdoutMu.Lock()
+		resetScrollRegionLocked()
+		stdoutMu.Unlock()
+		restoreTerminal(origTermios)
 		os.Exit(exitCode)
 	}
+	// Normal exit: defer handles terminal restore + resume message.
 }
 
 const promptHeight uint16 = 4

@@ -200,7 +200,17 @@ func (s *Session) runRelay() {
 		exitCode = 1
 	}
 	if client != nil {
-		exitData, _ := json.Marshal(map[string]int{"code": exitCode})
+		convID := lookupConversationID(s.relayID)
+		exitMsg := struct {
+			Code           int    `json:"code"`
+			ConversationID string `json:"conversation_id,omitempty"`
+			Agent          string `json:"agent,omitempty"`
+		}{
+			Code:           exitCode,
+			ConversationID: convID,
+			Agent:          s.agent,
+		}
+		exitData, _ := json.Marshal(exitMsg)
 		writeFrame(client, frameExit, exitData)
 	}
 
