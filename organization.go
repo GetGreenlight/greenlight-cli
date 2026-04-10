@@ -407,6 +407,7 @@ func runOrganizationJob(args []string) {
 		orgID := fs.Int("org", 0, "Organization ID")
 		title := fs.String("title", "", "Job title (e.g. \"Gardener\")")
 		mandate := fs.String("mandate", "", "Mandate / responsibilities (markdown)")
+		requiredSkills := fs.String("required-skills", "", "Required skills, tools, or knowledge (markdown)")
 		priority := fs.Int("priority", 5, "Priority 1-10 (1=highest)")
 		fs.Parse(args[1:])
 
@@ -438,6 +439,9 @@ func runOrganizationJob(args []string) {
 		if *mandate != "" {
 			payload["mandate"] = *mandate
 		}
+		if *requiredSkills != "" {
+			payload["required_skills"] = *requiredSkills
+		}
 		data, err := sendWSRequest("create_agent_job_description", payload)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
@@ -449,6 +453,7 @@ func runOrganizationJob(args []string) {
 		id := fs.Int("id", 0, "Job description ID")
 		title := fs.String("title", "", "New title")
 		mandate := fs.String("mandate", "", "New mandate")
+		requiredSkills := fs.String("required-skills", "", "New required skills")
 		priority := fs.Int("priority", 0, "New priority")
 		fs.Parse(args[1:])
 		if *id == 0 || *title == "" {
@@ -458,6 +463,9 @@ func runOrganizationJob(args []string) {
 		payload := map[string]interface{}{"id": *id, "title": *title}
 		if *mandate != "" {
 			payload["mandate"] = *mandate
+		}
+		if *requiredSkills != "" {
+			payload["required_skills"] = *requiredSkills
 		}
 		if *priority != 0 {
 			payload["priority"] = *priority
