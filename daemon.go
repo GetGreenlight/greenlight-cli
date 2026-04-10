@@ -231,10 +231,11 @@ func ensureDaemon(deviceIDFlag string) error {
 				return fmt.Errorf("cannot derive server URL: %w", err)
 			}
 			hostname, _ := os.Hostname()
-			fmt.Fprintf(os.Stderr, "greenlight: enrolling host (approve on your phone)...\n")
+			fmt.Fprintf(os.Stderr, "greenlight: enrolling host...\n")
 			if err := enrollSession(baseURL, deviceID, hostID, "", "", "", hostname); err != nil {
 				return fmt.Errorf("host enrollment failed: %w", err)
 			}
+			fmt.Fprintf(os.Stderr, "greenlight: enrolled\n")
 			if err := writeConfigValue("host_id", hostID); err != nil {
 				return fmt.Errorf("failed to persist host_id: %w", err)
 			}
