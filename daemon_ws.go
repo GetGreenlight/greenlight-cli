@@ -242,6 +242,8 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 		d.handleSessionHistory()
 	case "session_transcript":
 		d.handleSessionTranscript(data)
+	case "delete_session":
+		d.handleDeleteSession(data)
 	case "history_entry":
 		d.handleHistoryEntry(data)
 	case "project_history":
@@ -302,7 +304,7 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 		var ctrl struct{ Type string `json:"type"` }
 		if json.Unmarshal(decoded, &ctrl) == nil {
 			switch ctrl.Type {
-			case "kill", "wake", "session_history", "session_transcript":
+			case "kill", "wake", "session_history", "session_transcript", "delete_session":
 				var full map[string]interface{}
 				if json.Unmarshal(decoded, &full) == nil {
 					if _, ok := full["relay_id"]; !ok {
@@ -356,6 +358,24 @@ func (d *DaemonWS) handleSessionHistory() {
 		return
 	}
 	d.ws.SendText(data)
+}
+
+// handleDeleteSession removes a persisted session record by relay_id.
+func (d *DaemonWS) handleDeleteSession(data []byte) {
+	var msg struct {
+		RelayID string `json:"relay_id"`
+	}
+	if json.Unmarshal(data, &msg) != nil || msg.RelayID == "" {
+		log.Printf("daemon-ws: delete_session missing relay_id")
+		return
+	}
+	rec, err := loadSessionRecordByRelayID(msg.RelayID)
+	if err != nil {
+		log.Printf("daemon-ws: delete_session: no record for relay %s: %v", msg.RelayID, err)
+		return
+	}
+	removeSessionRecord(rec.ConversationID)
+	log.Printf("daemon-ws: deleted session record %s (relay %s)", rec.ConversationID, msg.RelayID)
 }
 
 // handleHistoryEntry stores a permission request outcome from the server.
