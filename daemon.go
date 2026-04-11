@@ -396,7 +396,7 @@ func (d *Daemon) handleUpdateShutdown(conn net.Conn, req ipcRequest) {
 		d.mu.RLock()
 		var sessions []sessionInfo
 		for _, s := range d.sessions {
-			resumable := agentSupportsResume(s.agent) && lookupConversationID(s.relayID) != ""
+			resumable := agentSupportsResume(s.agent) && s.convID != ""
 			sessions = append(sessions, sessionInfo{
 				SessionID: s.relayID,
 				Agent:     s.agent,

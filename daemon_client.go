@@ -355,6 +355,9 @@ done:
 		resetScrollRegionLocked()
 		stdoutMu.Unlock()
 		restoreTerminal(origTermios)
+		if exitConvID != "" && agentSupportsResume(exitAgent) {
+			fmt.Fprintf(os.Stdout, "\nTo resume this conversation:\n  greenlight connect --resume %s\n", exitConvID)
+		}
 		os.Exit(exitCode)
 	}
 	// Normal exit: defer handles terminal restore + resume message.

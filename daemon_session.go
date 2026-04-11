@@ -39,6 +39,7 @@ type Session struct {
 	bridgeFinished  chan struct{}
 
 	transcriptCancel context.CancelFunc
+	convID          string // set by startTranscriptStreamer, read at exit
 
 	connectPidFile string
 	libPath        string
@@ -167,7 +168,7 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	startTime := time.Now()
 	var transcriptCtx context.Context
 	transcriptCtx, s.transcriptCancel = context.WithCancel(context.Background())
-	go startTranscriptStreamer(transcriptCtx, agent, relayID, setup.AgentSessionID, s.bridgePath, cwd, startTime)
+	go startTranscriptStreamer(transcriptCtx, agent, relayID, setup.AgentSessionID, s.bridgePath, cwd, startTime, &s.convID)
 
 	// Note: don't start the relay yet — wait until a client attaches
 	// so no PTY output is lost. runRelay() is called from AttachClient.
@@ -200,7 +201,7 @@ func (s *Session) runRelay() {
 		exitCode = 1
 	}
 	if client != nil {
-		convID := lookupConversationID(s.relayID)
+		convID := s.convID
 		exitMsg := struct {
 			Code           int    `json:"code"`
 			ConversationID string `json:"conversation_id,omitempty"`
