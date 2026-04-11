@@ -137,13 +137,20 @@ func selectAgentJobDescription(orgID int) (int, error) {
 		return createAgentJobDescriptionInteractive(orgID)
 	}
 
-	return selectFromList("Agent job description", func() []selectItem {
-		items := make([]selectItem, len(resp.AgentJobDescriptions))
-		for i, j := range resp.AgentJobDescriptions {
-			items[i] = selectItem{Label: fmt.Sprintf("%d: %s", j.ID, j.Title), ID: j.ID}
-		}
-		return items
-	}())
+	items := make([]selectItem, len(resp.AgentJobDescriptions))
+	for i, j := range resp.AgentJobDescriptions {
+		items[i] = selectItem{Label: fmt.Sprintf("%d: %s", j.ID, j.Title), ID: j.ID}
+	}
+	items = append(items, selectItem{Label: "→ Create new…", ID: 0})
+
+	id, err := selectFromList("Agent job description", items)
+	if err != nil {
+		return 0, err
+	}
+	if id == 0 {
+		return createAgentJobDescriptionInteractive(orgID)
+	}
+	return id, nil
 }
 
 func createAgentJobDescriptionInteractive(orgID int) (int, error) {
@@ -219,13 +226,20 @@ func selectWorkingDirectory(orgID int) (int, error) {
 		return createWorkingDirectoryInteractive(orgID)
 	}
 
-	return selectFromList("Working directory", func() []selectItem {
-		items := make([]selectItem, len(resp.WorkingDirectories))
-		for i, w := range resp.WorkingDirectories {
-			items[i] = selectItem{Label: fmt.Sprintf("%d: %s", w.ID, w.DirectoryPath), ID: w.ID}
-		}
-		return items
-	}())
+	items := make([]selectItem, len(resp.WorkingDirectories))
+	for i, w := range resp.WorkingDirectories {
+		items[i] = selectItem{Label: fmt.Sprintf("%d: %s", w.ID, w.DirectoryPath), ID: w.ID}
+	}
+	items = append(items, selectItem{Label: "→ Create new…", ID: 0})
+
+	id, err := selectFromList("Working directory", items)
+	if err != nil {
+		return 0, err
+	}
+	if id == 0 {
+		return createWorkingDirectoryInteractive(orgID)
+	}
+	return id, nil
 }
 
 func createWorkingDirectoryInteractive(orgID int) (int, error) {
@@ -289,9 +303,9 @@ func selectOrganizationPosition(orgID int) (int, error) {
 
 	var resp struct {
 		OrganizationPositions []struct {
-			ID                    int `json:"id"`
-			AgentJobDescriptionID int `json:"agent_job_description_id"`
-			WorkingDirectoryID    int `json:"working_directory_id"`
+			ID                 int  `json:"id"`
+			WorkingDirectoryID int  `json:"working_directory_id"`
+			AgentJobDescriptionID *int `json:"agent_job_description_id"`
 		} `json:"organization_positions"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -303,14 +317,24 @@ func selectOrganizationPosition(orgID int) (int, error) {
 		return createOrganizationPositionInteractive(orgID)
 	}
 
-	return selectFromList("Organization position", func() []selectItem {
-		items := make([]selectItem, len(resp.OrganizationPositions))
-		for i, p := range resp.OrganizationPositions {
-			label := fmt.Sprintf("%d: job=%d wd=%d", p.ID, p.AgentJobDescriptionID, p.WorkingDirectoryID)
-			items[i] = selectItem{Label: label, ID: p.ID}
+	items := make([]selectItem, len(resp.OrganizationPositions))
+	for i, p := range resp.OrganizationPositions {
+		label := fmt.Sprintf("%d: wd=%d", p.ID, p.WorkingDirectoryID)
+		if p.AgentJobDescriptionID != nil {
+			label += fmt.Sprintf(" job=%d", *p.AgentJobDescriptionID)
 		}
-		return items
-	}())
+		items[i] = selectItem{Label: label, ID: p.ID}
+	}
+	items = append(items, selectItem{Label: "→ Create new…", ID: 0})
+
+	id, err := selectFromList("Organization position", items)
+	if err != nil {
+		return 0, err
+	}
+	if id == 0 {
+		return createOrganizationPositionInteractive(orgID)
+	}
+	return id, nil
 }
 
 func createOrganizationPositionInteractive(orgID int) (int, error) {
