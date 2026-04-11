@@ -626,7 +626,6 @@ func runOrganizationAgent(args []string) {
 		printJSON(data)
 	case "create":
 		fs := flag.NewFlagSet("agent create", flag.ExitOnError)
-		wdID := fs.Int("wd", 0, "Working directory ID")
 		posID := fs.Int("pos", 0, "Organization position ID")
 		modelID := fs.Int("model", 0, "AI brain model ID (optional)")
 		harnessID := fs.Int("harness", 0, "Harness ID (optional)")
@@ -638,14 +637,6 @@ func runOrganizationAgent(args []string) {
 			os.Exit(1)
 		}
 
-		if *wdID == 0 {
-			id, err := selectWorkingDirectory(orgID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-				os.Exit(1)
-			}
-			*wdID = id
-		}
 		if *posID == 0 {
 			id, err := selectOrganizationPosition(orgID)
 			if err != nil {
@@ -657,7 +648,6 @@ func runOrganizationAgent(args []string) {
 
 		payload := map[string]interface{}{
 			"organization_id":          orgID,
-			"working_directory_id":     *wdID,
 			"organization_position_id": *posID,
 		}
 		if *modelID != 0 {
