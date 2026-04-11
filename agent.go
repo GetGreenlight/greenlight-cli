@@ -100,7 +100,7 @@ const greenlightSystemPrompt = `Tool calls are managed by a permission system ca
 // finds the newest session dir. Returns "" if it can't be determined.
 func deriveTranscriptPath(agent, sessionID, cwd string) string {
 	switch agent {
-	case "claude":
+	case "claude", "claude-code":
 		if sessionID != "" {
 			return deriveClaudeTranscriptPathByID(sessionID, cwd)
 		}
