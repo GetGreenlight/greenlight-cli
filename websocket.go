@@ -208,16 +208,7 @@ func (c *WSClient) drainTextQueue(conn *websocket.Conn) {
 		err := conn.Write(ctx, websocket.MessageText, msg)
 		cancel()
 		if err != nil {
-			log.Printf("ws: drain write error: %v", err)
-			// Re-queue unsent messages (from index i onward).
-			unsent := queue[i:]
-			c.textMu.Lock()
-			// Prepend unsent to any messages that arrived while draining.
-			c.textQueue = append(unsent, c.textQueue...)
-			if len(c.textQueue) > textQueueSize {
-				c.textQueue = c.textQueue[:textQueueSize]
-			}
-			c.textMu.Unlock()
+			log.Printf("ws: drain write error after %d/%d messages, dropping %d unsent: %v", i, len(queue), len(queue)-i, err)
 			return
 		}
 	}
