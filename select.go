@@ -151,11 +151,7 @@ func createAgentJobDescriptionInteractive(orgID int) (int, error) {
 		orgID = workingOrgID()
 	}
 	if orgID == 0 {
-		var err error
-		orgID, err = selectOrganization()
-		if err != nil {
-			return 0, err
-		}
+		return 0, fmt.Errorf("no working organization set (run 'greenlight organization organization use --id <ID>')")
 	}
 
 	reader := bufio.NewReader(os.Stdin)
@@ -237,11 +233,7 @@ func createWorkingDirectoryInteractive(orgID int) (int, error) {
 		orgID = workingOrgID()
 	}
 	if orgID == 0 {
-		var err error
-		orgID, err = selectOrganization()
-		if err != nil {
-			return 0, err
-		}
+		return 0, fmt.Errorf("no working organization set (run 'greenlight organization organization use --id <ID>')")
 	}
 
 	hostID := readConfigValue("host_id")
@@ -326,11 +318,7 @@ func createOrganizationPositionInteractive(orgID int) (int, error) {
 		orgID = workingOrgID()
 	}
 	if orgID == 0 {
-		var err error
-		orgID, err = selectOrganization()
-		if err != nil {
-			return 0, err
-		}
+		return 0, fmt.Errorf("no working organization set (run 'greenlight organization organization use --id <ID>')")
 	}
 
 	jobID, err := selectAgentJobDescription(orgID)

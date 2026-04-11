@@ -272,24 +272,18 @@ func runOrganizationWD(args []string) {
 		printJSON(data)
 	case "create":
 		fs := flag.NewFlagSet("wd create", flag.ExitOnError)
-		orgID := fs.Int("org", 0, "Organization ID")
 		hostID := fs.String("host-id", "", "Host ID (defaults to daemon's host)")
 		dir := fs.String("dir", "", "Directory path (defaults to cwd)")
 		fs.Parse(args[1:])
 
+		orgID := workingOrgID()
+		if orgID == 0 {
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight organization organization use --id <ID>')\n")
+			os.Exit(1)
+		}
+
 		reader := bufio.NewReader(os.Stdin)
 
-		if *orgID == 0 {
-			*orgID = workingOrgID()
-		}
-		if *orgID == 0 {
-			id, err := selectOrganization()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-				os.Exit(1)
-			}
-			*orgID = id
-		}
 		if *hostID == "" {
 			*hostID = readConfigValue("host_id")
 		}
@@ -306,7 +300,7 @@ func runOrganizationWD(args []string) {
 		}
 
 		payload := map[string]interface{}{
-			"organization_id": *orgID,
+			"organization_id": orgID,
 			"host_id":         *hostID,
 		}
 		if *dir != "" {
@@ -404,25 +398,19 @@ func runOrganizationJob(args []string) {
 		printJSON(data)
 	case "create":
 		fs := flag.NewFlagSet("job create", flag.ExitOnError)
-		orgID := fs.Int("org", 0, "Organization ID")
 		title := fs.String("title", "", "Job title (e.g. \"Gardener\")")
 		mandate := fs.String("mandate", "", "Mandate / responsibilities (markdown)")
 		requiredSkills := fs.String("required-skills", "", "Required skills, tools, or knowledge (markdown)")
 		priority := fs.Int("priority", 5, "Priority 1-10 (1=highest)")
 		fs.Parse(args[1:])
 
+		orgID := workingOrgID()
+		if orgID == 0 {
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight organization organization use --id <ID>')\n")
+			os.Exit(1)
+		}
+
 		reader := bufio.NewReader(os.Stdin)
-		if *orgID == 0 {
-			*orgID = workingOrgID()
-		}
-		if *orgID == 0 {
-			id, err := selectOrganization()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-				os.Exit(1)
-			}
-			*orgID = id
-		}
 		if *title == "" {
 			*title = promptLine(reader, "Title: ")
 		}
@@ -432,7 +420,7 @@ func runOrganizationJob(args []string) {
 		}
 
 		payload := map[string]interface{}{
-			"organization_id": *orgID,
+			"organization_id": orgID,
 			"title":           *title,
 			"priority":        *priority,
 		}
@@ -539,25 +527,19 @@ func runOrganizationPos(args []string) {
 		printJSON(data)
 	case "create":
 		fs := flag.NewFlagSet("pos create", flag.ExitOnError)
-		orgID := fs.Int("org", 0, "Organization ID")
 		jobID := fs.Int("job", 0, "Agent job description ID (optional)")
 		wdID := fs.Int("wd", 0, "Working directory ID")
 		parentID := fs.Int("parent", 0, "Parent position ID (optional)")
 		fs.Parse(args[1:])
 
-		if *orgID == 0 {
-			*orgID = workingOrgID()
+		orgID := workingOrgID()
+		if orgID == 0 {
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight organization organization use --id <ID>')\n")
+			os.Exit(1)
 		}
-		if *orgID == 0 {
-			id, err := selectOrganization()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-				os.Exit(1)
-			}
-			*orgID = id
-		}
+
 		if *wdID == 0 {
-			id, err := selectWorkingDirectory(*orgID)
+			id, err := selectWorkingDirectory(orgID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 				os.Exit(1)
@@ -566,7 +548,7 @@ func runOrganizationPos(args []string) {
 		}
 
 		payload := map[string]interface{}{
-			"organization_id":      *orgID,
+			"organization_id":      orgID,
 			"working_directory_id": *wdID,
 		}
 		if *jobID != 0 {
@@ -644,26 +626,20 @@ func runOrganizationAgent(args []string) {
 		printJSON(data)
 	case "create":
 		fs := flag.NewFlagSet("agent create", flag.ExitOnError)
-		orgID := fs.Int("org", 0, "Organization ID")
 		wdID := fs.Int("wd", 0, "Working directory ID")
 		posID := fs.Int("pos", 0, "Organization position ID")
 		modelID := fs.Int("model", 0, "AI brain model ID (optional)")
 		harnessID := fs.Int("harness", 0, "Harness ID (optional)")
 		fs.Parse(args[1:])
 
-		if *orgID == 0 {
-			*orgID = workingOrgID()
+		orgID := workingOrgID()
+		if orgID == 0 {
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight organization organization use --id <ID>')\n")
+			os.Exit(1)
 		}
-		if *orgID == 0 {
-			id, err := selectOrganization()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-				os.Exit(1)
-			}
-			*orgID = id
-		}
+
 		if *wdID == 0 {
-			id, err := selectWorkingDirectory(*orgID)
+			id, err := selectWorkingDirectory(orgID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 				os.Exit(1)
@@ -671,7 +647,7 @@ func runOrganizationAgent(args []string) {
 			*wdID = id
 		}
 		if *posID == 0 {
-			id, err := selectOrganizationPosition(*orgID)
+			id, err := selectOrganizationPosition(orgID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 				os.Exit(1)
@@ -680,7 +656,7 @@ func runOrganizationAgent(args []string) {
 		}
 
 		payload := map[string]interface{}{
-			"organization_id":          *orgID,
+			"organization_id":          orgID,
 			"working_directory_id":     *wdID,
 			"organization_position_id": *posID,
 		}
