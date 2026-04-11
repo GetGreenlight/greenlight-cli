@@ -45,7 +45,7 @@ func saveSessionRecord(s *Session) {
 	}
 	os.MkdirAll(dir, 0755)
 
-	convID := lookupConversationID(s.relayID)
+	convID := s.convID
 	if convID == "" {
 		log.Printf("daemon: no conversation ID for relay %s, skipping session save", s.relayID)
 		return

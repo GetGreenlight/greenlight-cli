@@ -77,7 +77,7 @@ func runConnect(args []string) {
 
 // startTranscriptStreamer polls for the agent's transcript file to appear,
 // then spawns `greenlight stream --bridge` to tail it into the bridge file.
-func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID, bridgePath, cwd string, notBefore time.Time) {
+func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID, bridgePath, cwd string, notBefore time.Time, convIDOut *string) {
 	// Poll until the agent creates its transcript file or the session ends.
 	// Some agents (e.g. Codex) only create the file on first user prompt,
 	// so we poll for the entire session lifetime rather than using a fixed cap.
@@ -138,6 +138,9 @@ func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID
 	if convID != "" {
 		saveRelayID(convID, relayID)
 		log.Printf("Transcript: saved relay mapping %s → %s", convID, relayID)
+		if convIDOut != nil {
+			*convIDOut = convID
+		}
 	}
 
 	exePath, err := os.Executable()
