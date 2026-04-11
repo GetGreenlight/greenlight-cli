@@ -466,7 +466,10 @@ func (d *DaemonWS) handleSessionTranscript(data []byte) {
 	}
 	defer f.Close()
 
+	const maxBytes = 8 << 20 // 8 MB — must not exceed server's WS read limit
+
 	var entries []json.RawMessage
+	var totalBytes int
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {
@@ -477,10 +480,18 @@ func (d *DaemonWS) handleSessionTranscript(data []byte) {
 		// Validate it's valid JSON before including
 		if json.Valid(line) {
 			entries = append(entries, json.RawMessage(append([]byte(nil), line...)))
+			totalBytes += len(line)
 		}
 	}
 
-	log.Printf("daemon-ws: session_transcript for relay %s: %d entries", msg.RelayID, len(entries))
+	// Trim oldest entries until the total fits within the size limit.
+	// Account for JSON array overhead (wrapper + relay_id + type fields ~100 bytes).
+	for len(entries) > 0 && totalBytes > maxBytes-1024 {
+		totalBytes -= len(entries[0])
+		entries = entries[1:]
+	}
+
+	log.Printf("daemon-ws: session_transcript for relay %s: %d entries (%d bytes)", msg.RelayID, len(entries), totalBytes)
 	d.sendTranscriptResponse(msg.RelayID, entries, "")
 }
 
