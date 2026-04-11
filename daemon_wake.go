@@ -22,7 +22,6 @@ type sessionRecord struct {
 	Agent          string `json:"agent"`
 	Project        string `json:"project"`
 	Cwd            string `json:"cwd"`
-	DeviceID       string `json:"device_id"`
 	Hostname       string `json:"hostname"`
 	StartedAt      string `json:"started_at"`
 	EndedAt        string `json:"ended_at"`
@@ -58,7 +57,6 @@ func saveSessionRecord(s *Session) {
 		Agent:          s.agent,
 		Project:        s.project,
 		Cwd:            s.cwd,
-		DeviceID:       s.deviceID,
 		Hostname:       hostname,
 		StartedAt:      s.startedAt.Format(time.RFC3339),
 		EndedAt:        time.Now().Format(time.RFC3339),
