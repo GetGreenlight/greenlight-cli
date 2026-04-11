@@ -540,7 +540,7 @@ func runOrganizationPos(args []string) {
 	case "create":
 		fs := flag.NewFlagSet("pos create", flag.ExitOnError)
 		orgID := fs.Int("org", 0, "Organization ID")
-		jobID := fs.Int("job", 0, "Agent job description ID")
+		jobID := fs.Int("job", 0, "Agent job description ID (optional)")
 		wdID := fs.Int("wd", 0, "Working directory ID")
 		parentID := fs.Int("parent", 0, "Parent position ID (optional)")
 		fs.Parse(args[1:])
@@ -556,14 +556,6 @@ func runOrganizationPos(args []string) {
 			}
 			*orgID = id
 		}
-		if *jobID == 0 {
-			id, err := selectAgentJobDescription(*orgID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-				os.Exit(1)
-			}
-			*jobID = id
-		}
 		if *wdID == 0 {
 			id, err := selectWorkingDirectory(*orgID)
 			if err != nil {
@@ -574,9 +566,11 @@ func runOrganizationPos(args []string) {
 		}
 
 		payload := map[string]interface{}{
-			"organization_id":         *orgID,
-			"agent_job_description_id": *jobID,
-			"working_directory_id":    *wdID,
+			"organization_id":      *orgID,
+			"working_directory_id": *wdID,
+		}
+		if *jobID != 0 {
+			payload["agent_job_description_id"] = *jobID
 		}
 		if *parentID != 0 {
 			payload["parent_position_id"] = *parentID
