@@ -214,6 +214,7 @@ func selectWorkingDirectory(orgID int) (int, error) {
 	var resp struct {
 		WorkingDirectories []struct {
 			ID            int    `json:"id"`
+			Name          string `json:"name"`
 			DirectoryPath string `json:"directory_path"`
 		} `json:"working_directories"`
 	}
@@ -228,7 +229,14 @@ func selectWorkingDirectory(orgID int) (int, error) {
 
 	items := make([]selectItem, len(resp.WorkingDirectories))
 	for i, w := range resp.WorkingDirectories {
-		items[i] = selectItem{Label: fmt.Sprintf("%d: %s", w.ID, w.DirectoryPath), ID: w.ID}
+		label := w.Name
+		if label == "" {
+			label = w.DirectoryPath
+		}
+		if label == "" {
+			label = fmt.Sprintf("id=%d", w.ID)
+		}
+		items[i] = selectItem{Label: fmt.Sprintf("%d: %s", w.ID, label), ID: w.ID}
 	}
 	items = append(items, selectItem{Label: "→ Create new…", ID: 0})
 
@@ -257,11 +265,15 @@ func createWorkingDirectoryInteractive(orgID int) (int, error) {
 
 	cwd, _ := os.Getwd()
 	reader := bufio.NewReader(os.Stdin)
+	name := promptLine(reader, "Name (optional): ")
 	dir := promptWithDefault(reader, "Directory path", cwd)
 
 	payload := map[string]interface{}{
 		"organization_id": orgID,
 		"host_id":         hostID,
+	}
+	if name != "" {
+		payload["name"] = name
 	}
 	if dir != "" {
 		payload["directory_path"] = dir
@@ -303,9 +315,10 @@ func selectOrganizationPosition(orgID int) (int, error) {
 
 	var resp struct {
 		OrganizationPositions []struct {
-			ID                 int  `json:"id"`
-			WorkingDirectoryID int  `json:"working_directory_id"`
-			AgentJobDescriptionID *int `json:"agent_job_description_id"`
+			ID                    int    `json:"id"`
+			Name                  string `json:"name"`
+			WorkingDirectoryID    int    `json:"working_directory_id"`
+			AgentJobDescriptionID *int   `json:"agent_job_description_id"`
 		} `json:"organization_positions"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -319,11 +332,16 @@ func selectOrganizationPosition(orgID int) (int, error) {
 
 	items := make([]selectItem, len(resp.OrganizationPositions))
 	for i, p := range resp.OrganizationPositions {
-		label := fmt.Sprintf("%d: wd=%d", p.ID, p.WorkingDirectoryID)
-		if p.AgentJobDescriptionID != nil {
-			label += fmt.Sprintf(" job=%d", *p.AgentJobDescriptionID)
+		var label string
+		if p.Name != "" {
+			label = p.Name
+		} else {
+			label = fmt.Sprintf("wd=%d", p.WorkingDirectoryID)
+			if p.AgentJobDescriptionID != nil {
+				label += fmt.Sprintf(" job=%d", *p.AgentJobDescriptionID)
+			}
 		}
-		items[i] = selectItem{Label: label, ID: p.ID}
+		items[i] = selectItem{Label: fmt.Sprintf("%d: %s", p.ID, label), ID: p.ID}
 	}
 	items = append(items, selectItem{Label: "→ Create new…", ID: 0})
 
@@ -355,10 +373,16 @@ func createOrganizationPositionInteractive(orgID int) (int, error) {
 		return 0, err
 	}
 
+	reader := bufio.NewReader(os.Stdin)
+	name := promptLine(reader, "Name (optional): ")
+
 	payload := map[string]interface{}{
 		"organization_id":          orgID,
 		"agent_job_description_id": jobID,
 		"working_directory_id":     wdID,
+	}
+	if name != "" {
+		payload["name"] = name
 	}
 	data, err := sendWSRequest("create_organization_position", payload)
 	if err != nil {
