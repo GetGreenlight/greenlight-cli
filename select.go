@@ -214,7 +214,7 @@ func selectWorkingDirectory(orgID int) (int, error) {
 	var resp struct {
 		WorkingDirectories []struct {
 			ID            int    `json:"id"`
-			Name          string `json:"name"`
+			Hostname      string `json:"hostname"`
 			DirectoryPath string `json:"directory_path"`
 		} `json:"working_directories"`
 	}
@@ -229,11 +229,8 @@ func selectWorkingDirectory(orgID int) (int, error) {
 
 	items := make([]selectItem, len(resp.WorkingDirectories))
 	for i, w := range resp.WorkingDirectories {
-		label := w.Name
-		if label == "" {
-			label = w.DirectoryPath
-		}
-		if label == "" {
+		label := w.Hostname + ":" + w.DirectoryPath
+		if w.Hostname == "" && w.DirectoryPath == "" {
 			label = fmt.Sprintf("id=%d", w.ID)
 		}
 		items[i] = selectItem{Label: fmt.Sprintf("%d: %s", w.ID, label), ID: w.ID}
@@ -265,15 +262,11 @@ func createWorkingDirectoryInteractive(orgID int) (int, error) {
 
 	cwd, _ := os.Getwd()
 	reader := bufio.NewReader(os.Stdin)
-	name := promptLine(reader, "Name (optional): ")
 	dir := promptWithDefault(reader, "Directory path", cwd)
 
 	payload := map[string]interface{}{
 		"organization_id": orgID,
 		"host_id":         hostID,
-	}
-	if name != "" {
-		payload["name"] = name
 	}
 	if dir != "" {
 		payload["directory_path"] = dir

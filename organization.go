@@ -629,6 +629,7 @@ func runOrganizationAgent(args []string) {
 		posID := fs.Int("pos", 0, "Organization position ID")
 		modelID := fs.Int("model", 0, "AI brain model ID (optional)")
 		harnessID := fs.Int("harness", 0, "Harness ID (optional)")
+		name := fs.String("name", "", "Human-readable name (optional)")
 		fs.Parse(args[1:])
 
 		orgID := workingOrgID()
@@ -655,6 +656,9 @@ func runOrganizationAgent(args []string) {
 		}
 		if *harnessID != 0 {
 			payload["harness_id"] = *harnessID
+		}
+		if *name != "" {
+			payload["name"] = *name
 		}
 		data, err := sendWSRequest("create_ai_agent_instance", payload)
 		if err != nil {
