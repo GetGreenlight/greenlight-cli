@@ -152,7 +152,6 @@ func TestIntegration_SessionHistory_WithRecords(t *testing.T) {
 		Agent:          "claude",
 		Project:        "my-project",
 		Cwd:            "/tmp/my-project",
-		DeviceID:       "test-device",
 		EndedAt:        "2026-03-25T10:00:00Z",
 	})
 	createTestSessionRecord(t, home, sessionRecord{
@@ -161,7 +160,6 @@ func TestIntegration_SessionHistory_WithRecords(t *testing.T) {
 		Agent:          "gemini",
 		Project:        "other-project",
 		Cwd:            "/tmp/other-project",
-		DeviceID:       "test-device",
 		EndedAt:        "2026-03-25T11:00:00Z",
 	})
 

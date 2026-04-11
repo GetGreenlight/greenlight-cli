@@ -42,9 +42,6 @@ func runConnect(args []string) {
 			if *agentFlag == "" {
 				*agentFlag = rec.Agent
 			}
-			if *deviceID == "" {
-				*deviceID = rec.DeviceID
-			}
 			if *project == "" {
 				*project = rec.Project
 			}
