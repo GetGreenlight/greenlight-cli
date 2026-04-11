@@ -139,10 +139,8 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 
 	// Register this session with the daemon's shared WebSocket
 	killFunc := func() {
-		if r.cmd.Process != nil {
-			r.killed = true
-			syscall.Kill(-r.cmd.Process.Pid, syscall.SIGKILL)
-		}
+		r.killed = true
+		s.Stop()
 	}
 	if d.daemonWS != nil {
 		sw := d.daemonWS.RegisterSession(relayID, r.Inject, killFunc)
