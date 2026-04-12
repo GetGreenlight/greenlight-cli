@@ -302,9 +302,7 @@ func runOrganizationWD(args []string) {
 		payload := map[string]interface{}{
 			"organization_id": orgID,
 			"host_id":         *hostID,
-		}
-		if *dir != "" {
-			payload["directory_path"] = *dir
+			"directory_path":  *dir,
 		}
 		data, err := sendWSRequest("create_working_directory", payload)
 		if err != nil {
@@ -541,7 +539,11 @@ func runOrganizationPos(args []string) {
 
 		reader := bufio.NewReader(os.Stdin)
 		if *name == "" {
-			*name = promptLine(reader, "Name (optional): ")
+			*name = promptLine(reader, "Name: ")
+		}
+		if *name == "" {
+			fmt.Fprintf(os.Stderr, "greenlight: name required\n")
+			os.Exit(1)
 		}
 
 		if *wdID == 0 {
@@ -645,9 +647,9 @@ func runOrganizationAgent(args []string) {
 	case "create":
 		fs := flag.NewFlagSet("agent create", flag.ExitOnError)
 		posID := fs.Int("pos", 0, "Organization position ID")
-		modelID := fs.Int("model", 0, "AI brain model ID (optional)")
-		harnessID := fs.Int("harness", 0, "Harness ID (optional)")
-		name := fs.String("name", "", "Human-readable name (optional)")
+		modelID := fs.Int("model", 0, "AI brain model ID")
+		harnessID := fs.Int("harness", 0, "Harness ID")
+		name := fs.String("name", "", "Human-readable name")
 		fs.Parse(args[1:])
 
 		orgID := workingOrgID()
@@ -665,23 +667,39 @@ func runOrganizationAgent(args []string) {
 			*posID = id
 		}
 
+		if *modelID == 0 {
+			id, err := selectAIBrainModel(orgID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+				os.Exit(1)
+			}
+			*modelID = id
+		}
+
+		if *harnessID == 0 {
+			id, err := selectHarness()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+				os.Exit(1)
+			}
+			*harnessID = id
+		}
+
 		reader := bufio.NewReader(os.Stdin)
 		if *name == "" {
-			*name = promptLine(reader, "Name (optional): ")
+			*name = promptLine(reader, "Name: ")
+		}
+		if *name == "" {
+			fmt.Fprintf(os.Stderr, "greenlight: name required\n")
+			os.Exit(1)
 		}
 
 		payload := map[string]interface{}{
 			"organization_id":          orgID,
 			"organization_position_id": *posID,
-		}
-		if *modelID != 0 {
-			payload["ai_brain_model_id"] = *modelID
-		}
-		if *harnessID != 0 {
-			payload["harness_id"] = *harnessID
-		}
-		if *name != "" {
-			payload["name"] = *name
+			"ai_brain_model_id":        *modelID,
+			"harness_id":               *harnessID,
+			"name":                     *name,
 		}
 		data, err := sendWSRequest("create_ai_agent_instance", payload)
 		if err != nil {

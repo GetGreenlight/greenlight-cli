@@ -42,6 +42,72 @@ func selectFromList(label string, items []selectItem) (int, error) {
 }
 
 // =============================================================================
+// selectHarness
+// =============================================================================
+
+func selectHarness() (int, error) {
+	data, err := sendWSRequest("list_harnesses", nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch harnesses: %w", err)
+	}
+
+	var resp struct {
+		Harnesses []struct {
+			ID   int    `json:"id"`
+			Name string `json:"name"`
+		} `json:"harnesses"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, fmt.Errorf("failed to parse harnesses: %w", err)
+	}
+
+	if len(resp.Harnesses) == 0 {
+		return 0, fmt.Errorf("no harnesses found — seed the database first")
+	}
+
+	items := make([]selectItem, len(resp.Harnesses))
+	for i, h := range resp.Harnesses {
+		items[i] = selectItem{Label: fmt.Sprintf("%d: %s", h.ID, h.Name), ID: h.ID}
+	}
+	return selectFromList("Harness", items)
+}
+
+// =============================================================================
+// selectAIBrainModel
+// =============================================================================
+
+func selectAIBrainModel(orgID int) (int, error) {
+	payload := map[string]interface{}{}
+	if orgID != 0 {
+		payload["organization_id"] = orgID
+	}
+	data, err := sendWSRequest("list_ai_brain_models", payload)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch AI brain models: %w", err)
+	}
+
+	var resp struct {
+		AIBrainModels []struct {
+			ID   int    `json:"id"`
+			Name string `json:"name"`
+		} `json:"ai_brain_models"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, fmt.Errorf("failed to parse AI brain models: %w", err)
+	}
+
+	if len(resp.AIBrainModels) == 0 {
+		return 0, fmt.Errorf("no AI brain models found — seed the database first")
+	}
+
+	items := make([]selectItem, len(resp.AIBrainModels))
+	for i, m := range resp.AIBrainModels {
+		items[i] = selectItem{Label: fmt.Sprintf("%d: %s", m.ID, m.Name), ID: m.ID}
+	}
+	return selectFromList("AI brain model", items)
+}
+
+// =============================================================================
 // selectOrganization
 // =============================================================================
 
@@ -306,9 +372,7 @@ func createWorkingDirectoryInteractive(orgID int) (int, error) {
 	payload := map[string]interface{}{
 		"organization_id": orgID,
 		"host_id":         hostID,
-	}
-	if dir != "" {
-		payload["directory_path"] = dir
+		"directory_path":  dir,
 	}
 	data, err := sendWSRequest("create_working_directory", payload)
 	if err != nil {
@@ -396,7 +460,10 @@ func createOrganizationPositionInteractive(orgID int) (int, error) {
 	}
 
 	reader := bufio.NewReader(os.Stdin)
-	name := promptLine(reader, "Name (optional): ")
+	name := promptLine(reader, "Name: ")
+	if name == "" {
+		return 0, fmt.Errorf("name required")
+	}
 
 	wdID, err := selectWorkingDirectory(orgID)
 	if err != nil {
