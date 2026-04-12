@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -475,11 +476,17 @@ func translateInterposeRequest(req interposeRequest) (string, map[string]interfa
 		// Join args as the command string
 		cmd := ""
 		if len(req.Args) > 0 {
-			// For shell -c, the command is typically in args[2]
+			// For shell -c, the command is typically in args[2].
+			// Only look for -c when the binary is actually a shell,
+			// since other tools (e.g. git -c key=val) use -c for
+			// different purposes.
 			shellCmd := ""
 			cursorCmd := ""
+			base := filepath.Base(req.Path)
+			isShell := base == "sh" || base == "bash" || base == "zsh" ||
+				base == "dash" || base == "ksh" || base == "fish"
 			for i, a := range req.Args {
-				if a == "-c" && i+1 < len(req.Args) {
+				if isShell && a == "-c" && i+1 < len(req.Args) {
 					shellCmd = req.Args[i+1]
 				}
 				// Cursor wrapper: actual command is the arg after "--"
