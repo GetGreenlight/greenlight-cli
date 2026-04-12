@@ -91,6 +91,8 @@ func runOrganization(args []string) {
 	switch args[0] {
 	case "organization":
 		runOrganizationOrg(args[1:])
+	case "user":
+		runOrganizationUser(args[1:])
 	case "wd":
 		runOrganizationWD(args[1:])
 	case "job_description":
@@ -112,6 +114,7 @@ func printOrganizationUsage() {
 
 Entities:
   organization     Organizations
+  user             Human users
   wd               Working directories
   job_description  Agent job descriptions
   position         Organization positions
@@ -225,6 +228,87 @@ func runOrganizationOrg(args []string) {
 		fmt.Printf("Working organization set to %d.\n", *id)
 	default:
 		fmt.Fprintf(os.Stderr, "greenlight organization organization: unknown command %q\n", args[0])
+		os.Exit(1)
+	}
+}
+
+// =============================================================================
+// user — human users (scoped to working organization)
+// =============================================================================
+
+func runOrganizationUser(args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+		fmt.Fprintf(os.Stderr, "Usage: greenlight organization user <list|get|create>\n")
+		os.Exit(0)
+	}
+	switch args[0] {
+	case "list":
+		orgID := workingOrgID()
+		if orgID == 0 {
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight organization organization use --id <ID>')\n")
+			os.Exit(1)
+		}
+		data, err := sendWSRequest("list_human_users", map[string]interface{}{"organization_id": orgID})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+			os.Exit(1)
+		}
+		printJSON(data)
+	case "get":
+		fs := flag.NewFlagSet("user get", flag.ExitOnError)
+		id := fs.String("id", "", "User ID")
+		fs.Parse(args[1:])
+		if *id == "" {
+			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
+			os.Exit(1)
+		}
+		orgID := workingOrgID()
+		if orgID == 0 {
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight organization organization use --id <ID>')\n")
+			os.Exit(1)
+		}
+		data, err := sendWSRequest("get_human_user", map[string]interface{}{"id": *id, "organization_id": orgID})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+			os.Exit(1)
+		}
+		printJSON(data)
+	case "create":
+		fs := flag.NewFlagSet("user create", flag.ExitOnError)
+		name := fs.String("name", "", "User name")
+		role := fs.String("role", "", "Membership role (owner|member, default member)")
+		fs.Parse(args[1:])
+
+		orgID := workingOrgID()
+		if orgID == 0 {
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight organization organization use --id <ID>')\n")
+			os.Exit(1)
+		}
+
+		if *name == "" {
+			reader := bufio.NewReader(os.Stdin)
+			*name = promptLine(reader, "Name: ")
+		}
+		if *name == "" {
+			fmt.Fprintf(os.Stderr, "greenlight: name required\n")
+			os.Exit(1)
+		}
+
+		payload := map[string]interface{}{
+			"organization_id": orgID,
+			"name":            *name,
+		}
+		if *role != "" {
+			payload["role"] = *role
+		}
+		data, err := sendWSRequest("create_human_user", payload)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+			os.Exit(1)
+		}
+		printJSON(data)
+	default:
+		fmt.Fprintf(os.Stderr, "greenlight organization user: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
