@@ -89,7 +89,7 @@ func runOrganization(args []string) {
 		os.Exit(0)
 	}
 	switch args[0] {
-	case "organization":
+	case "org":
 		runOrganizationOrg(args[1:])
 	case "user":
 		runOrganizationUser(args[1:])
@@ -113,7 +113,7 @@ func printOrganizationUsage() {
 	fmt.Fprintf(os.Stderr, `Usage: greenlight org <entity> <command> [flags]
 
 Entities:
-  organization     Organizations
+  org              Organizations
   user             Human users
   wd               Working directories
   job_description  Agent job descriptions
@@ -131,7 +131,7 @@ Run 'greenlight org <entity> --help' for details.
 
 func runOrganizationOrg(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight org organization <list|get|create|update|delete|use>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight org org <list|get|create|update|delete|use>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -227,7 +227,7 @@ func runOrganizationOrg(args []string) {
 		}
 		fmt.Printf("Working organization set to %d.\n", *id)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight org organization: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight org org: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -245,7 +245,7 @@ func runOrganizationUser(args []string) {
 	case "list":
 		orgID := workingOrgID()
 		if orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
 		data, err := sendWSRequest("list_human_users", map[string]interface{}{"organization_id": orgID})
@@ -264,7 +264,7 @@ func runOrganizationUser(args []string) {
 		}
 		orgID := workingOrgID()
 		if orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
 		data, err := sendWSRequest("get_human_user", map[string]interface{}{"id": *id, "organization_id": orgID})
@@ -281,7 +281,7 @@ func runOrganizationUser(args []string) {
 
 		orgID := workingOrgID()
 		if orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
 
@@ -331,7 +331,7 @@ func runOrganizationWD(args []string) {
 			*orgID = workingOrgID()
 		}
 		if *orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
 		data, err := sendWSRequest("list_working_directories", map[string]interface{}{"organization_id": *orgID})
@@ -362,7 +362,7 @@ func runOrganizationWD(args []string) {
 
 		orgID := workingOrgID()
 		if orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
 
@@ -455,7 +455,7 @@ func runOrganizationJob(args []string) {
 			*orgID = workingOrgID()
 		}
 		if *orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
 		data, err := sendWSRequest("list_agent_job_descriptions", map[string]interface{}{"organization_id": *orgID})
@@ -488,7 +488,7 @@ func runOrganizationJob(args []string) {
 
 		orgID := workingOrgID()
 		if orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
 
@@ -584,7 +584,7 @@ func runOrganizationPos(args []string) {
 			*orgID = workingOrgID()
 		}
 		if *orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
 		data, err := sendWSRequest("list_organization_positions", map[string]interface{}{"organization_id": *orgID})
@@ -617,7 +617,7 @@ func runOrganizationPos(args []string) {
 
 		orgID := workingOrgID()
 		if orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
 
@@ -705,7 +705,7 @@ func runOrganizationAgent(args []string) {
 			*orgID = workingOrgID()
 		}
 		if *orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
 		data, err := sendWSRequest("list_ai_agent_instances", map[string]interface{}{"organization_id": *orgID})
@@ -738,7 +738,7 @@ func runOrganizationAgent(args []string) {
 
 		orgID := workingOrgID()
 		if orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
 
@@ -844,7 +844,7 @@ func runOrganizationModel(args []string) {
 			*orgID = workingOrgID()
 		}
 		if *orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
 		data, err := sendWSRequest("list_ai_brain_models", map[string]interface{}{"organization_id": *orgID})

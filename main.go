@@ -100,7 +100,7 @@ Commands:
   register   Register a device ID for the Greenlight app
   agent      Get or set the default agent runtime (claude, codex, copilot, cursor, gemini, pi)
   daemon     Manage the background daemon (start, stop, status)
-  org        Manage multi-agent organization entities (organization, user, wd, job, pos, agent, model)
+  org        Manage multi-agent organization entities (org, user, wd, job, pos, agent, model)
   wd         Manage working directories (create, list)
   update     Update greenlight to the latest version
   version    Print version and build settings
