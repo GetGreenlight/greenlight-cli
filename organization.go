@@ -104,13 +104,13 @@ func runOrganization(args []string) {
 	case "ai_model":
 		runOrganizationModel(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight organization: unknown entity %q\nRun 'greenlight organization --help' for usage.\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight org: unknown entity %q\nRun 'greenlight org --help' for usage.\n", args[0])
 		os.Exit(1)
 	}
 }
 
 func printOrganizationUsage() {
-	fmt.Fprintf(os.Stderr, `Usage: greenlight organization <entity> <command> [flags]
+	fmt.Fprintf(os.Stderr, `Usage: greenlight org <entity> <command> [flags]
 
 Entities:
   organization     Organizations
@@ -121,7 +121,7 @@ Entities:
   agent            AI agent instances
   ai_model         AI brain models (read-only)
 
-Run 'greenlight organization <entity> --help' for details.
+Run 'greenlight org <entity> --help' for details.
 `)
 }
 
@@ -131,7 +131,7 @@ Run 'greenlight organization <entity> --help' for details.
 
 func runOrganizationOrg(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight organization organization <list|get|create|update|delete|use>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight org organization <list|get|create|update|delete|use>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -227,7 +227,7 @@ func runOrganizationOrg(args []string) {
 		}
 		fmt.Printf("Working organization set to %d.\n", *id)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight organization organization: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight org organization: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -238,14 +238,14 @@ func runOrganizationOrg(args []string) {
 
 func runOrganizationUser(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight organization user <list|get|create>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight org user <list|get|create>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
 	case "list":
 		orgID := workingOrgID()
 		if orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight organization organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org organization use --id <ID>')\n")
 			os.Exit(1)
 		}
 		data, err := sendWSRequest("list_human_users", map[string]interface{}{"organization_id": orgID})
@@ -264,7 +264,7 @@ func runOrganizationUser(args []string) {
 		}
 		orgID := workingOrgID()
 		if orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight organization organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org organization use --id <ID>')\n")
 			os.Exit(1)
 		}
 		data, err := sendWSRequest("get_human_user", map[string]interface{}{"id": *id, "organization_id": orgID})
@@ -281,7 +281,7 @@ func runOrganizationUser(args []string) {
 
 		orgID := workingOrgID()
 		if orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight organization organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org organization use --id <ID>')\n")
 			os.Exit(1)
 		}
 
@@ -308,7 +308,7 @@ func runOrganizationUser(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight organization user: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight org user: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -319,7 +319,7 @@ func runOrganizationUser(args []string) {
 
 func runOrganizationWD(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight organization wd <list|get|create|update|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight org wd <list|get|create|update|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -331,7 +331,7 @@ func runOrganizationWD(args []string) {
 			*orgID = workingOrgID()
 		}
 		if *orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight organization organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org organization use --id <ID>')\n")
 			os.Exit(1)
 		}
 		data, err := sendWSRequest("list_working_directories", map[string]interface{}{"organization_id": *orgID})
@@ -362,7 +362,7 @@ func runOrganizationWD(args []string) {
 
 		orgID := workingOrgID()
 		if orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight organization organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org organization use --id <ID>')\n")
 			os.Exit(1)
 		}
 
@@ -432,7 +432,7 @@ func runOrganizationWD(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight organization wd: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight org wd: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -443,7 +443,7 @@ func runOrganizationWD(args []string) {
 
 func runOrganizationJob(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight organization job_description <list|get|create|update|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight org job_description <list|get|create|update|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -455,7 +455,7 @@ func runOrganizationJob(args []string) {
 			*orgID = workingOrgID()
 		}
 		if *orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight organization organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org organization use --id <ID>')\n")
 			os.Exit(1)
 		}
 		data, err := sendWSRequest("list_agent_job_descriptions", map[string]interface{}{"organization_id": *orgID})
@@ -488,7 +488,7 @@ func runOrganizationJob(args []string) {
 
 		orgID := workingOrgID()
 		if orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight organization organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org organization use --id <ID>')\n")
 			os.Exit(1)
 		}
 
@@ -561,7 +561,7 @@ func runOrganizationJob(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight organization job_description: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight org job_description: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -572,7 +572,7 @@ func runOrganizationJob(args []string) {
 
 func runOrganizationPos(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight organization position <list|get|create|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight org position <list|get|create|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -584,7 +584,7 @@ func runOrganizationPos(args []string) {
 			*orgID = workingOrgID()
 		}
 		if *orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight organization organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org organization use --id <ID>')\n")
 			os.Exit(1)
 		}
 		data, err := sendWSRequest("list_organization_positions", map[string]interface{}{"organization_id": *orgID})
@@ -617,7 +617,7 @@ func runOrganizationPos(args []string) {
 
 		orgID := workingOrgID()
 		if orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight organization organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org organization use --id <ID>')\n")
 			os.Exit(1)
 		}
 
@@ -682,7 +682,7 @@ func runOrganizationPos(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight organization position: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight org position: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -693,7 +693,7 @@ func runOrganizationPos(args []string) {
 
 func runOrganizationAgent(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight organization agent <list|get|create|retire|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight org agent <list|get|create|retire|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -705,7 +705,7 @@ func runOrganizationAgent(args []string) {
 			*orgID = workingOrgID()
 		}
 		if *orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight organization organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org organization use --id <ID>')\n")
 			os.Exit(1)
 		}
 		data, err := sendWSRequest("list_ai_agent_instances", map[string]interface{}{"organization_id": *orgID})
@@ -738,7 +738,7 @@ func runOrganizationAgent(args []string) {
 
 		orgID := workingOrgID()
 		if orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight organization organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org organization use --id <ID>')\n")
 			os.Exit(1)
 		}
 
@@ -821,7 +821,7 @@ func runOrganizationAgent(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight organization agent: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight org agent: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -832,7 +832,7 @@ func runOrganizationAgent(args []string) {
 
 func runOrganizationModel(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight organization ai_model <list|get>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight org ai_model <list|get>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -844,7 +844,7 @@ func runOrganizationModel(args []string) {
 			*orgID = workingOrgID()
 		}
 		if *orgID == 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight organization organization use --id <ID>')\n")
+			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org organization use --id <ID>')\n")
 			os.Exit(1)
 		}
 		data, err := sendWSRequest("list_ai_brain_models", map[string]interface{}{"organization_id": *orgID})
@@ -868,7 +868,7 @@ func runOrganizationModel(args []string) {
 		}
 		printJSON(data)
 	default:
-		fmt.Fprintf(os.Stderr, "greenlight organization ai_model: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "greenlight org ai_model: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
 }
