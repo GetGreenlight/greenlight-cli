@@ -530,12 +530,18 @@ func runOrganizationPos(args []string) {
 		jobID := fs.Int("job", 0, "Agent job description ID (optional)")
 		wdID := fs.Int("wd", 0, "Working directory ID")
 		parentID := fs.Int("parent", 0, "Parent position ID (optional)")
+		name := fs.String("name", "", "Human-readable name (optional)")
 		fs.Parse(args[1:])
 
 		orgID := workingOrgID()
 		if orgID == 0 {
 			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight organization organization use --id <ID>')\n")
 			os.Exit(1)
+		}
+
+		reader := bufio.NewReader(os.Stdin)
+		if *name == "" {
+			*name = promptLine(reader, "Name (optional): ")
 		}
 
 		if *wdID == 0 {
@@ -547,9 +553,21 @@ func runOrganizationPos(args []string) {
 			*wdID = id
 		}
 
+		if *jobID == 0 {
+			id, err := selectOptionalAgentJobDescription(orgID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+				os.Exit(1)
+			}
+			*jobID = id
+		}
+
 		payload := map[string]interface{}{
 			"organization_id":      orgID,
 			"working_directory_id": *wdID,
+		}
+		if *name != "" {
+			payload["name"] = *name
 		}
 		if *jobID != 0 {
 			payload["agent_job_description_id"] = *jobID
@@ -645,6 +663,11 @@ func runOrganizationAgent(args []string) {
 				os.Exit(1)
 			}
 			*posID = id
+		}
+
+		reader := bufio.NewReader(os.Stdin)
+		if *name == "" {
+			*name = promptLine(reader, "Name (optional): ")
 		}
 
 		payload := map[string]interface{}{

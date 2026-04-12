@@ -153,6 +153,45 @@ func selectAgentJobDescription(orgID int) (int, error) {
 	return id, nil
 }
 
+// selectOptionalAgentJobDescription is like selectAgentJobDescription but adds a
+// "→ Skip" option. Returns 0 when the user chooses to skip.
+func selectOptionalAgentJobDescription(orgID int) (int, error) {
+	payload := map[string]interface{}{}
+	if orgID != 0 {
+		payload["organization_id"] = orgID
+	}
+	data, err := sendWSRequest("list_agent_job_descriptions", payload)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch job descriptions: %w", err)
+	}
+
+	var resp struct {
+		AgentJobDescriptions []struct {
+			ID    int    `json:"id"`
+			Title string `json:"title"`
+		} `json:"agent_job_descriptions"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, fmt.Errorf("failed to parse job descriptions: %w", err)
+	}
+
+	items := make([]selectItem, len(resp.AgentJobDescriptions))
+	for i, j := range resp.AgentJobDescriptions {
+		items[i] = selectItem{Label: fmt.Sprintf("%d: %s", j.ID, j.Title), ID: j.ID}
+	}
+	items = append(items, selectItem{Label: "→ Create new…", ID: -1})
+	items = append(items, selectItem{Label: "→ Skip (none)", ID: 0})
+
+	id, err := selectFromList("Agent job description (optional)", items)
+	if err != nil {
+		return 0, err
+	}
+	if id == -1 {
+		return createAgentJobDescriptionInteractive(orgID)
+	}
+	return id, nil // 0 = skip
+}
+
 func createAgentJobDescriptionInteractive(orgID int) (int, error) {
 	if orgID == 0 {
 		orgID = workingOrgID()
@@ -356,26 +395,28 @@ func createOrganizationPositionInteractive(orgID int) (int, error) {
 		return 0, fmt.Errorf("no working organization set (run 'greenlight organization organization use --id <ID>')")
 	}
 
-	jobID, err := selectAgentJobDescription(orgID)
-	if err != nil {
-		return 0, err
-	}
+	reader := bufio.NewReader(os.Stdin)
+	name := promptLine(reader, "Name (optional): ")
 
 	wdID, err := selectWorkingDirectory(orgID)
 	if err != nil {
 		return 0, err
 	}
 
-	reader := bufio.NewReader(os.Stdin)
-	name := promptLine(reader, "Name (optional): ")
+	jobID, err := selectOptionalAgentJobDescription(orgID)
+	if err != nil {
+		return 0, err
+	}
 
 	payload := map[string]interface{}{
-		"organization_id":          orgID,
-		"agent_job_description_id": jobID,
-		"working_directory_id":     wdID,
+		"organization_id":      orgID,
+		"working_directory_id": wdID,
 	}
 	if name != "" {
 		payload["name"] = name
+	}
+	if jobID != 0 {
+		payload["agent_job_description_id"] = jobID
 	}
 	data, err := sendWSRequest("create_organization_position", payload)
 	if err != nil {
