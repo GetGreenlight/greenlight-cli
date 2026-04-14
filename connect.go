@@ -126,6 +126,10 @@ func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID
 		convID = filepath.Base(filepath.Dir(transcriptPath))
 	case "gemini":
 		convID = extractGeminiSessionID(transcriptPath)
+	case "codex":
+		// Codex filenames: rollout-YYYY-MM-DDTHH-MM-SS-UUID.jsonl
+		// codex resume expects just the UUID portion.
+		convID = extractCodexSessionID(transcriptPath)
 	default:
 		base := filepath.Base(transcriptPath)
 		if ext := filepath.Ext(base); ext != "" {

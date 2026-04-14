@@ -139,9 +139,9 @@ func resolveDeviceAndProject(deviceID, project, cwd string) (string, string, err
 }
 
 // installAgentFiles installs agent-specific instruction files for agents that use them.
-func installAgentFiles(agent, relayID string) {
+func installAgentFiles(agent, relayID, cwd string) {
 	if agent == "gemini" || agent == "copilot" || agent == "cursor" || agent == "codex" {
-		if err := installGreenlightInstructions(agent, relayID); err != nil {
+		if err := installGreenlightInstructions(agent, relayID, cwd); err != nil {
 			log.Printf("Warning: failed to install agent instructions: %v", err)
 		}
 	}

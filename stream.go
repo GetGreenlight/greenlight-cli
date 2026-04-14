@@ -1006,6 +1006,24 @@ func normalizeCodexTool(name, arguments string) (string, interface{}) {
 	}
 }
 
+// transformCodexEventReplay is used for transcript replay (not live streaming).
+// It skips event_msg user_message and agent_message events since the response_item
+// equivalents are always present in the JSONL and carry richer data.
+func transformCodexEventReplay(line string) string {
+	var peek struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Type string `json:"type"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal([]byte(line), &peek) == nil && peek.Type == "event_msg" {
+		if peek.Payload.Type == "user_message" || peek.Payload.Type == "agent_message" {
+			return ""
+		}
+	}
+	return transformCodexEvent(line)
+}
+
 func transformCodexEvent(line string) string {
 	var event struct {
 		Timestamp string          `json:"timestamp"`

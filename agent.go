@@ -122,6 +122,12 @@ func deriveTranscriptPath(agent, sessionID, cwd string) string {
 		return deriveCursorTranscriptPath(cwd)
 	case "codex":
 		if sessionID != "" {
+			// sessionID may be either the codex UUID (from convID lookup)
+			// or the greenlight relayID (from startTranscriptStreamer).
+			// Try filename match first, then fall back to sentinel search.
+			if p := deriveCodexTranscriptByUUID(sessionID); p != "" {
+				return p
+			}
 			return deriveCodexTranscriptBySentinel(sessionID)
 		}
 		return deriveCodexTranscriptPath()
@@ -350,6 +356,29 @@ func deriveCursorTranscriptPath(cwd string) string {
 	return newestPath
 }
 
+// deriveCodexTranscriptByUUID finds a Codex transcript file whose filename
+// contains the given UUID. Codex filenames follow the pattern:
+// rollout-YYYY-MM-DDTHH-MM-SS-UUID.jsonl
+func deriveCodexTranscriptByUUID(uuid string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	sessionsDir := filepath.Join(home, ".codex", "sessions")
+	var match string
+	filepath.Walk(sessionsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(info.Name(), ".jsonl") {
+			return nil
+		}
+		if strings.Contains(info.Name(), uuid) {
+			match = path
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return match
+}
+
 // deriveCodexTranscriptBySentinel scans recent Codex transcript files for
 // a greenlight-relay sentinel embedded in the AGENTS.md content that Codex
 // serializes into the transcript at session start.
@@ -361,7 +390,6 @@ func deriveCodexTranscriptBySentinel(relayID string) string {
 	sentinel := "greenlight-relay:" + relayID
 	sessionsDir := filepath.Join(home, ".codex", "sessions")
 
-	// Collect candidates sorted newest first to find our session quickly.
 	type candidate struct {
 		path  string
 		mtime time.Time
@@ -374,12 +402,10 @@ func deriveCodexTranscriptBySentinel(relayID string) string {
 		candidates = append(candidates, candidate{path, info.ModTime()})
 		return nil
 	})
-	// Sort newest first
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].mtime.After(candidates[j].mtime)
 	})
 
-	// Only check the 5 newest files — the sentinel should be in a very recent one.
 	limit := 5
 	if len(candidates) < limit {
 		limit = len(candidates)
@@ -392,7 +418,6 @@ func deriveCodexTranscriptBySentinel(relayID string) string {
 		found := false
 		scanner := bufio.NewScanner(f)
 		scanner.Buffer(make([]byte, 256*1024), 256*1024)
-		// The sentinel appears in the first few lines (AGENTS.md content).
 		for i := 0; i < 20 && scanner.Scan(); i++ {
 			if strings.Contains(scanner.Text(), sentinel) {
 				found = true
@@ -433,6 +458,26 @@ func deriveCodexTranscriptPath() string {
 		return nil
 	})
 	return newest
+}
+
+// extractCodexSessionID extracts the UUID from a codex transcript filename.
+// Codex filenames follow the pattern: rollout-YYYY-MM-DDTHH-MM-SS-UUID.jsonl
+// codex resume expects just the UUID (e.g. "019d812e-9739-7b42-a987-f4029a795306").
+func extractCodexSessionID(transcriptPath string) string {
+	base := filepath.Base(transcriptPath)
+	if ext := filepath.Ext(base); ext != "" {
+		base = strings.TrimSuffix(base, ext)
+	}
+	// UUID is the last 36 characters (8-4-4-4-12 hex format).
+	if len(base) >= 36 {
+		candidate := base[len(base)-36:]
+		// Quick sanity check: dashes at positions 8, 13, 18, 23.
+		if len(candidate) == 36 && candidate[8] == '-' && candidate[13] == '-' && candidate[18] == '-' && candidate[23] == '-' {
+			return candidate
+		}
+	}
+	// Fallback: return the full filename without extension.
+	return base
 }
 
 // piSessionPath returns the transcript file path for a Pi session ID,

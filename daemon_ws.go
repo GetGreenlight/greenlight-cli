@@ -429,6 +429,7 @@ func (d *DaemonWS) handleSessionTranscript(data []byte) {
 	}
 
 	var transcriptPath string
+	var agent string
 
 	convID := lookupConversationID(msg.RelayID)
 
@@ -437,12 +438,14 @@ func (d *DaemonWS) handleSessionTranscript(data []byte) {
 	sw := d.sessions[msg.RelayID]
 	d.mu.RUnlock()
 	if sw != nil && convID != "" {
+		agent = sw.agent
 		transcriptPath = deriveTranscriptPath(sw.agent, convID, sw.cwd)
 	}
 
 	// Fall back to completed session record
 	if transcriptPath == "" && convID != "" {
 		if rec, err := loadSessionRecord(convID); err == nil {
+			agent = rec.Agent
 			transcriptPath = deriveTranscriptPath(rec.Agent, convID, rec.Cwd)
 		}
 	}
@@ -458,6 +461,12 @@ func (d *DaemonWS) handleSessionTranscript(data []byte) {
 		return
 	}
 
+	// Gemini transcripts are a single JSON object (not JSONL) — handle separately.
+	if agent == "gemini" {
+		d.handleGeminiTranscript(msg.RelayID, transcriptPath)
+		return
+	}
+
 	f, err := os.Open(transcriptPath)
 	if err != nil {
 		log.Printf("daemon-ws: session_transcript: failed to open %s: %v", transcriptPath, err)
@@ -468,6 +477,21 @@ func (d *DaemonWS) handleSessionTranscript(data []byte) {
 
 	const maxBytes = 8 << 20 // 8 MB — must not exceed server's WS read limit
 
+	// Determine if this agent needs transcript transformation.
+	// Non-Claude agents store transcripts in their native format; we must
+	// transform each line to Claude-compatible format before sending to the server.
+	var transformFn func(string) string
+	switch agent {
+	case "codex":
+		transformFn = transformCodexEventReplay
+	case "copilot":
+		transformFn = transformCopilotEvent
+	case "cursor":
+		transformFn = transformCursorEvent
+	case "pi":
+		transformFn = transformPiEvent
+	}
+
 	var entries []json.RawMessage
 	var totalBytes int
 	scanner := bufio.NewScanner(f)
@@ -476,6 +500,13 @@ func (d *DaemonWS) handleSessionTranscript(data []byte) {
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
+		}
+		if transformFn != nil {
+			transformed := transformFn(string(line))
+			if transformed == "" {
+				continue
+			}
+			line = []byte(transformed)
 		}
 		// Validate it's valid JSON before including
 		if json.Valid(line) {
@@ -491,12 +522,17 @@ func (d *DaemonWS) handleSessionTranscript(data []byte) {
 		entries = entries[1:]
 	}
 
-	log.Printf("daemon-ws: session_transcript for relay %s: %d entries (%d bytes)", msg.RelayID, len(entries), totalBytes)
-	d.sendTranscriptResponse(msg.RelayID, entries, "")
+	log.Printf("daemon-ws: session_transcript for relay %s agent=%s: %d entries (%d bytes)", msg.RelayID, agent, len(entries), totalBytes)
+	d.sendTranscriptResponseWithAgent(msg.RelayID, entries, "", agent)
 }
 
 // sendTranscriptResponse sends a session_transcript_response message.
 func (d *DaemonWS) sendTranscriptResponse(relayID string, entries []json.RawMessage, message string) {
+	d.sendTranscriptResponseWithAgent(relayID, entries, message, "")
+}
+
+// sendTranscriptResponseWithAgent sends a session_transcript_response with an agent field.
+func (d *DaemonWS) sendTranscriptResponseWithAgent(relayID string, entries []json.RawMessage, message, agent string) {
 	resp := map[string]interface{}{
 		"type":     "session_transcript_response",
 		"relay_id": relayID,
@@ -505,12 +541,59 @@ func (d *DaemonWS) sendTranscriptResponse(relayID string, entries []json.RawMess
 	if message != "" {
 		resp["message"] = message
 	}
+	if agent != "" {
+		resp["agent"] = agent
+	}
 	data, err := json.Marshal(resp)
 	if err != nil {
 		log.Printf("daemon-ws: failed to marshal transcript response: %v", err)
 		return
 	}
 	d.ws.SendText(data)
+}
+
+// handleGeminiTranscript reads a Gemini JSON transcript file, transforms each
+// message to Claude-compatible format, and sends the entries as a transcript response.
+func (d *DaemonWS) handleGeminiTranscript(relayID, transcriptPath string) {
+	data, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		log.Printf("daemon-ws: session_transcript: failed to read gemini transcript %s: %v", transcriptPath, err)
+		d.sendTranscriptResponse(relayID, nil, fmt.Sprintf("transcript file not found: %v", err))
+		return
+	}
+
+	var transcript struct {
+		SessionID string            `json:"sessionId"`
+		Messages  []json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(data, &transcript); err != nil {
+		log.Printf("daemon-ws: session_transcript: failed to parse gemini transcript: %v", err)
+		d.sendTranscriptResponse(relayID, nil, "failed to parse gemini transcript")
+		return
+	}
+
+	const maxBytes = 8 << 20
+	var entries []json.RawMessage
+	var totalBytes int
+	for _, raw := range transcript.Messages {
+		transformed := transformGeminiMessage(raw, transcript.SessionID)
+		for _, entry := range transformed {
+			entryBytes, err := json.Marshal(entry)
+			if err != nil {
+				continue
+			}
+			entries = append(entries, json.RawMessage(entryBytes))
+			totalBytes += len(entryBytes)
+		}
+	}
+
+	for len(entries) > 0 && totalBytes > maxBytes-1024 {
+		totalBytes -= len(entries[0])
+		entries = entries[1:]
+	}
+
+	log.Printf("daemon-ws: session_transcript for relay %s: %d gemini entries (%d bytes)", relayID, len(entries), totalBytes)
+	d.sendTranscriptResponseWithAgent(relayID, entries, "", "gemini")
 }
 
 // SendText sends a text frame tagged with the session's relay_id.

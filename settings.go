@@ -13,23 +13,25 @@ import (
 // that teaches the agent how to interpret [GREENLIGHT] permission denial messages.
 // For codex, relayID is embedded as a sentinel so we can match the transcript
 // to this session even when multiple sessions share the same CWD.
-func installGreenlightInstructions(agent, relayID string) error {
+func installGreenlightInstructions(agent, relayID, cwd string) error {
 	var instrPath string
 	switch agent {
 	case "gemini":
-		instrPath = "GEMINI.md"
+		instrPath = filepath.Join(cwd, "GEMINI.md")
 	case "copilot":
-		if err := os.MkdirAll(".github", 0755); err != nil {
+		dir := filepath.Join(cwd, ".github")
+		if err := os.MkdirAll(dir, 0755); err != nil {
 			return err
 		}
-		instrPath = filepath.Join(".github", "copilot-instructions.md")
+		instrPath = filepath.Join(dir, "copilot-instructions.md")
 	case "cursor":
-		if err := os.MkdirAll(filepath.Join(".cursor", "rules"), 0755); err != nil {
+		dir := filepath.Join(cwd, ".cursor", "rules")
+		if err := os.MkdirAll(dir, 0755); err != nil {
 			return err
 		}
-		instrPath = filepath.Join(".cursor", "rules", "greenlight.mdc")
+		instrPath = filepath.Join(dir, "greenlight.mdc")
 	case "codex":
-		instrPath = "AGENTS.md"
+		instrPath = filepath.Join(cwd, "AGENTS.md")
 	default:
 		return nil
 	}
