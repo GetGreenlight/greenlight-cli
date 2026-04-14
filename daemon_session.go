@@ -95,7 +95,7 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		return nil, fmt.Errorf("session start failed: %w", err)
 	}
 
-	installAgentFiles(agent, relayID)
+	installAgentFiles(agent, relayID, cwd)
 
 	s := &Session{
 		relayID:   relayID,
