@@ -83,9 +83,9 @@ type Daemon struct {
 	mu        sync.RWMutex
 	done      chan struct{}
 	wg        sync.WaitGroup
-	daemonWS  *DaemonWS // multiplexed WebSocket for all sessions + wake
-	sessionID string    // daemon's own enrolled session ID
-	deviceID  string    // resolved device ID
+	daemonWS    *DaemonWS // multiplexed WebSocket for all sessions + wake
+	sessionID   string    // daemon's own enrolled session ID
+	humanUserID string    // resolved human_user ID
 }
 
 func runDaemon(args []string) {
@@ -324,13 +324,10 @@ func runDaemonForeground() {
 
 	log.Printf("daemon: started (pid %d, socket %s)", os.Getpid(), sockPath)
 
-	// Resolve device ID and host ID (set by ensureDaemon after enrollment, or from config)
-	d.deviceID = os.Getenv("GREENLIGHT_DEVICE_ID")
-	if d.deviceID == "" {
-		d.deviceID = readConfigValue("device_id")
-	}
+	// Resolve human_user ID and host ID (set by ensureDaemon after registration, or from config)
+	d.humanUserID = readConfigValue("user_id")
 	d.sessionID = os.Getenv("GREENLIGHT_DAEMON_SESSION_ID")
-	if d.sessionID == "" && d.deviceID != "" {
+	if d.sessionID == "" && d.humanUserID != "" {
 		d.sessionID = readConfigValue("host_id")
 	}
 	if d.sessionID != "" {
@@ -451,8 +448,8 @@ func (d *Daemon) startDaemonWS() {
 		return
 	}
 
-	if d.deviceID == "" {
-		log.Printf("daemon: no device ID configured, WebSocket disabled")
+	if d.humanUserID == "" {
+		log.Printf("daemon: no human_user ID configured, WebSocket disabled")
 		return
 	}
 
@@ -479,7 +476,7 @@ func (d *Daemon) startDaemonWS() {
 	}
 	dialURL.RawQuery = q.Encode()
 
-	d.daemonWS = NewDaemonWS(dialURL.String(), d.deviceID)
+	d.daemonWS = NewDaemonWS(dialURL.String(), d.humanUserID)
 	d.daemonWS.SetWakeHandler(func(data []byte) {
 		d.handleWakeMessage(data)
 	})
@@ -498,7 +495,7 @@ func (d *Daemon) startDaemonWS() {
 	if !d.daemonWS.IsConnected() {
 		log.Printf("daemon: WARNING WebSocket not connected after 5s, proceeding anyway")
 	}
-	log.Printf("daemon: WebSocket started (device %s, session %s)", d.deviceID, d.sessionID)
+	log.Printf("daemon: WebSocket started (human_user %s, session %s)", d.humanUserID, d.sessionID)
 }
 
 // handleConn processes a single client connection.
@@ -584,14 +581,7 @@ func (d *Daemon) handleStatus(conn net.Conn) {
 
 // handleConnect creates a new session and enters the I/O relay phase.
 func (d *Daemon) handleConnect(conn net.Conn, req ipcRequest) {
-	// Verify device ID matches the daemon's enrolled device if provided
-	if req.DeviceID != "" && d.deviceID != "" && req.DeviceID != d.deviceID {
-		sendControl(conn, ipcResponse{
-			Type:    "error",
-			Message: fmt.Sprintf("device ID mismatch: daemon enrolled as %s, got %s", d.deviceID, req.DeviceID),
-		})
-		return
-	}
+	// TODO: re-add an IPC identity guard once the connect IPC carries human_user_id.
 
 	s, err := d.newSession(req)
 	if err != nil {

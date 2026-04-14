@@ -49,14 +49,14 @@ type sessionWS struct {
 }
 
 // NewDaemonWS creates a multiplexed WebSocket connection.
-func NewDaemonWS(url, deviceID string) *DaemonWS {
+func NewDaemonWS(url, humanUserID string) *DaemonWS {
 	d := &DaemonWS{
 		sessions: make(map[string]*sessionWS),
 	}
 
 	// The inject callback receives text frames from the server (input injection).
 	// We override the normal inject path since there's no single PTY to write to.
-	d.ws = NewWSClient(url, deviceID, WSModeRW, nil)
+	d.ws = NewWSClient(url, humanUserID, WSModeRW, nil)
 
 	d.ws.controlFunc = func(data []byte) {
 		d.routeControlFrame(data)
