@@ -40,7 +40,7 @@ func buildAgentCommand(agent, resume string) (*AgentSetup, error) {
 	if resume != "" {
 		// Resuming: the conversation ID IS the agent session ID
 		agentSessionID = resume
-	} else if agent == "claude" || agent == "copilot" || agent == "pi" {
+	} else if agent == "claude" || agent == "copilot" {
 		agentSessionID = generateUUID()
 	}
 
