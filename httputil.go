@@ -28,35 +28,38 @@ func serverBaseURL() (string, error) {
 	return fmt.Sprintf("%s://%s", scheme, u.Host), nil
 }
 
-// registerUser registers a user by email and returns the user_id UUID.
-func registerUser(baseURL, email string) (string, error) {
+// registerUser registers a user by email and returns the user_id and the
+// organization_id of the user's primary organization (auto-created on first
+// registration).
+func registerUser(baseURL, email string) (userID, orgID string, err error) {
 	payload := map[string]string{"email": email}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("failed to encode request: %w", err)
+		return "", "", fmt.Errorf("failed to encode request: %w", err)
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Post(baseURL+"/users/register", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("registration request failed: %w", err)
+		return "", "", fmt.Errorf("registration request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("registration failed (HTTP %d)", resp.StatusCode)
+		return "", "", fmt.Errorf("registration failed (HTTP %d)", resp.StatusCode)
 	}
 
 	var result struct {
-		UserID string `json:"user_id"`
+		UserID         string `json:"user_id"`
+		OrganizationID string `json:"organization_id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
+		return "", "", fmt.Errorf("failed to decode response: %w", err)
 	}
 	if result.UserID == "" {
-		return "", fmt.Errorf("server returned empty user_id")
+		return "", "", fmt.Errorf("server returned empty user_id")
 	}
-	return result.UserID, nil
+	return result.UserID, result.OrganizationID, nil
 }
 
 // registerHost registers a host (daemon) for a user.

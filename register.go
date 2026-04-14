@@ -24,8 +24,8 @@ func runRegister(args []string) {
 		os.Exit(1)
 	}
 
-	// Register user by email, get back user_id
-	userID, err := registerUser(baseURL, email)
+	// Register user by email, get back user_id and the user's primary org_id.
+	userID, orgID, err := registerUser(baseURL, email)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -37,6 +37,14 @@ func runRegister(args []string) {
 	}
 
 	fmt.Fprintf(os.Stderr, "Registered user %s\n", userID)
+
+	if orgID != "" {
+		if err := writeConfigValue("organization_id", orgID); err != nil {
+			fmt.Fprintf(os.Stderr, "Error saving organization_id: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Working organization set to %s\n", orgID)
+	}
 
 	// Register host with the new user_id
 	hostID := readConfigValue("host_id")
