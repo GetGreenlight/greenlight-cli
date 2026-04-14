@@ -95,14 +95,21 @@ func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID
 			continue
 		}
 		if agentSessionID != "" || info.ModTime().After(notBefore) {
+			// Gemini creates a temp file during init that gets replaced
+			// with the real session file. Don't accept a file without a
+			// valid sessionId — keep polling until the real one appears.
+			if agent == "gemini" && extractGeminiSessionID(p) == "" {
+				continue
+			}
 			transcriptPath = p
 			break
 		}
 	}
 	// Re-derive after a short delay to handle the race where an old file gets
-	// a brief mtime bump (e.g. Gemini touches previous session during init).
-	// If a newer file appeared, switch to it. Skip for deterministic paths.
-	if agentSessionID == "" {
+	// a brief mtime bump during init. If a newer file appeared, switch to it.
+	// Skip for deterministic paths (agentSessionID set) and for Gemini (the
+	// polling loop already validates the sessionId field, so the race is handled).
+	if agentSessionID == "" && agent != "gemini" {
 		select {
 		case <-ctx.Done():
 			return
