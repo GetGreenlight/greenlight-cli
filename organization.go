@@ -68,15 +68,9 @@ func printJSON(v json.RawMessage) {
 	fmt.Println(string(v))
 }
 
-// workingOrgID returns the organization_id from ~/.greenlight/config, or 0 if not set.
-func workingOrgID() int {
-	v := readConfigValue("organization_id")
-	if v == "" {
-		return 0
-	}
-	var id int
-	fmt.Sscanf(v, "%d", &id)
-	return id
+// workingOrgID returns the organization_id from ~/.greenlight/config, or "" if not set.
+func workingOrgID() string {
+	return readConfigValue("organization_id")
 }
 
 // =============================================================================
@@ -144,9 +138,9 @@ func runOrganizationOrg(args []string) {
 		printJSON(data)
 	case "get":
 		fs := flag.NewFlagSet("org get", flag.ExitOnError)
-		id := fs.Int("id", 0, "Organization ID")
+		id := fs.String("id", "", "Organization ID")
 		fs.Parse(args[1:])
-		if *id == 0 {
+		if *id == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
@@ -159,7 +153,6 @@ func runOrganizationOrg(args []string) {
 	case "create":
 		fs := flag.NewFlagSet("org create", flag.ExitOnError)
 		name := fs.String("name", "", "Organization name")
-		email := fs.String("email", "", "Recovery email (optional)")
 		fs.Parse(args[1:])
 		if *name == "" {
 			reader := bufio.NewReader(os.Stdin)
@@ -169,11 +162,7 @@ func runOrganizationOrg(args []string) {
 			fmt.Fprintf(os.Stderr, "greenlight: name required\n")
 			os.Exit(1)
 		}
-		payload := map[string]interface{}{"name": *name}
-		if *email != "" {
-			payload["recovery_email"] = *email
-		}
-		data, err := sendWSRequest("create_organization", payload)
+		data, err := sendWSRequest("create_organization", map[string]interface{}{"name": *name})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 			os.Exit(1)
@@ -181,19 +170,14 @@ func runOrganizationOrg(args []string) {
 		printJSON(data)
 	case "update":
 		fs := flag.NewFlagSet("org update", flag.ExitOnError)
-		id := fs.Int("id", 0, "Organization ID")
+		id := fs.String("id", "", "Organization ID")
 		name := fs.String("name", "", "New name")
-		email := fs.String("email", "", "Recovery email")
 		fs.Parse(args[1:])
-		if *id == 0 || *name == "" {
+		if *id == "" || *name == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id and --name required\n")
 			os.Exit(1)
 		}
-		payload := map[string]interface{}{"id": *id, "name": *name}
-		if *email != "" {
-			payload["recovery_email"] = *email
-		}
-		data, err := sendWSRequest("update_organization", payload)
+		data, err := sendWSRequest("update_organization", map[string]interface{}{"id": *id, "name": *name})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 			os.Exit(1)
@@ -201,9 +185,9 @@ func runOrganizationOrg(args []string) {
 		printJSON(data)
 	case "delete":
 		fs := flag.NewFlagSet("org delete", flag.ExitOnError)
-		id := fs.Int("id", 0, "Organization ID")
+		id := fs.String("id", "", "Organization ID")
 		fs.Parse(args[1:])
-		if *id == 0 {
+		if *id == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
@@ -215,17 +199,17 @@ func runOrganizationOrg(args []string) {
 		printJSON(data)
 	case "use":
 		fs := flag.NewFlagSet("org use", flag.ExitOnError)
-		id := fs.Int("id", 0, "Organization ID to set as working organization")
+		id := fs.String("id", "", "Organization ID to set as working organization")
 		fs.Parse(args[1:])
-		if *id == 0 {
+		if *id == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
-		if err := writeConfigValue("organization_id", fmt.Sprintf("%d", *id)); err != nil {
+		if err := writeConfigValue("organization_id", *id); err != nil {
 			fmt.Fprintf(os.Stderr, "greenlight: failed to save organization_id: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Working organization set to %d.\n", *id)
+		fmt.Printf("Working organization set to %s.\n", *id)
 	default:
 		fmt.Fprintf(os.Stderr, "greenlight org org: unknown command %q\n", args[0])
 		os.Exit(1)
@@ -244,7 +228,7 @@ func runOrganizationUser(args []string) {
 	switch args[0] {
 	case "list":
 		orgID := workingOrgID()
-		if orgID == 0 {
+		if orgID == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
@@ -263,7 +247,7 @@ func runOrganizationUser(args []string) {
 			os.Exit(1)
 		}
 		orgID := workingOrgID()
-		if orgID == 0 {
+		if orgID == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
@@ -280,7 +264,7 @@ func runOrganizationUser(args []string) {
 		fs.Parse(args[1:])
 
 		orgID := workingOrgID()
-		if orgID == 0 {
+		if orgID == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
@@ -325,12 +309,12 @@ func runOrganizationWD(args []string) {
 	switch args[0] {
 	case "list":
 		fs := flag.NewFlagSet("wd list", flag.ExitOnError)
-		orgID := fs.Int("org", 0, "Organization ID (defaults to working org from config)")
+		orgID := fs.String("org", "", "Organization ID (defaults to working org from config)")
 		fs.Parse(args[1:])
-		if *orgID == 0 {
+		if *orgID == "" {
 			*orgID = workingOrgID()
 		}
-		if *orgID == 0 {
+		if *orgID == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
@@ -342,9 +326,9 @@ func runOrganizationWD(args []string) {
 		printJSON(data)
 	case "get":
 		fs := flag.NewFlagSet("wd get", flag.ExitOnError)
-		id := fs.Int("id", 0, "Working directory ID")
+		id := fs.String("id", "", "Working directory ID")
 		fs.Parse(args[1:])
-		if *id == 0 {
+		if *id == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
@@ -361,7 +345,7 @@ func runOrganizationWD(args []string) {
 		fs.Parse(args[1:])
 
 		orgID := workingOrgID()
-		if orgID == 0 {
+		if orgID == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
@@ -396,11 +380,11 @@ func runOrganizationWD(args []string) {
 		printJSON(data)
 	case "update":
 		fs := flag.NewFlagSet("wd update", flag.ExitOnError)
-		id := fs.Int("id", 0, "Working directory ID")
+		id := fs.String("id", "", "Working directory ID")
 		hostID := fs.String("host-id", "", "New host ID")
 		dir := fs.String("dir", "", "New directory path")
 		fs.Parse(args[1:])
-		if *id == 0 {
+		if *id == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
@@ -419,9 +403,9 @@ func runOrganizationWD(args []string) {
 		printJSON(data)
 	case "delete":
 		fs := flag.NewFlagSet("wd delete", flag.ExitOnError)
-		id := fs.Int("id", 0, "Working directory ID")
+		id := fs.String("id", "", "Working directory ID")
 		fs.Parse(args[1:])
-		if *id == 0 {
+		if *id == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
@@ -449,12 +433,12 @@ func runOrganizationJob(args []string) {
 	switch args[0] {
 	case "list":
 		fs := flag.NewFlagSet("job list", flag.ExitOnError)
-		orgID := fs.Int("org", 0, "Organization ID (defaults to working org from config)")
+		orgID := fs.String("org", "", "Organization ID (defaults to working org from config)")
 		fs.Parse(args[1:])
-		if *orgID == 0 {
+		if *orgID == "" {
 			*orgID = workingOrgID()
 		}
-		if *orgID == 0 {
+		if *orgID == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
@@ -466,9 +450,9 @@ func runOrganizationJob(args []string) {
 		printJSON(data)
 	case "get":
 		fs := flag.NewFlagSet("job get", flag.ExitOnError)
-		id := fs.Int("id", 0, "Job description ID")
+		id := fs.String("id", "", "Job description ID")
 		fs.Parse(args[1:])
-		if *id == 0 {
+		if *id == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
@@ -487,7 +471,7 @@ func runOrganizationJob(args []string) {
 		fs.Parse(args[1:])
 
 		orgID := workingOrgID()
-		if orgID == 0 {
+		if orgID == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
@@ -520,13 +504,13 @@ func runOrganizationJob(args []string) {
 		printJSON(data)
 	case "update":
 		fs := flag.NewFlagSet("job update", flag.ExitOnError)
-		id := fs.Int("id", 0, "Job description ID")
+		id := fs.String("id", "", "Job description ID")
 		title := fs.String("title", "", "New title")
 		mandate := fs.String("mandate", "", "New mandate")
 		requiredSkills := fs.String("required-skills", "", "New required skills")
 		priority := fs.Int("priority", 0, "New priority")
 		fs.Parse(args[1:])
-		if *id == 0 || *title == "" {
+		if *id == "" || *title == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id and --title required\n")
 			os.Exit(1)
 		}
@@ -548,9 +532,9 @@ func runOrganizationJob(args []string) {
 		printJSON(data)
 	case "delete":
 		fs := flag.NewFlagSet("job delete", flag.ExitOnError)
-		id := fs.Int("id", 0, "Job description ID")
+		id := fs.String("id", "", "Job description ID")
 		fs.Parse(args[1:])
-		if *id == 0 {
+		if *id == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
@@ -578,12 +562,12 @@ func runOrganizationPos(args []string) {
 	switch args[0] {
 	case "list":
 		fs := flag.NewFlagSet("pos list", flag.ExitOnError)
-		orgID := fs.Int("org", 0, "Organization ID (defaults to working org from config)")
+		orgID := fs.String("org", "", "Organization ID (defaults to working org from config)")
 		fs.Parse(args[1:])
-		if *orgID == 0 {
+		if *orgID == "" {
 			*orgID = workingOrgID()
 		}
-		if *orgID == 0 {
+		if *orgID == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
@@ -609,14 +593,14 @@ func runOrganizationPos(args []string) {
 		printJSON(data)
 	case "create":
 		fs := flag.NewFlagSet("pos create", flag.ExitOnError)
-		jobID := fs.Int("job", 0, "Agent job description ID (optional)")
-		wdID := fs.Int("wd", 0, "Working directory ID")
+		jobID := fs.String("job", "", "Agent job description ID (optional)")
+		wdID := fs.String("wd", "", "Working directory ID")
 		parentID := fs.Int("parent", 0, "Parent position ID (optional)")
 		name := fs.String("name", "", "Human-readable name (optional)")
 		fs.Parse(args[1:])
 
 		orgID := workingOrgID()
-		if orgID == 0 {
+		if orgID == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
@@ -630,7 +614,7 @@ func runOrganizationPos(args []string) {
 			os.Exit(1)
 		}
 
-		if *wdID == 0 {
+		if *wdID == "" {
 			id, err := selectWorkingDirectory(orgID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
@@ -639,7 +623,7 @@ func runOrganizationPos(args []string) {
 			*wdID = id
 		}
 
-		if *jobID == 0 {
+		if *jobID == "" {
 			id, err := selectOptionalAgentJobDescription(orgID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
@@ -655,7 +639,7 @@ func runOrganizationPos(args []string) {
 		if *name != "" {
 			payload["name"] = *name
 		}
-		if *jobID != 0 {
+		if *jobID != "" {
 			payload["agent_job_description_id"] = *jobID
 		}
 		if *parentID != 0 {
@@ -699,12 +683,12 @@ func runOrganizationAgent(args []string) {
 	switch args[0] {
 	case "list":
 		fs := flag.NewFlagSet("agent list", flag.ExitOnError)
-		orgID := fs.Int("org", 0, "Organization ID (defaults to working org from config)")
+		orgID := fs.String("org", "", "Organization ID (defaults to working org from config)")
 		fs.Parse(args[1:])
-		if *orgID == 0 {
+		if *orgID == "" {
 			*orgID = workingOrgID()
 		}
-		if *orgID == 0 {
+		if *orgID == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
@@ -716,9 +700,9 @@ func runOrganizationAgent(args []string) {
 		printJSON(data)
 	case "get":
 		fs := flag.NewFlagSet("agent get", flag.ExitOnError)
-		id := fs.Int("id", 0, "Agent instance ID")
+		id := fs.String("id", "", "Agent instance ID")
 		fs.Parse(args[1:])
-		if *id == 0 {
+		if *id == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
@@ -731,13 +715,13 @@ func runOrganizationAgent(args []string) {
 	case "create":
 		fs := flag.NewFlagSet("agent create", flag.ExitOnError)
 		posID := fs.Int("pos", 0, "Organization position ID")
-		modelID := fs.Int("model", 0, "AI brain model ID")
+		modelID := fs.String("model", "", "AI brain model ID")
 		harnessID := fs.Int("harness", 0, "Harness ID")
 		name := fs.String("name", "", "Human-readable name")
 		fs.Parse(args[1:])
 
 		orgID := workingOrgID()
-		if orgID == 0 {
+		if orgID == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: no working organization set (run 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
@@ -751,7 +735,7 @@ func runOrganizationAgent(args []string) {
 			*posID = id
 		}
 
-		if *modelID == 0 {
+		if *modelID == "" {
 			id, err := selectAIBrainModel(orgID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
@@ -793,9 +777,9 @@ func runOrganizationAgent(args []string) {
 		printJSON(data)
 	case "retire":
 		fs := flag.NewFlagSet("agent retire", flag.ExitOnError)
-		id := fs.Int("id", 0, "Agent instance ID")
+		id := fs.String("id", "", "Agent instance ID")
 		fs.Parse(args[1:])
-		if *id == 0 {
+		if *id == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
@@ -808,9 +792,9 @@ func runOrganizationAgent(args []string) {
 		printJSON(data)
 	case "delete":
 		fs := flag.NewFlagSet("agent delete", flag.ExitOnError)
-		id := fs.Int("id", 0, "Agent instance ID")
+		id := fs.String("id", "", "Agent instance ID")
 		fs.Parse(args[1:])
-		if *id == 0 {
+		if *id == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
@@ -838,12 +822,12 @@ func runOrganizationModel(args []string) {
 	switch args[0] {
 	case "list":
 		fs := flag.NewFlagSet("model list", flag.ExitOnError)
-		orgID := fs.Int("org", 0, "Organization ID (defaults to working org from config)")
+		orgID := fs.String("org", "", "Organization ID (defaults to working org from config)")
 		fs.Parse(args[1:])
-		if *orgID == 0 {
+		if *orgID == "" {
 			*orgID = workingOrgID()
 		}
-		if *orgID == 0 {
+		if *orgID == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --org required (or set with 'greenlight org org use --id <ID>')\n")
 			os.Exit(1)
 		}
@@ -855,9 +839,9 @@ func runOrganizationModel(args []string) {
 		printJSON(data)
 	case "get":
 		fs := flag.NewFlagSet("model get", flag.ExitOnError)
-		id := fs.Int("id", 0, "Model ID")
+		id := fs.String("id", "", "Model ID")
 		fs.Parse(args[1:])
-		if *id == 0 {
+		if *id == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}

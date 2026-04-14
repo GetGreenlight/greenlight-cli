@@ -11,16 +11,19 @@ import (
 	"github.com/manifoldco/promptui"
 )
 
-// selectItem holds a display label and the underlying integer ID.
-type selectItem struct {
+// selectItem holds a display label and the underlying ID. The ID type is
+// generic so we can share the picker between INTEGER PKs (harnesses,
+// organization_positions) and TEXT/UUID PKs (organizations, agents, etc.).
+type selectItem[T any] struct {
 	Label string
-	ID    int
+	ID    T
 }
 
 // selectFromList renders an interactive selector and returns the chosen ID.
-func selectFromList(label string, items []selectItem) (int, error) {
+func selectFromList[T any](label string, items []selectItem[T]) (T, error) {
+	var zero T
 	if len(items) == 0 {
-		return 0, fmt.Errorf("no items to select from")
+		return zero, fmt.Errorf("no items to select from")
 	}
 
 	labels := make([]string, len(items))
@@ -36,13 +39,13 @@ func selectFromList(label string, items []selectItem) (int, error) {
 
 	idx, _, err := sel.Run()
 	if err != nil {
-		return 0, err
+		return zero, err
 	}
 	return items[idx].ID, nil
 }
 
 // =============================================================================
-// selectHarness
+// selectHarness — harnesses.id is still INTEGER
 // =============================================================================
 
 func selectHarness() (int, error) {
@@ -65,9 +68,9 @@ func selectHarness() (int, error) {
 		return 0, fmt.Errorf("no harnesses found — seed the database first")
 	}
 
-	items := make([]selectItem, len(resp.Harnesses))
+	items := make([]selectItem[int], len(resp.Harnesses))
 	for i, h := range resp.Harnesses {
-		items[i] = selectItem{Label: fmt.Sprintf("%d: %s", h.ID, h.Name), ID: h.ID}
+		items[i] = selectItem[int]{Label: fmt.Sprintf("%d: %s", h.ID, h.Name), ID: h.ID}
 	}
 	return selectFromList("Harness", items)
 }
@@ -76,33 +79,33 @@ func selectHarness() (int, error) {
 // selectAIBrainModel
 // =============================================================================
 
-func selectAIBrainModel(orgID int) (int, error) {
+func selectAIBrainModel(orgID string) (string, error) {
 	payload := map[string]interface{}{}
-	if orgID != 0 {
+	if orgID != "" {
 		payload["organization_id"] = orgID
 	}
 	data, err := sendWSRequest("list_ai_brain_models", payload)
 	if err != nil {
-		return 0, fmt.Errorf("failed to fetch AI brain models: %w", err)
+		return "", fmt.Errorf("failed to fetch AI brain models: %w", err)
 	}
 
 	var resp struct {
 		AIBrainModels []struct {
-			ID   int    `json:"id"`
+			ID   string `json:"id"`
 			Name string `json:"name"`
 		} `json:"ai_brain_models"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("failed to parse AI brain models: %w", err)
+		return "", fmt.Errorf("failed to parse AI brain models: %w", err)
 	}
 
 	if len(resp.AIBrainModels) == 0 {
-		return 0, fmt.Errorf("no AI brain models found — seed the database first")
+		return "", fmt.Errorf("no AI brain models found — seed the database first")
 	}
 
-	items := make([]selectItem, len(resp.AIBrainModels))
+	items := make([]selectItem[string], len(resp.AIBrainModels))
 	for i, m := range resp.AIBrainModels {
-		items[i] = selectItem{Label: fmt.Sprintf("%d: %s", m.ID, m.Name), ID: m.ID}
+		items[i] = selectItem[string]{Label: fmt.Sprintf("%s: %s", m.ID, m.Name), ID: m.ID}
 	}
 	return selectFromList("AI brain model", items)
 }
@@ -111,20 +114,20 @@ func selectAIBrainModel(orgID int) (int, error) {
 // selectOrganization
 // =============================================================================
 
-func selectOrganization() (int, error) {
+func selectOrganization() (string, error) {
 	data, err := sendWSRequest("list_organizations", nil)
 	if err != nil {
-		return 0, fmt.Errorf("failed to fetch organizations: %w", err)
+		return "", fmt.Errorf("failed to fetch organizations: %w", err)
 	}
 
 	var resp struct {
 		Organizations []struct {
-			ID   int    `json:"id"`
+			ID   string `json:"id"`
 			Name string `json:"name"`
 		} `json:"organizations"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("failed to parse organizations: %w", err)
+		return "", fmt.Errorf("failed to parse organizations: %w", err)
 	}
 
 	if len(resp.Organizations) == 0 {
@@ -132,45 +135,39 @@ func selectOrganization() (int, error) {
 		return createOrganizationInteractive()
 	}
 
-	return selectFromList("Organization", func() []selectItem {
-		items := make([]selectItem, len(resp.Organizations))
-		for i, o := range resp.Organizations {
-			items[i] = selectItem{Label: fmt.Sprintf("%d: %s", o.ID, o.Name), ID: o.ID}
-		}
-		return items
-	}())
+	items := make([]selectItem[string], len(resp.Organizations))
+	for i, o := range resp.Organizations {
+		items[i] = selectItem[string]{Label: fmt.Sprintf("%s: %s", o.ID, o.Name), ID: o.ID}
+	}
+	return selectFromList("Organization", items)
 }
 
-func createOrganizationInteractive() (int, error) {
+func createOrganizationInteractive() (string, error) {
 	reader := bufio.NewReader(os.Stdin)
 	name := promptLine(reader, "Name: ")
 	if name == "" {
-		return 0, fmt.Errorf("name required")
+		return "", fmt.Errorf("name required")
 	}
-	email := promptLine(reader, "Recovery email (optional): ")
 
 	payload := map[string]interface{}{"name": name}
-	if email != "" {
-		payload["recovery_email"] = email
-	}
 	data, err := sendWSRequest("create_organization", payload)
 	if err != nil {
-		return 0, fmt.Errorf("failed to create organization: %w", err)
+		return "", fmt.Errorf("failed to create organization: %w", err)
 	}
 
 	var resp struct {
 		Organization struct {
-			ID int `json:"id"`
+			ID string `json:"id"`
 		} `json:"organization"`
 		Error string `json:"error"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("failed to parse response: %w", err)
+		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
 	if resp.Error != "" {
-		return 0, fmt.Errorf("create organization: %s", resp.Error)
+		return "", fmt.Errorf("create organization: %s", resp.Error)
 	}
-	fmt.Printf("Created organization %d.\n", resp.Organization.ID)
+	fmt.Printf("Created organization %s.\n", resp.Organization.ID)
 	return resp.Organization.ID, nil
 }
 
@@ -178,24 +175,29 @@ func createOrganizationInteractive() (int, error) {
 // selectAgentJobDescription
 // =============================================================================
 
-func selectAgentJobDescription(orgID int) (int, error) {
+// sentinelCreateNew is returned by the optional/required selectors to indicate
+// that the user picked the "→ Create new…" option. It can never collide with a
+// real UUID since UUIDs are 36 chars long with dashes in fixed positions.
+const sentinelCreateNew = "__create_new__"
+
+func selectAgentJobDescription(orgID string) (string, error) {
 	payload := map[string]interface{}{}
-	if orgID != 0 {
+	if orgID != "" {
 		payload["organization_id"] = orgID
 	}
 	data, err := sendWSRequest("list_agent_job_descriptions", payload)
 	if err != nil {
-		return 0, fmt.Errorf("failed to fetch job descriptions: %w", err)
+		return "", fmt.Errorf("failed to fetch job descriptions: %w", err)
 	}
 
 	var resp struct {
 		AgentJobDescriptions []struct {
-			ID    int    `json:"id"`
+			ID    string `json:"id"`
 			Title string `json:"title"`
 		} `json:"agent_job_descriptions"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("failed to parse job descriptions: %w", err)
+		return "", fmt.Errorf("failed to parse job descriptions: %w", err)
 	}
 
 	if len(resp.AgentJobDescriptions) == 0 {
@@ -203,73 +205,73 @@ func selectAgentJobDescription(orgID int) (int, error) {
 		return createAgentJobDescriptionInteractive(orgID)
 	}
 
-	items := make([]selectItem, len(resp.AgentJobDescriptions))
+	items := make([]selectItem[string], len(resp.AgentJobDescriptions))
 	for i, j := range resp.AgentJobDescriptions {
-		items[i] = selectItem{Label: fmt.Sprintf("%d: %s", j.ID, j.Title), ID: j.ID}
+		items[i] = selectItem[string]{Label: fmt.Sprintf("%s: %s", j.ID, j.Title), ID: j.ID}
 	}
-	items = append(items, selectItem{Label: "→ Create new…", ID: 0})
+	items = append(items, selectItem[string]{Label: "→ Create new…", ID: sentinelCreateNew})
 
 	id, err := selectFromList("Agent job description", items)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
-	if id == 0 {
+	if id == sentinelCreateNew {
 		return createAgentJobDescriptionInteractive(orgID)
 	}
 	return id, nil
 }
 
 // selectOptionalAgentJobDescription is like selectAgentJobDescription but adds a
-// "→ Skip" option. Returns 0 when the user chooses to skip.
-func selectOptionalAgentJobDescription(orgID int) (int, error) {
+// "→ Skip" option. Returns "" when the user chooses to skip.
+func selectOptionalAgentJobDescription(orgID string) (string, error) {
 	payload := map[string]interface{}{}
-	if orgID != 0 {
+	if orgID != "" {
 		payload["organization_id"] = orgID
 	}
 	data, err := sendWSRequest("list_agent_job_descriptions", payload)
 	if err != nil {
-		return 0, fmt.Errorf("failed to fetch job descriptions: %w", err)
+		return "", fmt.Errorf("failed to fetch job descriptions: %w", err)
 	}
 
 	var resp struct {
 		AgentJobDescriptions []struct {
-			ID    int    `json:"id"`
+			ID    string `json:"id"`
 			Title string `json:"title"`
 		} `json:"agent_job_descriptions"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("failed to parse job descriptions: %w", err)
+		return "", fmt.Errorf("failed to parse job descriptions: %w", err)
 	}
 
-	items := make([]selectItem, len(resp.AgentJobDescriptions))
+	items := make([]selectItem[string], len(resp.AgentJobDescriptions))
 	for i, j := range resp.AgentJobDescriptions {
-		items[i] = selectItem{Label: fmt.Sprintf("%d: %s", j.ID, j.Title), ID: j.ID}
+		items[i] = selectItem[string]{Label: fmt.Sprintf("%s: %s", j.ID, j.Title), ID: j.ID}
 	}
-	items = append(items, selectItem{Label: "→ Create new…", ID: -1})
-	items = append(items, selectItem{Label: "→ Skip (none)", ID: 0})
+	items = append(items, selectItem[string]{Label: "→ Create new…", ID: sentinelCreateNew})
+	items = append(items, selectItem[string]{Label: "→ Skip (none)", ID: ""})
 
 	id, err := selectFromList("Agent job description (optional)", items)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
-	if id == -1 {
+	if id == sentinelCreateNew {
 		return createAgentJobDescriptionInteractive(orgID)
 	}
-	return id, nil // 0 = skip
+	return id, nil // "" = skip
 }
 
-func createAgentJobDescriptionInteractive(orgID int) (int, error) {
-	if orgID == 0 {
+func createAgentJobDescriptionInteractive(orgID string) (string, error) {
+	if orgID == "" {
 		orgID = workingOrgID()
 	}
-	if orgID == 0 {
-		return 0, fmt.Errorf("no working organization set (run 'greenlight org org use --id <ID>')")
+	if orgID == "" {
+		return "", fmt.Errorf("no working organization set (run 'greenlight org org use --id <ID>')")
 	}
 
 	reader := bufio.NewReader(os.Stdin)
 	title := promptLine(reader, "Title: ")
 	if title == "" {
-		return 0, fmt.Errorf("title required")
+		return "", fmt.Errorf("title required")
 	}
 	mandate := promptLine(reader, "Mandate (optional): ")
 
@@ -283,22 +285,22 @@ func createAgentJobDescriptionInteractive(orgID int) (int, error) {
 	}
 	data, err := sendWSRequest("create_agent_job_description", payload)
 	if err != nil {
-		return 0, fmt.Errorf("failed to create job description: %w", err)
+		return "", fmt.Errorf("failed to create job description: %w", err)
 	}
 
 	var resp struct {
 		AgentJobDescription struct {
-			ID int `json:"id"`
+			ID string `json:"id"`
 		} `json:"agent_job_description"`
 		Error string `json:"error"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("failed to parse response: %w", err)
+		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
 	if resp.Error != "" {
-		return 0, fmt.Errorf("create job description: %s", resp.Error)
+		return "", fmt.Errorf("create job description: %s", resp.Error)
 	}
-	fmt.Printf("Created job description %d.\n", resp.AgentJobDescription.ID)
+	fmt.Printf("Created job description %s.\n", resp.AgentJobDescription.ID)
 	return resp.AgentJobDescription.ID, nil
 }
 
@@ -306,25 +308,25 @@ func createAgentJobDescriptionInteractive(orgID int) (int, error) {
 // selectWorkingDirectory
 // =============================================================================
 
-func selectWorkingDirectory(orgID int) (int, error) {
+func selectWorkingDirectory(orgID string) (string, error) {
 	payload := map[string]interface{}{}
-	if orgID != 0 {
+	if orgID != "" {
 		payload["organization_id"] = orgID
 	}
 	data, err := sendWSRequest("list_working_directories", payload)
 	if err != nil {
-		return 0, fmt.Errorf("failed to fetch working directories: %w", err)
+		return "", fmt.Errorf("failed to fetch working directories: %w", err)
 	}
 
 	var resp struct {
 		WorkingDirectories []struct {
-			ID            int    `json:"id"`
+			ID            string `json:"id"`
 			Hostname      string `json:"hostname"`
 			DirectoryPath string `json:"directory_path"`
 		} `json:"working_directories"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("failed to parse working directories: %w", err)
+		return "", fmt.Errorf("failed to parse working directories: %w", err)
 	}
 
 	if len(resp.WorkingDirectories) == 0 {
@@ -332,37 +334,37 @@ func selectWorkingDirectory(orgID int) (int, error) {
 		return createWorkingDirectoryInteractive(orgID)
 	}
 
-	items := make([]selectItem, len(resp.WorkingDirectories))
+	items := make([]selectItem[string], len(resp.WorkingDirectories))
 	for i, w := range resp.WorkingDirectories {
 		label := w.Hostname + ":" + w.DirectoryPath
 		if w.Hostname == "" && w.DirectoryPath == "" {
-			label = fmt.Sprintf("id=%d", w.ID)
+			label = fmt.Sprintf("id=%s", w.ID)
 		}
-		items[i] = selectItem{Label: fmt.Sprintf("%d: %s", w.ID, label), ID: w.ID}
+		items[i] = selectItem[string]{Label: fmt.Sprintf("%s: %s", w.ID, label), ID: w.ID}
 	}
-	items = append(items, selectItem{Label: "→ Create new…", ID: 0})
+	items = append(items, selectItem[string]{Label: "→ Create new…", ID: sentinelCreateNew})
 
 	id, err := selectFromList("Working directory", items)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
-	if id == 0 {
+	if id == sentinelCreateNew {
 		return createWorkingDirectoryInteractive(orgID)
 	}
 	return id, nil
 }
 
-func createWorkingDirectoryInteractive(orgID int) (int, error) {
-	if orgID == 0 {
+func createWorkingDirectoryInteractive(orgID string) (string, error) {
+	if orgID == "" {
 		orgID = workingOrgID()
 	}
-	if orgID == 0 {
-		return 0, fmt.Errorf("no working organization set (run 'greenlight org org use --id <ID>')")
+	if orgID == "" {
+		return "", fmt.Errorf("no working organization set (run 'greenlight org org use --id <ID>')")
 	}
 
 	hostID := readConfigValue("host_id")
 	if hostID == "" {
-		return 0, fmt.Errorf("host ID not found — run 'greenlight daemon start' to enroll this host")
+		return "", fmt.Errorf("host ID not found — run 'greenlight daemon start' to enroll this host")
 	}
 
 	cwd, _ := os.Getwd()
@@ -376,32 +378,32 @@ func createWorkingDirectoryInteractive(orgID int) (int, error) {
 	}
 	data, err := sendWSRequest("create_working_directory", payload)
 	if err != nil {
-		return 0, fmt.Errorf("failed to create working directory: %w", err)
+		return "", fmt.Errorf("failed to create working directory: %w", err)
 	}
 
 	var resp struct {
 		WorkingDirectory struct {
-			ID int `json:"id"`
+			ID string `json:"id"`
 		} `json:"working_directory"`
 		Error string `json:"error"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("failed to parse response: %w", err)
+		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
 	if resp.Error != "" {
-		return 0, fmt.Errorf("create working directory: %s", resp.Error)
+		return "", fmt.Errorf("create working directory: %s", resp.Error)
 	}
-	fmt.Printf("Created working directory %d.\n", resp.WorkingDirectory.ID)
+	fmt.Printf("Created working directory %s.\n", resp.WorkingDirectory.ID)
 	return resp.WorkingDirectory.ID, nil
 }
 
 // =============================================================================
-// selectOrganizationPosition
+// selectOrganizationPosition — organization_positions.id is still INTEGER
 // =============================================================================
 
-func selectOrganizationPosition(orgID int) (int, error) {
+func selectOrganizationPosition(orgID string) (int, error) {
 	payload := map[string]interface{}{}
-	if orgID != 0 {
+	if orgID != "" {
 		payload["organization_id"] = orgID
 	}
 	data, err := sendWSRequest("list_organization_positions", payload)
@@ -413,8 +415,8 @@ func selectOrganizationPosition(orgID int) (int, error) {
 		OrganizationPositions []struct {
 			ID                    int    `json:"id"`
 			Name                  string `json:"name"`
-			WorkingDirectoryID    int    `json:"working_directory_id"`
-			AgentJobDescriptionID *int   `json:"agent_job_description_id"`
+			WorkingDirectoryID    string `json:"working_directory_id"`
+			AgentJobDescriptionID string `json:"agent_job_description_id"`
 		} `json:"organization_positions"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -426,20 +428,20 @@ func selectOrganizationPosition(orgID int) (int, error) {
 		return createOrganizationPositionInteractive(orgID)
 	}
 
-	items := make([]selectItem, len(resp.OrganizationPositions))
+	items := make([]selectItem[int], len(resp.OrganizationPositions))
 	for i, p := range resp.OrganizationPositions {
 		var label string
 		if p.Name != "" {
 			label = p.Name
 		} else {
-			label = fmt.Sprintf("wd=%d", p.WorkingDirectoryID)
-			if p.AgentJobDescriptionID != nil {
-				label += fmt.Sprintf(" job=%d", *p.AgentJobDescriptionID)
+			label = fmt.Sprintf("wd=%s", p.WorkingDirectoryID)
+			if p.AgentJobDescriptionID != "" {
+				label += fmt.Sprintf(" job=%s", p.AgentJobDescriptionID)
 			}
 		}
-		items[i] = selectItem{Label: fmt.Sprintf("%d: %s", p.ID, label), ID: p.ID}
+		items[i] = selectItem[int]{Label: fmt.Sprintf("%d: %s", p.ID, label), ID: p.ID}
 	}
-	items = append(items, selectItem{Label: "→ Create new…", ID: 0})
+	items = append(items, selectItem[int]{Label: "→ Create new…", ID: 0})
 
 	id, err := selectFromList("Organization position", items)
 	if err != nil {
@@ -451,11 +453,11 @@ func selectOrganizationPosition(orgID int) (int, error) {
 	return id, nil
 }
 
-func createOrganizationPositionInteractive(orgID int) (int, error) {
-	if orgID == 0 {
+func createOrganizationPositionInteractive(orgID string) (int, error) {
+	if orgID == "" {
 		orgID = workingOrgID()
 	}
-	if orgID == 0 {
+	if orgID == "" {
 		return 0, fmt.Errorf("no working organization set (run 'greenlight org org use --id <ID>')")
 	}
 
@@ -482,7 +484,7 @@ func createOrganizationPositionInteractive(orgID int) (int, error) {
 	if name != "" {
 		payload["name"] = name
 	}
-	if jobID != 0 {
+	if jobID != "" {
 		payload["agent_job_description_id"] = jobID
 	}
 	data, err := sendWSRequest("create_organization_position", payload)
