@@ -223,23 +223,35 @@ func ensureDaemon(deviceIDFlag string) error {
 		if deviceID == "" {
 			deviceID = readConfigValue("device_id")
 		}
-		if deviceID != "" {
-			// Use persisted host_id if available; otherwise generate and enroll
-			hostID = readConfigValue("host_id")
-			if hostID == "" {
-				hostID = generateUUID()
-				baseURL, err := serverBaseURL()
-				if err != nil {
-					return fmt.Errorf("cannot derive server URL: %w", err)
-				}
-				hostname, _ := os.Hostname()
+
+		// Use persisted host_id if available; otherwise generate and enroll
+		hostID = readConfigValue("host_id")
+		if hostID == "" {
+			hostID = generateUUID()
+			baseURL, err := serverBaseURL()
+			if err != nil {
+				return fmt.Errorf("cannot derive server URL: %w", err)
+			}
+			hostname, _ := os.Hostname()
+
+			if deviceID != "" {
+				// Legacy flow: enroll host via device_id (requires phone approval)
 				fmt.Fprintf(os.Stderr, "greenlight: enrolling host (approve on your phone)...\n")
 				if err := enrollSession(baseURL, deviceID, hostID, "", "", "", hostname); err != nil {
 					return fmt.Errorf("host enrollment failed: %w", err)
 				}
-				if err := writeConfigValue("host_id", hostID); err != nil {
-					return fmt.Errorf("failed to persist host_id: %w", err)
+			} else {
+				// New flow: register host via user_id
+				userID := readConfigValue("user_id")
+				if userID == "" {
+					return fmt.Errorf("not registered — run 'greenlight register <email>' first")
 				}
+				if err := registerHost(baseURL, userID, hostID, hostname); err != nil {
+					return fmt.Errorf("host registration failed: %w", err)
+				}
+			}
+			if err := writeConfigValue("host_id", hostID); err != nil {
+				return fmt.Errorf("failed to persist host_id: %w", err)
 			}
 		}
 	}

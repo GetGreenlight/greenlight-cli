@@ -97,7 +97,7 @@ When no command is given, 'connect' is used by default.
 
 Commands:
   connect    Start an agent session with a remote relay to the Greenlight app
-  register   Register a device ID for the Greenlight app
+  register   Register with your email and enroll this host
   agent      Get or set the default agent runtime (claude, codex, copilot, cursor, gemini, pi)
   daemon     Manage the background daemon (start, stop, status)
   org        Manage multi-agent organization entities (org, user, wd, job, pos, agent, model)
