@@ -25,6 +25,7 @@ type talkWS struct {
 // Tea messages produced by the WS goroutine.
 type wsConnectedMsg struct{}
 type wsDisconnectedMsg struct{ err string }
+type wsReconnectingMsg struct{ after time.Duration }
 type wsMessageMsg struct{ data []byte }
 
 func newTalkWS(userID string) (*talkWS, error) {
@@ -56,35 +57,71 @@ func newTalkWS(userID string) (*talkWS, error) {
 	}, nil
 }
 
-// run is the WS read loop. It dials the server, then forwards every text
-// frame to the tea.Program as a wsMessageMsg until the connection drops or
-// the model calls close().
+// run is the long-lived WS pump. It dials the server, forwards every text
+// frame to the tea.Program as a wsMessageMsg, and on any disconnect waits
+// with exponential backoff (capped at 30s) before reconnecting. Stops only
+// when close() cancels the context.
 func (w *talkWS) run() {
+	var backoff time.Duration
+	for w.ctx.Err() == nil {
+		err := w.connectAndRead()
+		if w.ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			w.program.Send(wsDisconnectedMsg{err: err.Error()})
+		}
+		backoff = nextBackoff(backoff)
+		w.program.Send(wsReconnectingMsg{after: backoff})
+		select {
+		case <-time.After(backoff):
+		case <-w.ctx.Done():
+			return
+		}
+	}
+}
+
+// connectAndRead dials once and pumps frames until the connection drops or
+// the model context is canceled. Returns the read/dial error (or nil on a
+// clean context cancellation).
+func (w *talkWS) connectAndRead() error {
 	dialCtx, dialCancel := context.WithTimeout(w.ctx, 10*time.Second)
 	conn, _, err := websocket.Dial(dialCtx, w.url, nil)
 	dialCancel()
 	if err != nil {
-		w.program.Send(wsDisconnectedMsg{err: err.Error()})
-		return
+		return err
 	}
 	w.conn = conn
 	conn.SetReadLimit(1 << 20) // match the server's 1 MB cap
 	w.program.Send(wsConnectedMsg{})
 
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	defer func() {
+		conn.Close(websocket.StatusNormalClosure, "")
+		w.conn = nil
+	}()
 
 	for {
 		_, data, err := conn.Read(w.ctx)
 		if err != nil {
 			if w.ctx.Err() != nil {
-				// Closed by us — don't surface as an error.
-				return
+				return nil
 			}
-			w.program.Send(wsDisconnectedMsg{err: err.Error()})
-			return
+			return err
 		}
 		w.program.Send(wsMessageMsg{data: data})
 	}
+}
+
+// nextBackoff returns the next reconnect delay, doubling up to a 30s cap.
+func nextBackoff(current time.Duration) time.Duration {
+	if current == 0 {
+		return time.Second
+	}
+	next := current * 2
+	if next > 30*time.Second {
+		return 30 * time.Second
+	}
+	return next
 }
 
 // send writes a JSON text frame back to the server. Used in phase 2+ for

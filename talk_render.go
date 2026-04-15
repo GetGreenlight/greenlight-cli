@@ -306,3 +306,59 @@ func renderMissedRequest(toolName, project string, toolInput json.RawMessage) st
 	}
 	return missedStyle.Render(strings.Join(parts, " "))
 }
+
+// =============================================================================
+// help overlay
+// =============================================================================
+
+var helpKeyStyle = lipgloss.NewStyle().
+	Bold(true).
+	Foreground(lipgloss.Color("33"))
+
+// renderHelp draws the centered help overlay shown when the user presses '?'.
+func renderHelp(terminalWidth int) string {
+	boxWidth := 56
+	if terminalWidth > 0 && terminalWidth-4 < boxWidth {
+		boxWidth = terminalWidth - 4
+	}
+	if boxWidth < 30 {
+		boxWidth = 30
+	}
+
+	row := func(key, label string) string {
+		return helpKeyStyle.Render(fmt.Sprintf("  %-12s", key)) + label
+	}
+
+	var b strings.Builder
+	b.WriteString(modalHeaderStyle.Render("greenlight talk") + "\n\n")
+	b.WriteString(modalLabelStyle.Render("Normal mode") + "\n")
+	b.WriteString(row("tab", "switch focused session") + "\n")
+	b.WriteString(row("shift+tab", "switch backwards") + "\n")
+	b.WriteString(row("pgup / pgdn", "scroll the transcript") + "\n")
+	b.WriteString(row("enter", "send the input as a message") + "\n")
+	b.WriteString(row("?", "show this help") + "\n")
+	b.WriteString(row("ctrl+c, esc", "quit") + "\n")
+	b.WriteString("\n")
+	b.WriteString(modalLabelStyle.Render("Permission modal") + "\n")
+	b.WriteString(row("a", "allow") + "\n")
+	b.WriteString(row("d", "deny") + "\n")
+	b.WriteString(row("A", "always allow") + "\n")
+	b.WriteString(row("esc", "dismiss") + "\n")
+	b.WriteString("\n")
+	b.WriteString(modalHelpStyle.Render("(press any key to close)"))
+
+	return modalBoxStyle.Width(boxWidth).Render(b.String())
+}
+
+// statusHints returns a faint key-hint suffix for the bottom status bar.
+// Different content depending on whether the help/modal layers are active.
+func statusHints(modalActive, helpActive bool) string {
+	switch {
+	case modalActive:
+		return "" // modal already shows its own help line
+	case helpActive:
+		return "(any key) close"
+	default:
+		return "tab switch · pgup/pgdn scroll · ? help · ctrl+c quit"
+	}
+}

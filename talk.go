@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -111,6 +112,10 @@ type talkModel struct {
 	// through the modal branch.
 	pending *talkPendingPermission
 
+	// Help overlay. When true, View renders the help box and any key
+	// dismisses it (except ctrl+c which always quits).
+	helpOpen bool
+
 	viewport viewport.Model
 	input    textinput.Model
 
@@ -143,6 +148,15 @@ func (m talkModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Help overlay: any key dismisses it (ctrl+c always quits).
+		if m.helpOpen {
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			m.helpOpen = false
+			return m, nil
+		}
+
 		// Modal mode: route a/d/A/esc directly, swallow everything else.
 		if m.pending != nil {
 			switch msg.String() {
@@ -172,6 +186,14 @@ func (m talkModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "esc":
 			return m, tea.Quit
+		case "?":
+			// Only treat ? as a help shortcut when the input field is
+			// empty — otherwise it's just a character in the message
+			// the user is typing.
+			if m.input.Value() == "" {
+				m.helpOpen = true
+				return m, nil
+			}
 		case "tab":
 			m.cycleFocus(1)
 			m.refreshViewport()
@@ -238,6 +260,9 @@ func (m talkModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case wsDisconnectedMsg:
 		m.status = "Disconnected: " + msg.err
 
+	case wsReconnectingMsg:
+		m.status = fmt.Sprintf("Reconnecting in %s…", msg.after.Round(time.Second))
+
 	case wsMessageMsg:
 		m.handleServerMessage(msg.data)
 	}
@@ -251,6 +276,19 @@ func (m talkModel) View() string {
 	}
 	pills := renderPills(m.sessions, m.focused)
 
+	// Help overlay takes precedence over everything except quit.
+	if m.helpOpen {
+		help := renderHelp(m.width)
+		centered := lipgloss.Place(m.width, m.viewport.Height,
+			lipgloss.Center, lipgloss.Center, help)
+		return strings.Join([]string{
+			pills,
+			centered,
+			modalHelpStyle.Render("(press any key to close)"),
+			m.statusBar(),
+		}, "\n")
+	}
+
 	// Modal mode: replace the viewport pane with the centered modal and
 	// the input row with a help line listing the modal key bindings.
 	if m.pending != nil {
@@ -262,7 +300,7 @@ func (m talkModel) View() string {
 			pills,
 			centered,
 			help,
-			statusStyle.Render(m.status),
+			m.statusBar(),
 		}, "\n")
 	}
 
@@ -270,8 +308,17 @@ func (m talkModel) View() string {
 		pills,
 		m.viewport.View(),
 		m.input.View(),
-		statusStyle.Render(m.status),
+		m.statusBar(),
 	}, "\n")
+}
+
+// statusBar combines the current status string with contextual key hints.
+func (m talkModel) statusBar() string {
+	hints := statusHints(m.pending != nil, m.helpOpen)
+	if hints == "" {
+		return statusStyle.Render(m.status)
+	}
+	return statusStyle.Render(m.status + " · " + hints)
 }
 
 // =============================================================================
