@@ -71,10 +71,29 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		return nil, fmt.Errorf("working directory is required")
 	}
 
-	// Resolve device ID and project
-	devID, proj, err := resolveDeviceAndProject(req.DeviceID, req.Project, cwd)
-	if err != nil {
-		return nil, err
+	// Resolve device ID and project. Detached spawns originate inside the
+	// daemon (no client to provide a device_id), so they fall back to the
+	// daemon's own human_user_id, and the project defaults to the cwd's
+	// basename if nothing was passed.
+	var (
+		devID string
+		proj  string
+		err   error
+	)
+	if req.Detached {
+		devID = req.DeviceID
+		if devID == "" {
+			devID = d.humanUserID
+		}
+		proj = req.Project
+		if proj == "" && cwd != "" {
+			proj = filepath.Base(cwd)
+		}
+	} else {
+		devID, proj, err = resolveDeviceAndProject(req.DeviceID, req.Project, cwd)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Build agent command with session IDs and flags
@@ -85,6 +104,16 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	command := setup.Command
 	cmdArgs := setup.Args
 	relayID := setup.RelayID
+	// Honor an explicit relay_id override (used by spawnAgentSession so the
+	// session is keyed by the ai_agent_instance_id rather than a fresh UUID).
+	if req.RelayID != "" {
+		relayID = req.RelayID
+		setup.RelayID = req.RelayID
+		if agent == "codex" {
+			// Codex reuses RelayID as its agent-session sentinel.
+			setup.AgentSessionID = req.RelayID
+		}
+	}
 
 	// Register session with the server via daemon WS (no phone approval needed)
 	if d.daemonWS == nil {
@@ -107,8 +136,11 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		daemon:    d,
 	}
 
-	// Write connect PID file
-	s.connectPidFile = writeConnectPid(relayID, agent, cwd)
+	// Write connect PID file (skipped for detached spawns — that file is a
+	// marker for `greenlight connect` clients).
+	if !req.Detached {
+		s.connectPidFile = writeConnectPid(relayID, agent, cwd)
+	}
 
 	// Create bridge file
 	s.bridgePath = filepath.Join(os.TempDir(), "greenlight-bridge-"+relayID)

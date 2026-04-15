@@ -5,92 +5,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"sync"
-	"syscall"
-	"time"
 )
-
-// spawnedAgent tracks one detached agent process owned by the daemon.
-type spawnedAgent struct {
-	id      string // ai_agent_instances.id
-	name    string
-	pid     int
-	cmd     *exec.Cmd
-	logPath string
-}
-
-// daemonAgents is the daemon's in-memory registry of spawned agent processes.
-// Keyed by ai_agent_instance_id. Populated when org agent create succeeds.
-var (
-	daemonAgents   = map[string]*spawnedAgent{}
-	daemonAgentsMu sync.RWMutex
-)
-
-// killAllSpawnedAgents signals every tracked agent process so children don't
-// outlive the daemon. Called from Daemon.Shutdown.
-func killAllSpawnedAgents() {
-	daemonAgentsMu.Lock()
-	agents := make([]*spawnedAgent, 0, len(daemonAgents))
-	for _, sa := range daemonAgents {
-		agents = append(agents, sa)
-	}
-	daemonAgentsMu.Unlock()
-
-	for _, sa := range agents {
-		if sa.cmd == nil || sa.cmd.Process == nil {
-			continue
-		}
-		log.Printf("daemon: killing agent %s (pid %d) on shutdown", sa.id, sa.pid)
-		_ = sa.cmd.Process.Kill()
-	}
-}
-
-// stopSpawnedAgent terminates the tracked agent process for the given
-// ai_agent_instance_id. Sends SIGTERM first and waits briefly for the process
-// to exit on its own; falls back to SIGKILL if it doesn't. Returns nil when
-// no agent is tracked locally — that's the expected case when retiring an
-// agent that was spawned on a different host (or already exited).
-func stopSpawnedAgent(agentID string) error {
-	daemonAgentsMu.RLock()
-	sa, ok := daemonAgents[agentID]
-	daemonAgentsMu.RUnlock()
-	if !ok {
-		return nil // not running locally; nothing to kill
-	}
-	if sa.cmd == nil || sa.cmd.Process == nil {
-		return nil
-	}
-
-	log.Printf("daemon: stopping agent %s (pid %d) — SIGTERM", agentID, sa.pid)
-	if err := sa.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		// Already gone — reaper goroutine will clean up.
-		return nil
-	}
-
-	// Give the process up to 2s to exit cleanly. The reaper goroutine
-	// removes the entry from daemonAgents when Wait() returns, so we poll
-	// the map for absence rather than calling Wait again.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		daemonAgentsMu.RLock()
-		_, stillThere := daemonAgents[agentID]
-		daemonAgentsMu.RUnlock()
-		if !stillThere {
-			return nil
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	log.Printf("daemon: agent %s (pid %d) didn't exit on SIGTERM — SIGKILL", agentID, sa.pid)
-	_ = sa.cmd.Process.Kill()
-	return nil
-}
 
 // localAgentForHarness translates a server-side harness name (the value in
 // harnesses.name) to the CLI's local agent identifier used by buildAgentCommand.
@@ -114,7 +31,9 @@ func localAgentForHarness(harness string) string {
 // handleCreateAgentInstance is the special-cased ws_request handler for
 // create_ai_agent_instance. It pre-checks that the agent's working directory
 // lives on this host (aborting before any row is created if not), forwards the
-// create message to the server, then spawns the agent process detached.
+// create message to the server, then spawns a full session for the agent that
+// shows up alongside `greenlight connect` sessions in relay_sessions and is
+// reachable from the phone/talk TUI.
 func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 	// Parse the create payload to find the organization_position_id we need
 	// to pre-check. The server validates everything else.
@@ -217,15 +136,14 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 		return
 	}
 
-	// Step 4: spawn detached.
-	pid, logPath, spawnErr := d.spawnDetachedAgent(
+	// Step 4: spawn a full session (relay-registered, transcript-streamed).
+	pid, spawnErr := d.spawnAgentSession(
 		createWrap.AIAgentInstance.ID,
 		createWrap.AIAgentInstance.Name,
 		createWrap.SpawnContext.HarnessName,
 		createWrap.SpawnContext.DirectoryPath,
 	)
 
-	// Build the augmented response: server payload + spawn outcome.
 	out := map[string]interface{}{
 		"ai_agent_instance": createWrap.AIAgentInstance,
 		"spawn_context":     createWrap.SpawnContext,
@@ -236,7 +154,7 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 	} else {
 		out["spawn"] = map[string]interface{}{
 			"pid":      pid,
-			"log_path": logPath,
+			"relay_id": createWrap.AIAgentInstance.ID,
 		}
 	}
 	merged, err := json.Marshal(out)
@@ -247,120 +165,54 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 	sendControl(conn, ipcResponse{Type: "ws_response", Data: merged})
 }
 
-// spawnDetachedAgent forks the harness binary inside a daemon-owned PTY.
-// The harness gets a real controlling terminal so TUI agents like claude
-// don't exit immediately on detecting "no TTY", but no client is attached to
-// the master end — the daemon just drains it into ~/.greenlight/agents/<id>.log.
-// Returns the new pid and the log path.
+// spawnAgentSession creates a fully-functioning agent session — same daemon
+// machinery `greenlight connect` uses (interpose hook, transcript bridge,
+// relay registration with the server) — but detached: no client is attached,
+// the PTY runs immediately in the background, and the session shows up in
+// relay_sessions so the phone and `greenlight talk` can talk to it.
 //
-// Side effect: Setsid is required so the child can acquire the slave PTY as
-// its controlling terminal. That puts the child in its own session, which
-// means it won't die alongside the daemon if the daemon is killed via SIGKILL.
-// killAllSpawnedAgents in Daemon.Shutdown is the safety net for clean exits.
-func (d *Daemon) spawnDetachedAgent(agentID, agentName, harnessName, cwd string) (int, string, error) {
+// The session's relay_id is the ai_agent_instance_id, so 'org agent stop'
+// can find and terminate it without any extra bookkeeping.
+func (d *Daemon) spawnAgentSession(agentInstanceID, agentName, harnessName, cwd string) (int, error) {
 	localAgent := localAgentForHarness(harnessName)
 	if localAgent == "" {
-		return 0, "", fmt.Errorf("no local CLI binary maps to harness %q", harnessName)
+		return 0, fmt.Errorf("no local CLI binary maps to harness %q", harnessName)
 	}
 
-	setup, err := buildAgentCommand(localAgent, "")
+	req := ipcRequest{
+		Type:     "connect",
+		Agent:    localAgent,
+		Project:  agentName, // surface the agent name as the "project" pill
+		Cwd:      cwd,
+		Detached: true,
+		RelayID:  agentInstanceID,
+	}
+	s, err := d.newSession(req)
 	if err != nil {
-		return 0, "", fmt.Errorf("buildAgentCommand: %w", err)
+		return 0, err
 	}
 
-	// Open per-agent log file.
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return 0, "", fmt.Errorf("UserHomeDir: %w", err)
-	}
-	logDir := filepath.Join(home, ".greenlight", "agents")
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return 0, "", fmt.Errorf("mkdir %s: %w", logDir, err)
-	}
-	logPath := filepath.Join(logDir, agentID+".log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return 0, "", fmt.Errorf("open %s: %w", logPath, err)
-	}
+	d.mu.Lock()
+	d.sessions[s.relayID] = s
+	d.mu.Unlock()
 
-	// Allocate a PTY so the harness sees a real terminal. Without this the
-	// claude binary (and every other TUI agent) detects no TTY on stdin and
-	// either errors out or shells out to non-interactive mode and exits.
-	master, slave, err := openPTY()
-	if err != nil {
-		logFile.Close()
-		return 0, "", fmt.Errorf("openPTY: %w", err)
-	}
-	// Pick a sensible default winsize. No client is attached so this is
-	// just whatever the harness will compute its layout against.
-	setWinsize(master.Fd(), &Winsize{Row: 40, Col: 120})
-
-	cmd := exec.Command(setup.Command, setup.Args...)
-	cmd.Dir = cwd
-	cmd.Stdin = slave
-	cmd.Stdout = slave
-	cmd.Stderr = slave
-	cmd.ExtraFiles = []*os.File{slave}
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid:  true,
-		Setctty: true,
-		Ctty:    3, // ExtraFiles[0] lands at fd 3 in the child
-	}
-	cmd.Env = append(os.Environ(),
-		"GREENLIGHT_AGENT_INSTANCE_ID="+agentID,
-		"GREENLIGHT_AGENT_NAME="+agentName,
-	)
-
-	if err := cmd.Start(); err != nil {
-		logFile.Close()
-		master.Close()
-		slave.Close()
-		return 0, "", fmt.Errorf("start: %w", err)
-	}
-
-	// Parent doesn't need the slave once the child has forked its own copy.
-	// Closing it here ensures the master read sees EOF when the child exits.
-	slave.Close()
-
-	pid := cmd.Process.Pid
-	sa := &spawnedAgent{
-		id:      agentID,
-		name:    agentName,
-		pid:     pid,
-		cmd:     cmd,
-		logPath: logPath,
-	}
-
-	daemonAgentsMu.Lock()
-	daemonAgents[agentID] = sa
-	daemonAgentsMu.Unlock()
-
-	// Drain the PTY master into the log file. If nobody reads the master,
-	// the kernel buffer fills and the harness blocks on its next render.
-	drainDone := make(chan struct{})
+	// Run the relay PTY in the background. When the child exits, drop the
+	// session from the registry and run cleanup. No client is attached, so
+	// the PTY drain inside runRelay discards any output the child writes
+	// directly to its terminal (transcripts still flow via the streamer).
 	go func() {
-		defer close(drainDone)
-		defer master.Close()
-		defer logFile.Close()
-		_, _ = io.Copy(logFile, master)
+		s.runRelay()
+		d.mu.Lock()
+		delete(d.sessions, s.relayID)
+		d.mu.Unlock()
+		s.Stop()
+		log.Printf("daemon: spawned agent session %s ended", s.relayID)
 	}()
 
-	// Reap the child so the OS doesn't hold a zombie and the registry stays
-	// consistent. Wait for the drain to finish before declaring exit so the
-	// log file has the full output before any "agent exited" message.
-	go func() {
-		err := cmd.Wait()
-		<-drainDone
-		daemonAgentsMu.Lock()
-		delete(daemonAgents, agentID)
-		daemonAgentsMu.Unlock()
-		if err != nil {
-			log.Printf("daemon: agent %s (pid %d) exited: %v", agentID, pid, err)
-		} else {
-			log.Printf("daemon: agent %s (pid %d) exited cleanly", agentID, pid)
-		}
-	}()
-
-	log.Printf("daemon: spawned agent %s (pid %d, log %s)", agentID, pid, logPath)
-	return pid, logPath, nil
+	pid := 0
+	if s.relay != nil && s.relay.cmd != nil && s.relay.cmd.Process != nil {
+		pid = s.relay.cmd.Process.Pid
+	}
+	log.Printf("daemon: spawned agent session %s (pid %d, cwd %s)", s.relayID, pid, cwd)
+	return pid, nil
 }

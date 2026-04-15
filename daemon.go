@@ -47,6 +47,14 @@ type ipcRequest struct {
 	Force     bool              `json:"force,omitempty"`
 	WSMsgType string            `json:"ws_msg_type,omitempty"` // for ws_request: the CRUD message type
 	WSData    json.RawMessage   `json:"ws_data,omitempty"`     // for ws_request: the payload
+	// Detached is set by the in-process spawnAgentSession path used by
+	// 'org agent create'. It tells newSession to skip prerequisites that
+	// only make sense for client-attached connect sessions.
+	Detached bool `json:"-"`
+	// RelayID is an optional override used when the caller already has a
+	// stable identifier it wants to use as the session's relay_id (e.g.
+	// the ai_agent_instance_id). When empty, buildAgentCommand generates one.
+	RelayID string `json:"-"`
 }
 
 // ipcResponse is the JSON control message sent by the daemon to the client.
@@ -391,17 +399,14 @@ func (d *Daemon) Shutdown() {
 		d.daemonWS.Close()
 	}
 
-	// Stop all sessions
+	// Stop all sessions (this includes detached spawn sessions from
+	// 'org agent create' since they live in d.sessions too).
 	d.mu.Lock()
 	for id, s := range d.sessions {
 		log.Printf("daemon: stopping session %s", id)
 		s.Stop()
 	}
 	d.mu.Unlock()
-
-	// Kill any detached agent children we spawned via org agent create so
-	// they don't outlive the daemon.
-	killAllSpawnedAgents()
 }
 
 // handleUpdateShutdown handles the update_shutdown IPC request.
@@ -568,14 +573,22 @@ func (d *Daemon) handleWSRequest(conn net.Conn, req ipcRequest) {
 	}
 
 	// update_ai_agent_instance with a non-empty retired_at is the "stop"
-	// path: kill the local PID (if any) before forwarding the row update.
+	// path: terminate the local session (if any) before forwarding the row
+	// update. Sessions from spawnAgentSession are keyed by ai_agent_instance_id
+	// in d.sessions, so the lookup is direct.
 	if req.WSMsgType == "update_ai_agent_instance" {
 		var probe struct {
 			ID        string `json:"id"`
 			RetiredAt string `json:"retired_at"`
 		}
 		if json.Unmarshal(req.WSData, &probe) == nil && probe.RetiredAt != "" && probe.ID != "" {
-			_ = stopSpawnedAgent(probe.ID)
+			d.mu.Lock()
+			s := d.sessions[probe.ID]
+			d.mu.Unlock()
+			if s != nil {
+				log.Printf("daemon: stopping spawned agent session %s on retire", probe.ID)
+				s.Stop()
+			}
 		}
 	}
 
