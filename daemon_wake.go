@@ -185,25 +185,121 @@ end tell`, strings.ReplaceAll(cmd, `"`, `\"`))
 	return exec.Command("osascript", "-e", script).Run()
 }
 
+// resolveSessionEnv discovers the current graphical session's environment
+// on Linux. The daemon is a long-running background process whose inherited
+// DISPLAY, WAYLAND_DISPLAY, and DBUS_SESSION_BUS_ADDRESS may be stale
+// (e.g. if the user logged out and back in). We query systemd --user for
+// the live values so terminal emulators can connect to the display server.
+func resolveSessionEnv() []string {
+	uid := os.Getuid()
+	dbusAddr := fmt.Sprintf("unix:path=/run/user/%d/bus", uid)
+
+	cmd := exec.Command("systemctl", "--user", "show-environment")
+	cmd.Env = []string{
+		fmt.Sprintf("XDG_RUNTIME_DIR=/run/user/%d", uid),
+		"DBUS_SESSION_BUS_ADDRESS=" + dbusAddr,
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		log.Printf("daemon: systemctl --user show-environment failed: %v", err)
+		return nil
+	}
+
+	// Extract display and session vars needed by terminal emulators.
+	var env []string
+	for _, line := range strings.Split(string(out), "\n") {
+		k, _, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS",
+			"XDG_RUNTIME_DIR", "XDG_SESSION_TYPE", "XAUTHORITY":
+			env = append(env, line)
+		}
+	}
+	if len(env) > 0 {
+		log.Printf("daemon: resolved session env: %v", env)
+	}
+	return env
+}
+
 // openTerminalLinux opens a new terminal emulator and runs the command.
+// Tries each available terminal in order, falling through on failure.
+// Uses Run() with a short timeout to detect quick failures (e.g. D-Bus
+// errors from gnome-terminal when launched from a background daemon).
 func openTerminalLinux(cmd string) error {
-	// Try common terminal emulators in order of preference
+	shellCmd := cmd + "; exec bash"
+	// All entries use "bash -c" explicitly so the shell command is
+	// interpreted correctly regardless of how each terminal handles -e.
 	terminals := []struct {
 		bin  string
 		args []string
 	}{
-		{"gnome-terminal", []string{"--", "bash", "-c", cmd + "; exec bash"}},
-		{"xterm", []string{"-e", cmd}},
-		{"konsole", []string{"-e", "bash", "-c", cmd + "; exec bash"}},
-		{"xfce4-terminal", []string{"-e", cmd}},
+		{"gnome-terminal", []string{"--", "bash", "-c", shellCmd}},
+		{"x-terminal-emulator", []string{"-e", "bash", "-c", shellCmd}},
+		{"konsole", []string{"-e", "bash", "-c", shellCmd}},
+		{"xfce4-terminal", []string{"-x", "bash", "-c", shellCmd}},
+		{"alacritty", []string{"-e", "bash", "-c", shellCmd}},
+		{"kitty", []string{"bash", "-c", shellCmd}},
+		{"xterm", []string{"-e", "bash", "-c", shellCmd}},
 	}
 
+	// Discover the current graphical session environment so terminal
+	// emulators can reach the display server and D-Bus, even if the
+	// daemon's inherited env is stale.
+	sessionEnv := resolveSessionEnv()
+	var termEnv []string
+	if len(sessionEnv) > 0 {
+		termEnv = append(os.Environ(), sessionEnv...)
+	}
+
+	var lastErr error
 	for _, t := range terminals {
-		if path, err := exec.LookPath(t.bin); err == nil {
-			return exec.Command(path, t.args...).Start()
+		path, err := exec.LookPath(t.bin)
+		if err != nil {
+			continue
+		}
+
+		c := exec.Command(path, t.args...)
+		if len(termEnv) > 0 {
+			c.Env = termEnv
+		}
+		if err := c.Start(); err != nil {
+			lastErr = fmt.Errorf("%s: start: %w", t.bin, err)
+			log.Printf("daemon: terminal %s failed to start: %v", t.bin, err)
+			continue
+		}
+
+		// Wait briefly for the process to exit. Terminals like
+		// gnome-terminal use a client-server model where the client
+		// exits quickly — a non-zero exit code means it couldn't
+		// open a window (e.g. D-Bus unreachable). Terminals like
+		// xterm run for the lifetime of the window, so if the
+		// process is still alive after 3s we assume it worked.
+		done := make(chan error, 1)
+		go func() { done <- c.Wait() }()
+
+		select {
+		case err := <-done:
+			if err != nil {
+				lastErr = fmt.Errorf("%s: %w", t.bin, err)
+				log.Printf("daemon: terminal %s exited with error: %v", t.bin, err)
+				continue // try next terminal
+			}
+			// Exited successfully (client-server model)
+			log.Printf("daemon: opened terminal via %s", t.bin)
+			return nil
+		case <-time.After(3 * time.Second):
+			// Still running — terminal window is up
+			log.Printf("daemon: opened terminal via %s (still running)", t.bin)
+			return nil
 		}
 	}
 
+	if lastErr != nil {
+		return fmt.Errorf("all terminals failed, last: %w", lastErr)
+	}
 	return fmt.Errorf("no supported terminal emulator found")
 }
 
