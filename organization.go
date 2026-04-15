@@ -726,6 +726,15 @@ func runOrganizationAgent(args []string) {
 			os.Exit(1)
 		}
 
+		reader := bufio.NewReader(os.Stdin)
+		if *name == "" {
+			*name = promptLine(reader, "Agent Name: ")
+		}
+		if *name == "" {
+			fmt.Fprintf(os.Stderr, "greenlight: name required\n")
+			os.Exit(1)
+		}
+
 		if *posID == 0 {
 			id, err := selectOrganizationPosition(orgID)
 			if err != nil {
@@ -751,15 +760,6 @@ func runOrganizationAgent(args []string) {
 				os.Exit(1)
 			}
 			*harnessID = id
-		}
-
-		reader := bufio.NewReader(os.Stdin)
-		if *name == "" {
-			*name = promptLine(reader, "Name: ")
-		}
-		if *name == "" {
-			fmt.Fprintf(os.Stderr, "greenlight: name required\n")
-			os.Exit(1)
 		}
 
 		payload := map[string]interface{}{
