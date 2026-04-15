@@ -392,6 +392,10 @@ func (d *Daemon) Shutdown() {
 		s.Stop()
 	}
 	d.mu.Unlock()
+
+	// Kill any detached agent children we spawned via org agent create so
+	// they don't outlive the daemon.
+	killAllSpawnedAgents()
 }
 
 // handleUpdateShutdown handles the update_shutdown IPC request.

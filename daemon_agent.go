@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
-	"syscall"
 )
 
 // spawnedAgent tracks one detached agent process owned by the daemon.
@@ -29,6 +28,25 @@ var (
 	daemonAgents   = map[string]*spawnedAgent{}
 	daemonAgentsMu sync.RWMutex
 )
+
+// killAllSpawnedAgents signals every tracked agent process so children don't
+// outlive the daemon. Called from Daemon.Shutdown.
+func killAllSpawnedAgents() {
+	daemonAgentsMu.Lock()
+	agents := make([]*spawnedAgent, 0, len(daemonAgents))
+	for _, sa := range daemonAgents {
+		agents = append(agents, sa)
+	}
+	daemonAgentsMu.Unlock()
+
+	for _, sa := range agents {
+		if sa.cmd == nil || sa.cmd.Process == nil {
+			continue
+		}
+		log.Printf("daemon: killing agent %s (pid %d) on shutdown", sa.id, sa.pid)
+		_ = sa.cmd.Process.Kill()
+	}
+}
 
 // localAgentForHarness translates a server-side harness name (the value in
 // harnesses.name) to the CLI's local agent identifier used by buildAgentCommand.
@@ -220,7 +238,9 @@ func (d *Daemon) spawnDetachedAgent(agentID, agentName, harnessName, cwd string)
 	cmd.Stdin = nil // effectively /dev/null
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// Deliberately *not* using Setsid: we want the child to share the daemon's
+	// process group so it dies when the daemon dies. The daemon also explicitly
+	// kills tracked agents in Shutdown() as a safety net for clean exits.
 	cmd.Env = append(os.Environ(),
 		"GREENLIGHT_AGENT_INSTANCE_ID="+agentID,
 		"GREENLIGHT_AGENT_NAME="+agentName,
