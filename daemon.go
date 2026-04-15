@@ -549,6 +549,14 @@ func (d *Daemon) handleWSRequest(conn net.Conn, req ipcRequest) {
 		sendControl(conn, ipcResponse{Type: "error", Message: "daemon WebSocket not connected"})
 		return
 	}
+
+	// create_ai_agent_instance gets special treatment: the daemon pre-checks
+	// host locality, forwards the create, then spawns the agent process.
+	if req.WSMsgType == "create_ai_agent_instance" {
+		d.handleCreateAgentInstance(conn, req)
+		return
+	}
+
 	correlationID := generateUUID()
 	resp, err := d.daemonWS.SendWSRequest(correlationID, req.WSMsgType, req.WSData)
 	if err != nil {
