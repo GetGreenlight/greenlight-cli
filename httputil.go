@@ -62,8 +62,9 @@ func registerUser(baseURL, email string) (userID, orgID string, err error) {
 	return result.UserID, result.OrganizationID, nil
 }
 
-// registerHost registers a host (daemon) for a user.
-func registerHost(baseURL, userID, hostID, hostname string) error {
+// registerHost registers a host (daemon) for a user. Returns the io_device_id
+// the server allocated (or found) for this host's terminal.
+func registerHost(baseURL, userID, hostID, hostname string) (string, error) {
 	payload := map[string]string{
 		"user_id": userID,
 		"host_id": hostID,
@@ -73,23 +74,30 @@ func registerHost(baseURL, userID, hostID, hostname string) error {
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("failed to encode request: %w", err)
+		return "", fmt.Errorf("failed to encode request: %w", err)
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Post(baseURL+"/hosts/register", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("host registration request failed: %w", err)
+		return "", fmt.Errorf("host registration request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 404 {
-		return fmt.Errorf("unknown user (register first with 'greenlight register <email>')")
+		return "", fmt.Errorf("unknown user (register first with 'greenlight register <email>')")
 	}
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("host registration failed (HTTP %d)", resp.StatusCode)
+		return "", fmt.Errorf("host registration failed (HTTP %d)", resp.StatusCode)
 	}
-	return nil
+
+	var result struct {
+		IODeviceID string `json:"io_device_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+	return result.IODeviceID, nil
 }
 
 // enrollSession registers a session with the server and blocks until the user

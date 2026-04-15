@@ -246,8 +246,14 @@ func ensureDaemon(deviceIDFlag string) error {
 				if userID == "" {
 					return fmt.Errorf("not registered — run 'greenlight register <email>' first")
 				}
-				if err := registerHost(baseURL, userID, hostID, hostname); err != nil {
+				ioDeviceID, err := registerHost(baseURL, userID, hostID, hostname)
+				if err != nil {
 					return fmt.Errorf("host registration failed: %w", err)
+				}
+				if ioDeviceID != "" {
+					if err := writeConfigValue("io_device_id", ioDeviceID); err != nil {
+						return fmt.Errorf("failed to persist io_device_id: %w", err)
+					}
 				}
 			}
 			if err := writeConfigValue("host_id", hostID); err != nil {
