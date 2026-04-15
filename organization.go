@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -762,6 +763,14 @@ func runOrganizationAgent(args []string) {
 			*posID = id
 		}
 
+		// The daemon will spawn the harness with cwd set to the position's
+		// working_directory. Make sure that directory exists on disk first —
+		// prompt the user to create it if it doesn't, and bail otherwise.
+		if err := ensureWorkingDirOnDisk(reader, *posID); err != nil {
+			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+			os.Exit(1)
+		}
+
 		payload := map[string]interface{}{
 			"organization_id":          orgID,
 			"organization_position_id": *posID,
@@ -855,4 +864,72 @@ func runOrganizationModel(args []string) {
 		fmt.Fprintf(os.Stderr, "greenlight org ai_model: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
+}
+
+// ensureWorkingDirOnDisk resolves the position's working_directory path,
+// checks if it exists locally, and prompts the user to create it if missing.
+// Returns an error if the user declines or the lookup/mkdir fails.
+func ensureWorkingDirOnDisk(reader *bufio.Reader, positionID int) error {
+	posData, err := sendWSRequest("get_organization_position", map[string]interface{}{"id": positionID})
+	if err != nil {
+		return fmt.Errorf("failed to fetch organization_position: %w", err)
+	}
+	var posWrap struct {
+		OrganizationPosition struct {
+			WorkingDirectoryID string `json:"working_directory_id"`
+		} `json:"organization_position"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(posData, &posWrap); err != nil {
+		return fmt.Errorf("failed to parse organization_position response: %w", err)
+	}
+	if posWrap.Error != "" {
+		return fmt.Errorf("organization_position lookup: %s", posWrap.Error)
+	}
+	if posWrap.OrganizationPosition.WorkingDirectoryID == "" {
+		return fmt.Errorf("organization_position has no working_directory")
+	}
+
+	wdData, err := sendWSRequest("get_working_directory", map[string]interface{}{"id": posWrap.OrganizationPosition.WorkingDirectoryID})
+	if err != nil {
+		return fmt.Errorf("failed to fetch working_directory: %w", err)
+	}
+	var wdWrap struct {
+		WorkingDirectory struct {
+			DirectoryPath string `json:"directory_path"`
+		} `json:"working_directory"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(wdData, &wdWrap); err != nil {
+		return fmt.Errorf("failed to parse working_directory response: %w", err)
+	}
+	if wdWrap.Error != "" {
+		return fmt.Errorf("working_directory lookup: %s", wdWrap.Error)
+	}
+
+	dir := wdWrap.WorkingDirectory.DirectoryPath
+	if dir == "" {
+		return fmt.Errorf("working_directory has no directory_path")
+	}
+
+	info, err := os.Stat(dir)
+	if err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("%s exists but is not a directory", dir)
+		}
+		return nil
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("stat %s: %w", dir, err)
+	}
+
+	answer := promptLine(reader, fmt.Sprintf("Directory %q doesn't exist. Create it? (y/N): ", dir))
+	if !strings.HasPrefix(strings.ToLower(answer), "y") {
+		return fmt.Errorf("aborted: working directory does not exist")
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create %s: %w", dir, err)
+	}
+	fmt.Fprintf(os.Stderr, "Created %s\n", dir)
+	return nil
 }
