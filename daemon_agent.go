@@ -75,19 +75,19 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 	// Parse the create payload to find the organization_position_id we need
 	// to pre-check. The server validates everything else.
 	var payload struct {
-		OrganizationPositionID int `json:"organization_position_id"`
+		OrganizationPositionID string `json:"organization_position_id"`
 	}
 	if err := json.Unmarshal(req.WSData, &payload); err != nil {
 		sendControl(conn, ipcResponse{Type: "error", Message: "invalid create payload: " + err.Error()})
 		return
 	}
-	if payload.OrganizationPositionID == 0 {
+	if payload.OrganizationPositionID == "" {
 		sendControl(conn, ipcResponse{Type: "error", Message: "organization_position_id required"})
 		return
 	}
 
 	// Step 1: resolve position → working_directory_id
-	posReq, _ := json.Marshal(map[string]int{"id": payload.OrganizationPositionID})
+	posReq, _ := json.Marshal(map[string]string{"id": payload.OrganizationPositionID})
 	posResp, err := d.daemonWS.SendWSRequest(generateUUID(), "get_organization_position", posReq)
 	if err != nil {
 		sendControl(conn, ipcResponse{Type: "error", Message: "failed to fetch organization_position: " + err.Error()})

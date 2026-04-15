@@ -580,9 +580,9 @@ func runOrganizationPos(args []string) {
 		printJSON(data)
 	case "get":
 		fs := flag.NewFlagSet("pos get", flag.ExitOnError)
-		id := fs.Int("id", 0, "Position ID")
+		id := fs.String("id", "", "Position ID")
 		fs.Parse(args[1:])
-		if *id == 0 {
+		if *id == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
@@ -596,7 +596,7 @@ func runOrganizationPos(args []string) {
 		fs := flag.NewFlagSet("pos create", flag.ExitOnError)
 		jobID := fs.String("job", "", "Agent job description ID (optional)")
 		wdID := fs.String("wd", "", "Working directory ID")
-		parentID := fs.Int("parent", 0, "Parent position ID (optional)")
+		parentID := fs.String("parent", "", "Parent position ID (optional)")
 		name := fs.String("name", "", "Human-readable name (optional)")
 		fs.Parse(args[1:])
 
@@ -643,7 +643,7 @@ func runOrganizationPos(args []string) {
 		if *jobID != "" {
 			payload["agent_job_description_id"] = *jobID
 		}
-		if *parentID != 0 {
+		if *parentID != "" {
 			payload["parent_position_id"] = *parentID
 		}
 		data, err := sendWSRequest("create_organization_position", payload)
@@ -654,9 +654,9 @@ func runOrganizationPos(args []string) {
 		printJSON(data)
 	case "delete":
 		fs := flag.NewFlagSet("pos delete", flag.ExitOnError)
-		id := fs.Int("id", 0, "Position ID")
+		id := fs.String("id", "", "Position ID")
 		fs.Parse(args[1:])
-		if *id == 0 {
+		if *id == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
@@ -715,7 +715,7 @@ func runOrganizationAgent(args []string) {
 		printJSON(data)
 	case "create":
 		fs := flag.NewFlagSet("agent create", flag.ExitOnError)
-		posID := fs.Int("pos", 0, "Organization position ID")
+		posID := fs.String("pos", "", "Organization position ID")
 		modelID := fs.String("model", "", "AI brain model ID")
 		harnessID := fs.Int("harness", 0, "Harness ID")
 		name := fs.String("name", "", "Human-readable name")
@@ -754,7 +754,7 @@ func runOrganizationAgent(args []string) {
 			*modelID = id
 		}
 
-		if *posID == 0 {
+		if *posID == "" {
 			id, err := selectOrganizationPosition(orgID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
@@ -869,7 +869,7 @@ func runOrganizationModel(args []string) {
 // ensureWorkingDirOnDisk resolves the position's working_directory path,
 // checks if it exists locally, and prompts the user to create it if missing.
 // Returns an error if the user declines or the lookup/mkdir fails.
-func ensureWorkingDirOnDisk(reader *bufio.Reader, positionID int) error {
+func ensureWorkingDirOnDisk(reader *bufio.Reader, positionID string) error {
 	posData, err := sendWSRequest("get_organization_position", map[string]interface{}{"id": positionID})
 	if err != nil {
 		return fmt.Errorf("failed to fetch organization_position: %w", err)

@@ -398,29 +398,29 @@ func createWorkingDirectoryInteractive(orgID string) (string, error) {
 }
 
 // =============================================================================
-// selectOrganizationPosition — organization_positions.id is still INTEGER
+// selectOrganizationPosition
 // =============================================================================
 
-func selectOrganizationPosition(orgID string) (int, error) {
+func selectOrganizationPosition(orgID string) (string, error) {
 	payload := map[string]interface{}{}
 	if orgID != "" {
 		payload["organization_id"] = orgID
 	}
 	data, err := sendWSRequest("list_organization_positions", payload)
 	if err != nil {
-		return 0, fmt.Errorf("failed to fetch organization positions: %w", err)
+		return "", fmt.Errorf("failed to fetch organization positions: %w", err)
 	}
 
 	var resp struct {
 		OrganizationPositions []struct {
-			ID                    int    `json:"id"`
+			ID                    string `json:"id"`
 			Name                  string `json:"name"`
 			WorkingDirectoryID    string `json:"working_directory_id"`
 			AgentJobDescriptionID string `json:"agent_job_description_id"`
 		} `json:"organization_positions"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("failed to parse organization positions: %w", err)
+		return "", fmt.Errorf("failed to parse organization positions: %w", err)
 	}
 
 	if len(resp.OrganizationPositions) == 0 {
@@ -428,48 +428,48 @@ func selectOrganizationPosition(orgID string) (int, error) {
 		return createOrganizationPositionInteractive(orgID)
 	}
 
-	items := make([]selectItem[int], len(resp.OrganizationPositions))
+	items := make([]selectItem[string], len(resp.OrganizationPositions))
 	for i, p := range resp.OrganizationPositions {
 		label := p.Name
 		if label == "" {
 			label = "(unnamed position)"
 		}
-		items[i] = selectItem[int]{Label: label, ID: p.ID}
+		items[i] = selectItem[string]{Label: label, ID: p.ID}
 	}
-	items = append(items, selectItem[int]{Label: "→ Create new…", ID: 0})
+	items = append(items, selectItem[string]{Label: "→ Create new…", ID: sentinelCreateNew})
 
 	id, err := selectFromList("Organization position", items)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
-	if id == 0 {
+	if id == sentinelCreateNew {
 		return createOrganizationPositionInteractive(orgID)
 	}
 	return id, nil
 }
 
-func createOrganizationPositionInteractive(orgID string) (int, error) {
+func createOrganizationPositionInteractive(orgID string) (string, error) {
 	if orgID == "" {
 		orgID = workingOrgID()
 	}
 	if orgID == "" {
-		return 0, fmt.Errorf("no working organization set (run 'greenlight org org use --id <ID>')")
+		return "", fmt.Errorf("no working organization set (run 'greenlight org org use --id <ID>')")
 	}
 
 	reader := bufio.NewReader(os.Stdin)
 	name := promptLine(reader, "Name: ")
 	if name == "" {
-		return 0, fmt.Errorf("name required")
+		return "", fmt.Errorf("name required")
 	}
 
 	wdID, err := selectWorkingDirectory(orgID)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
 
 	jobID, err := selectOptionalAgentJobDescription(orgID)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
 
 	payload := map[string]interface{}{
@@ -484,21 +484,21 @@ func createOrganizationPositionInteractive(orgID string) (int, error) {
 	}
 	data, err := sendWSRequest("create_organization_position", payload)
 	if err != nil {
-		return 0, fmt.Errorf("failed to create organization position: %w", err)
+		return "", fmt.Errorf("failed to create organization position: %w", err)
 	}
 
 	var resp struct {
 		OrganizationPosition struct {
-			ID int `json:"id"`
+			ID string `json:"id"`
 		} `json:"organization_position"`
 		Error string `json:"error"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("failed to parse response: %w", err)
+		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
 	if resp.Error != "" {
-		return 0, fmt.Errorf("create organization position: %s", resp.Error)
+		return "", fmt.Errorf("create organization position: %s", resp.Error)
 	}
-	fmt.Printf("Created organization position %d.\n", resp.OrganizationPosition.ID)
+	fmt.Printf("Created organization position %s.\n", resp.OrganizationPosition.ID)
 	return resp.OrganizationPosition.ID, nil
 }
