@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // runTalk launches the interactive TUI for talking to active agent sessions
@@ -81,6 +82,19 @@ type talkSession struct {
 	version string
 }
 
+// talkPendingPermission holds the in-flight permission_request the user needs
+// to act on. Only one can be displayed at a time; subsequent permission_request
+// messages while a modal is up overwrite the previous one (rare in practice,
+// since the same /ws connection only fields one outstanding request per
+// session at a time).
+type talkPendingPermission struct {
+	requestID string
+	toolName  string
+	project   string
+	relayID   string
+	toolInput json.RawMessage
+}
+
 type talkModel struct {
 	ws *talkWS
 
@@ -91,6 +105,11 @@ type talkModel struct {
 	// Per-session transcript buffers, in-memory only. Each entry is one
 	// already-rendered (lipgloss-styled) string.
 	transcripts map[string][]string
+
+	// Pending permission request (modal state). When non-nil the View
+	// renders the modal in place of the viewport and key handling routes
+	// through the modal branch.
+	pending *talkPendingPermission
 
 	viewport viewport.Model
 	input    textinput.Model
@@ -124,6 +143,32 @@ func (m talkModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Modal mode: route a/d/A/esc directly, swallow everything else.
+		if m.pending != nil {
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "a":
+				m.respondToPermission("allow")
+				return m, nil
+			case "d":
+				m.respondToPermission("deny")
+				return m, nil
+			case "A":
+				m.respondToPermission("always_allow")
+				return m, nil
+			case "esc":
+				// Local dismiss only — does not respond to the server.
+				m.pending = nil
+				m.input.Focus()
+				m.refreshViewport()
+				return m, nil
+			}
+			// Swallow everything else so typing doesn't bleed into the
+			// input field while the modal is up.
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "ctrl+c", "esc":
 			return m, tea.Quit
@@ -205,6 +250,22 @@ func (m talkModel) View() string {
 		return m.status
 	}
 	pills := renderPills(m.sessions, m.focused)
+
+	// Modal mode: replace the viewport pane with the centered modal and
+	// the input row with a help line listing the modal key bindings.
+	if m.pending != nil {
+		modal := renderPermissionModal(m.pending, m.width)
+		centered := lipgloss.Place(m.width, m.viewport.Height,
+			lipgloss.Center, lipgloss.Center, modal)
+		help := modalHelpStyle.Render("[a] allow   [d] deny   [A] always allow   [esc] dismiss")
+		return strings.Join([]string{
+			pills,
+			centered,
+			help,
+			statusStyle.Render(m.status),
+		}, "\n")
+	}
+
 	return strings.Join([]string{
 		pills,
 		m.viewport.View(),
@@ -217,7 +278,7 @@ func (m talkModel) View() string {
 // server message handling
 // =============================================================================
 
-// talkServerMsg is the union of every server-sent /ws field this phase reads.
+// talkServerMsg is the union of every server-sent /ws field this TUI reads.
 // Matches the WSMessage struct on the server side.
 type talkServerMsg struct {
 	Type      string                 `json:"type"`
@@ -231,6 +292,9 @@ type talkServerMsg struct {
 	Message   string                 `json:"message,omitempty"`
 	Event     string                 `json:"event,omitempty"`
 	ToolName  string                 `json:"tool_name,omitempty"`
+	ToolInput json.RawMessage        `json:"tool_input,omitempty"`
+	RequestID string                 `json:"request_id,omitempty"`
+	Missed    []talkMissedWire       `json:"missed,omitempty"`
 	Error     string                 `json:"error,omitempty"`
 	Extra     map[string]interface{} `json:"-"`
 }
@@ -240,6 +304,14 @@ type talkSessionWire struct {
 	RelayID   string `json:"relay_id"`
 	Project   string `json:"project,omitempty"`
 	Version   string `json:"version,omitempty"`
+}
+
+type talkMissedWire struct {
+	RequestID string          `json:"request_id"`
+	ToolName  string          `json:"tool_name"`
+	ToolInput json.RawMessage `json:"tool_input,omitempty"`
+	Project   string          `json:"project,omitempty"`
+	Agent     string          `json:"agent,omitempty"`
 }
 
 func (m *talkModel) handleServerMessage(data []byte) {
@@ -292,15 +364,38 @@ func (m *talkModel) handleServerMessage(data []byte) {
 			m.status = msg.Status
 		}
 
-	case "permission_request", "cancel_request", "missed_requests":
-		// TODO(phase-3): wire the permission modal. For now, drop a faint
-		// note into the focused transcript so the user knows something
-		// happened.
-		if m.focused != "" {
-			m.transcripts[m.focused] = append(m.transcripts[m.focused],
-				statusStyle.Render("(received "+msg.Type+" — phase-3 modal not implemented yet)"))
+	case "permission_request":
+		m.pending = &talkPendingPermission{
+			requestID: msg.RequestID,
+			toolName:  msg.ToolName,
+			project:   msg.Project,
+			relayID:   msg.RelayID,
+			toolInput: msg.ToolInput,
+		}
+		m.input.Blur()
+
+	case "cancel_request":
+		if m.pending != nil && m.pending.requestID == msg.RequestID {
+			m.pending = nil
+			m.input.Focus()
 			m.refreshViewport()
 		}
+
+	case "missed_requests":
+		// MissedRequest doesn't carry a relay_id, so we can't route per
+		// session. Append each item to whichever session is currently
+		// focused. If nothing's focused yet, drop them — the user can
+		// reconnect once a session is up.
+		if m.focused == "" {
+			return
+		}
+		for _, mr := range msg.Missed {
+			m.transcripts[m.focused] = append(
+				m.transcripts[m.focused],
+				renderMissedRequest(mr.ToolName, mr.Project, mr.ToolInput),
+			)
+		}
+		m.refreshViewport()
 	}
 }
 
@@ -379,4 +474,41 @@ func (m *talkModel) sendInput(text string) error {
 		return err
 	}
 	return m.ws.send(payload)
+}
+
+// respondToPermission sends a permission_response with the given behavior
+// ("allow", "deny", "always_allow") for the in-flight modal. On any send
+// error it leaves the modal up so the user can retry.
+func (m *talkModel) respondToPermission(behavior string) {
+	if m.pending == nil {
+		return
+	}
+	payload, err := json.Marshal(map[string]interface{}{
+		"type":       "permission_response",
+		"request_id": m.pending.requestID,
+		"behavior":   behavior,
+	})
+	if err != nil {
+		m.status = "respond failed: " + err.Error()
+		return
+	}
+	if err := m.ws.send(payload); err != nil {
+		m.status = "respond failed: " + err.Error()
+		return
+	}
+	// Drop a faint trail line into the relevant transcript so the user can
+	// see what they decided.
+	rel := m.pending.relayID
+	if rel == "" {
+		rel = m.focused
+	}
+	if rel != "" {
+		m.transcripts[rel] = append(
+			m.transcripts[rel],
+			statusStyle.Render(fmt.Sprintf("→ %s %s", behavior, m.pending.toolName)),
+		)
+	}
+	m.pending = nil
+	m.input.Focus()
+	m.refreshViewport()
 }

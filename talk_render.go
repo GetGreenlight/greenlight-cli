@@ -239,3 +239,70 @@ func renderActivityEvent(event, toolName, project string) string {
 	}
 	return activityStyle.Render(strings.Join(parts, " "))
 }
+
+// =============================================================================
+// permission modal
+// =============================================================================
+
+var (
+	modalBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("33")).
+			Padding(1, 2)
+	modalHeaderStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("33"))
+	modalLabelStyle = lipgloss.NewStyle().
+			Faint(true)
+	modalDetailStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("36"))
+	modalHelpStyle = lipgloss.NewStyle().
+			Faint(true).
+			Italic(true)
+
+	missedStyle = lipgloss.NewStyle().
+			Faint(true).
+			Foreground(lipgloss.Color("214"))
+)
+
+// renderPermissionModal draws the centered permission request box. The caller
+// is responsible for placing it in the viewport area (e.g. via lipgloss.Place).
+func renderPermissionModal(p *talkPendingPermission, terminalWidth int) string {
+	boxWidth := 64
+	if terminalWidth > 0 && terminalWidth-4 < boxWidth {
+		boxWidth = terminalWidth - 4
+	}
+	if boxWidth < 30 {
+		boxWidth = 30
+	}
+
+	var body strings.Builder
+	body.WriteString(modalHeaderStyle.Render("Permission request"))
+	body.WriteString("\n\n")
+	body.WriteString(modalLabelStyle.Render("Tool:    ") + p.toolName + "\n")
+	if p.project != "" {
+		body.WriteString(modalLabelStyle.Render("Project: ") + p.project + "\n")
+	}
+	body.WriteString("\n")
+	if preview := summarizeToolInput(p.toolName, p.toolInput); preview != "" {
+		body.WriteString(modalDetailStyle.Render(preview))
+	} else {
+		body.WriteString(modalLabelStyle.Render("(no preview available)"))
+	}
+
+	return modalBoxStyle.Width(boxWidth).Render(body.String())
+}
+
+// renderMissedRequest formats a single backfilled MissedRequest as a faint
+// one-line entry tagged "missed".
+func renderMissedRequest(toolName, project string, toolInput json.RawMessage) string {
+	preview := summarizeToolInput(toolName, toolInput)
+	parts := []string{"⏱ missed", toolName}
+	if preview != "" {
+		parts = append(parts, "—", preview)
+	}
+	if project != "" {
+		parts = append(parts, fmt.Sprintf("[%s]", project))
+	}
+	return missedStyle.Render(strings.Join(parts, " "))
+}
