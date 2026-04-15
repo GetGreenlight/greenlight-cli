@@ -70,7 +70,7 @@ func selectHarness() (int, error) {
 
 	items := make([]selectItem[int], len(resp.Harnesses))
 	for i, h := range resp.Harnesses {
-		items[i] = selectItem[int]{Label: fmt.Sprintf("%d: %s", h.ID, h.Name), ID: h.ID}
+		items[i] = selectItem[int]{Label: h.Name, ID: h.ID}
 	}
 	return selectFromList("Harness", items)
 }
@@ -105,7 +105,7 @@ func selectAIBrainModel(orgID string) (string, error) {
 
 	items := make([]selectItem[string], len(resp.AIBrainModels))
 	for i, m := range resp.AIBrainModels {
-		items[i] = selectItem[string]{Label: fmt.Sprintf("%s: %s", m.ID, m.Name), ID: m.ID}
+		items[i] = selectItem[string]{Label: m.Name, ID: m.ID}
 	}
 	return selectFromList("AI brain model", items)
 }
@@ -137,7 +137,7 @@ func selectOrganization() (string, error) {
 
 	items := make([]selectItem[string], len(resp.Organizations))
 	for i, o := range resp.Organizations {
-		items[i] = selectItem[string]{Label: fmt.Sprintf("%s: %s", o.ID, o.Name), ID: o.ID}
+		items[i] = selectItem[string]{Label: o.Name, ID: o.ID}
 	}
 	return selectFromList("Organization", items)
 }
@@ -207,7 +207,7 @@ func selectAgentJobDescription(orgID string) (string, error) {
 
 	items := make([]selectItem[string], len(resp.AgentJobDescriptions))
 	for i, j := range resp.AgentJobDescriptions {
-		items[i] = selectItem[string]{Label: fmt.Sprintf("%s: %s", j.ID, j.Title), ID: j.ID}
+		items[i] = selectItem[string]{Label: j.Title, ID: j.ID}
 	}
 	items = append(items, selectItem[string]{Label: "→ Create new…", ID: sentinelCreateNew})
 
@@ -245,7 +245,7 @@ func selectOptionalAgentJobDescription(orgID string) (string, error) {
 
 	items := make([]selectItem[string], len(resp.AgentJobDescriptions))
 	for i, j := range resp.AgentJobDescriptions {
-		items[i] = selectItem[string]{Label: fmt.Sprintf("%s: %s", j.ID, j.Title), ID: j.ID}
+		items[i] = selectItem[string]{Label: j.Title, ID: j.ID}
 	}
 	items = append(items, selectItem[string]{Label: "→ Create new…", ID: sentinelCreateNew})
 	items = append(items, selectItem[string]{Label: "→ Skip (none)", ID: ""})
@@ -338,9 +338,9 @@ func selectWorkingDirectory(orgID string) (string, error) {
 	for i, w := range resp.WorkingDirectories {
 		label := w.Hostname + ":" + w.DirectoryPath
 		if w.Hostname == "" && w.DirectoryPath == "" {
-			label = fmt.Sprintf("id=%s", w.ID)
+			label = "(unnamed)"
 		}
-		items[i] = selectItem[string]{Label: fmt.Sprintf("%s: %s", w.ID, label), ID: w.ID}
+		items[i] = selectItem[string]{Label: label, ID: w.ID}
 	}
 	items = append(items, selectItem[string]{Label: "→ Create new…", ID: sentinelCreateNew})
 
@@ -430,16 +430,11 @@ func selectOrganizationPosition(orgID string) (int, error) {
 
 	items := make([]selectItem[int], len(resp.OrganizationPositions))
 	for i, p := range resp.OrganizationPositions {
-		var label string
-		if p.Name != "" {
-			label = p.Name
-		} else {
-			label = fmt.Sprintf("wd=%s", p.WorkingDirectoryID)
-			if p.AgentJobDescriptionID != "" {
-				label += fmt.Sprintf(" job=%s", p.AgentJobDescriptionID)
-			}
+		label := p.Name
+		if label == "" {
+			label = "(unnamed position)"
 		}
-		items[i] = selectItem[int]{Label: fmt.Sprintf("%d: %s", p.ID, label), ID: p.ID}
+		items[i] = selectItem[int]{Label: label, ID: p.ID}
 	}
 	items = append(items, selectItem[int]{Label: "→ Create new…", ID: 0})
 

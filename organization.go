@@ -735,13 +735,13 @@ func runOrganizationAgent(args []string) {
 			os.Exit(1)
 		}
 
-		if *posID == 0 {
-			id, err := selectOrganizationPosition(orgID)
+		if *harnessID == 0 {
+			id, err := selectHarness()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 				os.Exit(1)
 			}
-			*posID = id
+			*harnessID = id
 		}
 
 		if *modelID == "" {
@@ -753,13 +753,13 @@ func runOrganizationAgent(args []string) {
 			*modelID = id
 		}
 
-		if *harnessID == 0 {
-			id, err := selectHarness()
+		if *posID == 0 {
+			id, err := selectOrganizationPosition(orgID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 				os.Exit(1)
 			}
-			*harnessID = id
+			*posID = id
 		}
 
 		payload := map[string]interface{}{
