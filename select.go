@@ -111,11 +111,18 @@ func selectAIBrainModel(orgID string) (string, error) {
 }
 
 // =============================================================================
-// selectOrganization
+// selectUserOrganization — picker scoped to one human user's memberships
 // =============================================================================
 
-func selectOrganization() (string, error) {
-	data, err := sendWSRequest("list_organizations", nil)
+// selectUserOrganization fetches every organization the given user belongs to
+// (joined via organization_human_users) and renders an interactive picker. A
+// "→ Create new…" row at the bottom drops the user into the create flow,
+// which both creates the org and adds the user as its owner in one step.
+func selectUserOrganization(userID string) (string, error) {
+	if userID == "" {
+		return "", fmt.Errorf("user_id required")
+	}
+	data, err := sendWSRequest("list_organizations", map[string]interface{}{"for_human_user_id": userID})
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch organizations: %w", err)
 	}
@@ -125,50 +132,83 @@ func selectOrganization() (string, error) {
 			ID   string `json:"id"`
 			Name string `json:"name"`
 		} `json:"organizations"`
+		Error string `json:"error"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return "", fmt.Errorf("failed to parse organizations: %w", err)
 	}
+	if resp.Error != "" {
+		return "", fmt.Errorf("list organizations: %s", resp.Error)
+	}
 
 	if len(resp.Organizations) == 0 {
-		fmt.Println("No organizations found. Let's create one.")
-		return createOrganizationInteractive()
+		fmt.Println("You don't belong to any organizations yet. Let's create one.")
+		return createUserOrganizationInteractive(userID)
 	}
 
 	items := make([]selectItem[string], len(resp.Organizations))
 	for i, o := range resp.Organizations {
 		items[i] = selectItem[string]{Label: o.Name, ID: o.ID}
 	}
-	return selectFromList("Organization", items)
+	items = append(items, selectItem[string]{Label: "→ Create new…", ID: sentinelCreateNew})
+
+	id, err := selectFromList("Organization", items)
+	if err != nil {
+		return "", err
+	}
+	if id == sentinelCreateNew {
+		return createUserOrganizationInteractive(userID)
+	}
+	return id, nil
 }
 
-func createOrganizationInteractive() (string, error) {
+// createUserOrganizationInteractive prompts for an org name, creates the row,
+// and adds the given user as its owner.
+func createUserOrganizationInteractive(userID string) (string, error) {
+	if userID == "" {
+		return "", fmt.Errorf("user_id required")
+	}
 	reader := bufio.NewReader(os.Stdin)
 	name := promptLine(reader, "Name: ")
 	if name == "" {
 		return "", fmt.Errorf("name required")
 	}
 
-	payload := map[string]interface{}{"name": name}
-	data, err := sendWSRequest("create_organization", payload)
+	createData, err := sendWSRequest("create_organization", map[string]interface{}{"name": name})
 	if err != nil {
 		return "", fmt.Errorf("failed to create organization: %w", err)
 	}
-
-	var resp struct {
+	var createResp struct {
 		Organization struct {
 			ID string `json:"id"`
 		} `json:"organization"`
 		Error string `json:"error"`
 	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
+	if err := json.Unmarshal(createData, &createResp); err != nil {
+		return "", fmt.Errorf("failed to parse create response: %w", err)
 	}
-	if resp.Error != "" {
-		return "", fmt.Errorf("create organization: %s", resp.Error)
+	if createResp.Error != "" {
+		return "", fmt.Errorf("create organization: %s", createResp.Error)
 	}
-	fmt.Printf("Created organization %s.\n", resp.Organization.ID)
-	return resp.Organization.ID, nil
+	orgID := createResp.Organization.ID
+
+	addData, err := sendWSRequest("add_organization_member", map[string]interface{}{
+		"organization_id": orgID,
+		"human_user_id":   userID,
+		"role":            "owner",
+	})
+	if err != nil {
+		return "", fmt.Errorf("created organization %s but failed to add owner membership: %w", orgID, err)
+	}
+	var addResp struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(addData, &addResp); err == nil && addResp.Error != "" {
+		return "", fmt.Errorf("created organization %s but failed to add owner membership: %s", orgID, addResp.Error)
+	}
+
+	fmt.Printf("Created organization %s.\n", orgID)
+	return orgID, nil
 }
 
 // =============================================================================

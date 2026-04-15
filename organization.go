@@ -200,11 +200,22 @@ func runOrganizationOrg(args []string) {
 		printJSON(data)
 	case "use":
 		fs := flag.NewFlagSet("org use", flag.ExitOnError)
-		id := fs.String("id", "", "Organization ID to set as working organization")
+		id := fs.String("id", "", "Organization ID to set (omit for an interactive picker)")
 		fs.Parse(args[1:])
+		// No --id: render an interactive picker scoped to the current user's
+		// organization memberships, with a "create new" escape hatch.
 		if *id == "" {
-			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
-			os.Exit(1)
+			userID := readConfigValue("user_id")
+			if userID == "" {
+				fmt.Fprintf(os.Stderr, "greenlight: not registered (run 'greenlight register <email>' first)\n")
+				os.Exit(1)
+			}
+			chosen, err := selectUserOrganization(userID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+				os.Exit(1)
+			}
+			*id = chosen
 		}
 		if err := writeConfigValue("organization_id", *id); err != nil {
 			fmt.Fprintf(os.Stderr, "greenlight: failed to save organization_id: %v\n", err)
