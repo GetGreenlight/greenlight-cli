@@ -402,6 +402,22 @@ func ensureDyldEntitlement(command string) error {
 
 	log.Printf("Interposition: re-signing %s to add dyld entitlement", binPath)
 
+	// Capture the original code signing identifier before re-signing.
+	// macOS Keychain ACLs are tied to the identifier, so changing it
+	// causes the binary to lose access to stored credentials (e.g.
+	// Copilot auth tokens). Preserving the identifier across re-signs
+	// keeps Keychain access working.
+	var origIdentifier string
+	idOut, err := exec.Command("codesign", "-d", "--verbose=2", binPath).CombinedOutput()
+	if err == nil {
+		for _, line := range strings.Split(string(idOut), "\n") {
+			if strings.HasPrefix(line, "Identifier=") {
+				origIdentifier = strings.TrimPrefix(line, "Identifier=")
+				break
+			}
+		}
+	}
+
 	// Build entitlements plist preserving existing ones + adding dyld
 	plist := `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -432,13 +448,24 @@ func ensureDyldEntitlement(command string) error {
 		return fmt.Errorf("codesign remove: %s: %w", string(out), err)
 	}
 
-	signCmd := exec.Command("codesign", "--sign", "-",
+	signArgs := []string{"--sign", "-",
 		"--entitlements", plistPath,
 		"--options", "runtime",
-		binPath)
+	}
+	if origIdentifier != "" {
+		signArgs = append(signArgs, "--identifier", origIdentifier)
+		log.Printf("Interposition: preserving identifier %s", origIdentifier)
+	}
+	signArgs = append(signArgs, binPath)
+	signCmd := exec.Command("codesign", signArgs...)
 	if out, err := signCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("codesign sign: %s: %w", string(out), err)
 	}
+
+	// Remove quarantine xattr so Gatekeeper doesn't block the ad-hoc
+	// signed binary. The original binary already passed Gatekeeper when
+	// it was installed; our re-sign only adds entitlements.
+	exec.Command("xattr", "-d", "com.apple.quarantine", binPath).Run()
 
 	log.Printf("Interposition: re-signed %s successfully", binPath)
 	return nil
