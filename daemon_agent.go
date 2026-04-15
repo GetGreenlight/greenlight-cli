@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
+	"time"
 )
 
 // spawnedAgent tracks one detached agent process owned by the daemon.
@@ -46,6 +48,47 @@ func killAllSpawnedAgents() {
 		log.Printf("daemon: killing agent %s (pid %d) on shutdown", sa.id, sa.pid)
 		_ = sa.cmd.Process.Kill()
 	}
+}
+
+// stopSpawnedAgent terminates the tracked agent process for the given
+// ai_agent_instance_id. Sends SIGTERM first and waits briefly for the process
+// to exit on its own; falls back to SIGKILL if it doesn't. Returns nil when
+// no agent is tracked locally — that's the expected case when retiring an
+// agent that was spawned on a different host (or already exited).
+func stopSpawnedAgent(agentID string) error {
+	daemonAgentsMu.RLock()
+	sa, ok := daemonAgents[agentID]
+	daemonAgentsMu.RUnlock()
+	if !ok {
+		return nil // not running locally; nothing to kill
+	}
+	if sa.cmd == nil || sa.cmd.Process == nil {
+		return nil
+	}
+
+	log.Printf("daemon: stopping agent %s (pid %d) — SIGTERM", agentID, sa.pid)
+	if err := sa.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		// Already gone — reaper goroutine will clean up.
+		return nil
+	}
+
+	// Give the process up to 2s to exit cleanly. The reaper goroutine
+	// removes the entry from daemonAgents when Wait() returns, so we poll
+	// the map for absence rather than calling Wait again.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		daemonAgentsMu.RLock()
+		_, stillThere := daemonAgents[agentID]
+		daemonAgentsMu.RUnlock()
+		if !stillThere {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	log.Printf("daemon: agent %s (pid %d) didn't exit on SIGTERM — SIGKILL", agentID, sa.pid)
+	_ = sa.cmd.Process.Kill()
+	return nil
 }
 
 // localAgentForHarness translates a server-side harness name (the value in

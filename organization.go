@@ -678,7 +678,7 @@ func runOrganizationPos(args []string) {
 
 func runOrganizationAgent(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight org agent <list|get|create|retire|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight org agent <list|get|create|stop|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -784,14 +784,16 @@ func runOrganizationAgent(args []string) {
 			os.Exit(1)
 		}
 		printJSON(data)
-	case "retire":
-		fs := flag.NewFlagSet("agent retire", flag.ExitOnError)
+	case "stop":
+		fs := flag.NewFlagSet("agent stop", flag.ExitOnError)
 		id := fs.String("id", "", "Agent instance ID")
 		fs.Parse(args[1:])
 		if *id == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
+		// The daemon special-cases update_ai_agent_instance with retired_at:
+		// it kills the tracked PID locally before forwarding the row update.
 		now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 		data, err := sendWSRequest("update_ai_agent_instance", map[string]interface{}{"id": *id, "retired_at": now})
 		if err != nil {

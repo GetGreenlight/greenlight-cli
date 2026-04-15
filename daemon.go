@@ -561,6 +561,18 @@ func (d *Daemon) handleWSRequest(conn net.Conn, req ipcRequest) {
 		return
 	}
 
+	// update_ai_agent_instance with a non-empty retired_at is the "stop"
+	// path: kill the local PID (if any) before forwarding the row update.
+	if req.WSMsgType == "update_ai_agent_instance" {
+		var probe struct {
+			ID        string `json:"id"`
+			RetiredAt string `json:"retired_at"`
+		}
+		if json.Unmarshal(req.WSData, &probe) == nil && probe.RetiredAt != "" && probe.ID != "" {
+			_ = stopSpawnedAgent(probe.ID)
+		}
+	}
+
 	correlationID := generateUUID()
 	resp, err := d.daemonWS.SendWSRequest(correlationID, req.WSMsgType, req.WSData)
 	if err != nil {
