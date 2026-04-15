@@ -58,6 +58,8 @@ func main() {
 		runOrganization(os.Args[2:])
 	case "wd":
 		runWD(os.Args[2:])
+	case "talk":
+		runTalk(os.Args[2:])
 	case "update":
 		runUpdate(os.Args[2:])
 	case "version", "--version", "-v":
@@ -102,6 +104,7 @@ Commands:
   daemon     Manage the background daemon (start, stop, status)
   org        Manage multi-agent organization entities (org, user, wd, job, pos, agent, model)
   wd         Manage working directories (create, list)
+  talk       Open a TUI to talk to your active agent sessions
   update     Update greenlight to the latest version
   version    Print version and build settings
 

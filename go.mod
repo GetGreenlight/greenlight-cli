@@ -2,7 +2,11 @@ module greenlight
 
 go 1.24.2
 
-require nhooyr.io/websocket v1.8.17
+require (
+	github.com/charmbracelet/bubbles v0.20.0
+	github.com/charmbracelet/bubbletea v1.3.0
+	nhooyr.io/websocket v1.8.17
+)
 
 require (
 	github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e // indirect
