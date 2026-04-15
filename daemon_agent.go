@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -246,10 +247,16 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 	sendControl(conn, ipcResponse{Type: "ws_response", Data: merged})
 }
 
-// spawnDetachedAgent forks the harness binary into a detached child process,
-// piping stdout/stderr into ~/.greenlight/agents/<id>.log. Returns the new pid
-// and the log path. The child runs in its own session (Setsid) so it isn't
-// attached to the calling terminal.
+// spawnDetachedAgent forks the harness binary inside a daemon-owned PTY.
+// The harness gets a real controlling terminal so TUI agents like claude
+// don't exit immediately on detecting "no TTY", but no client is attached to
+// the master end — the daemon just drains it into ~/.greenlight/agents/<id>.log.
+// Returns the new pid and the log path.
+//
+// Side effect: Setsid is required so the child can acquire the slave PTY as
+// its controlling terminal. That puts the child in its own session, which
+// means it won't die alongside the daemon if the daemon is killed via SIGKILL.
+// killAllSpawnedAgents in Daemon.Shutdown is the safety net for clean exits.
 func (d *Daemon) spawnDetachedAgent(agentID, agentName, harnessName, cwd string) (int, string, error) {
 	localAgent := localAgentForHarness(harnessName)
 	if localAgent == "" {
@@ -276,14 +283,29 @@ func (d *Daemon) spawnDetachedAgent(agentID, agentName, harnessName, cwd string)
 		return 0, "", fmt.Errorf("open %s: %w", logPath, err)
 	}
 
+	// Allocate a PTY so the harness sees a real terminal. Without this the
+	// claude binary (and every other TUI agent) detects no TTY on stdin and
+	// either errors out or shells out to non-interactive mode and exits.
+	master, slave, err := openPTY()
+	if err != nil {
+		logFile.Close()
+		return 0, "", fmt.Errorf("openPTY: %w", err)
+	}
+	// Pick a sensible default winsize. No client is attached so this is
+	// just whatever the harness will compute its layout against.
+	setWinsize(master.Fd(), &Winsize{Row: 40, Col: 120})
+
 	cmd := exec.Command(setup.Command, setup.Args...)
 	cmd.Dir = cwd
-	cmd.Stdin = nil // effectively /dev/null
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	// Deliberately *not* using Setsid: we want the child to share the daemon's
-	// process group so it dies when the daemon dies. The daemon also explicitly
-	// kills tracked agents in Shutdown() as a safety net for clean exits.
+	cmd.Stdin = slave
+	cmd.Stdout = slave
+	cmd.Stderr = slave
+	cmd.ExtraFiles = []*os.File{slave}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setsid:  true,
+		Setctty: true,
+		Ctty:    3, // ExtraFiles[0] lands at fd 3 in the child
+	}
 	cmd.Env = append(os.Environ(),
 		"GREENLIGHT_AGENT_INSTANCE_ID="+agentID,
 		"GREENLIGHT_AGENT_NAME="+agentName,
@@ -291,8 +313,14 @@ func (d *Daemon) spawnDetachedAgent(agentID, agentName, harnessName, cwd string)
 
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
+		master.Close()
+		slave.Close()
 		return 0, "", fmt.Errorf("start: %w", err)
 	}
+
+	// Parent doesn't need the slave once the child has forked its own copy.
+	// Closing it here ensures the master read sees EOF when the child exits.
+	slave.Close()
 
 	pid := cmd.Process.Pid
 	sa := &spawnedAgent{
@@ -307,11 +335,22 @@ func (d *Daemon) spawnDetachedAgent(agentID, agentName, harnessName, cwd string)
 	daemonAgents[agentID] = sa
 	daemonAgentsMu.Unlock()
 
-	// Reap the child in the background so the OS doesn't hold a zombie and
-	// the in-memory registry stays consistent.
+	// Drain the PTY master into the log file. If nobody reads the master,
+	// the kernel buffer fills and the harness blocks on its next render.
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		defer master.Close()
+		defer logFile.Close()
+		_, _ = io.Copy(logFile, master)
+	}()
+
+	// Reap the child so the OS doesn't hold a zombie and the registry stays
+	// consistent. Wait for the drain to finish before declaring exit so the
+	// log file has the full output before any "agent exited" message.
 	go func() {
 		err := cmd.Wait()
-		logFile.Close()
+		<-drainDone
 		daemonAgentsMu.Lock()
 		delete(daemonAgents, agentID)
 		daemonAgentsMu.Unlock()
