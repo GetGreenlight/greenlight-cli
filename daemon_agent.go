@@ -156,6 +156,8 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 			"pid":      pid,
 			"relay_id": createWrap.AIAgentInstance.ID,
 		}
+		// Mark agent as active in the DB
+		d.updateAgentStatus(createWrap.AIAgentInstance.ID, "active")
 	}
 	merged, err := json.Marshal(out)
 	if err != nil {
@@ -203,9 +205,16 @@ func (d *Daemon) spawnAgentSession(agentInstanceID, agentName, harnessName, cwd 
 	go func() {
 		s.runRelay()
 		d.mu.Lock()
+		_, wasTracked := d.sessions[s.relayID]
 		delete(d.sessions, s.relayID)
 		d.mu.Unlock()
 		s.Stop()
+		// Only mark inactive if the session was still tracked — if it was
+		// already removed (e.g., by a retire/stop), the caller set the
+		// status to 'retired' and we shouldn't overwrite it.
+		if wasTracked {
+			d.updateAgentStatus(agentInstanceID, "inactive")
+		}
 		log.Printf("daemon: spawned agent session %s ended", s.relayID)
 	}()
 
@@ -215,4 +224,20 @@ func (d *Daemon) spawnAgentSession(agentInstanceID, agentName, harnessName, cwd 
 	}
 	log.Printf("daemon: spawned agent session %s (pid %d, cwd %s)", s.relayID, pid, cwd)
 	return pid, nil
+}
+
+// updateAgentStatus sends an update_ai_agent_instance message to the server
+// to set the agent's status and host_id in the DB.
+func (d *Daemon) updateAgentStatus(agentInstanceID, status string) {
+	data, _ := json.Marshal(map[string]string{
+		"id":      agentInstanceID,
+		"status":  status,
+		"host_id": d.sessionID,
+	})
+	_, err := d.daemonWS.SendWSRequest(generateUUID(), "update_ai_agent_instance", data)
+	if err != nil {
+		log.Printf("daemon: failed to update agent %s status to %s: %v", agentInstanceID, status, err)
+	} else {
+		log.Printf("daemon: agent %s status updated to %s", agentInstanceID, status)
+	}
 }

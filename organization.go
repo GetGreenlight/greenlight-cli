@@ -806,7 +806,7 @@ func runOrganizationAgent(args []string) {
 		// The daemon special-cases update_ai_agent_instance with retired_at:
 		// it kills the tracked PID locally before forwarding the row update.
 		now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
-		data, err := sendWSRequest("update_ai_agent_instance", map[string]interface{}{"id": *id, "retired_at": now})
+		data, err := sendWSRequest("update_ai_agent_instance", map[string]interface{}{"id": *id, "status": "retired", "retired_at": now})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 			os.Exit(1)

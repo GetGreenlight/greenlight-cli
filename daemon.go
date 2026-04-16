@@ -584,6 +584,7 @@ func (d *Daemon) handleWSRequest(conn net.Conn, req ipcRequest) {
 		if json.Unmarshal(req.WSData, &probe) == nil && probe.RetiredAt != "" && probe.ID != "" {
 			d.mu.Lock()
 			s := d.sessions[probe.ID]
+			delete(d.sessions, probe.ID)
 			d.mu.Unlock()
 			if s != nil {
 				log.Printf("daemon: stopping spawned agent session %s on retire", probe.ID)
