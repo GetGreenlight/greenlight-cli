@@ -336,6 +336,7 @@ type talkServerMsg struct {
 	Sessions  []talkSessionWire      `json:"sessions,omitempty"`
 	Data      json.RawMessage        `json:"data,omitempty"`
 	Status    string                 `json:"status,omitempty"`
+	Text      string                 `json:"text,omitempty"`
 	Message   string                 `json:"message,omitempty"`
 	Event     string                 `json:"event,omitempty"`
 	ToolName  string                 `json:"tool_name,omitempty"`
@@ -380,7 +381,12 @@ func (m *talkModel) handleServerMessage(data []byte) {
 		if rel == "" {
 			return
 		}
-		rendered := renderTranscriptEntry(msg.Data)
+		var rendered string
+		if len(msg.Data) > 0 {
+			rendered = renderTranscriptEntry(msg.Data)
+		} else {
+			rendered = renderDecomposedTranscript(msg.Event, msg.Text, msg.ToolName, msg.Message, msg.ToolInput)
+		}
 		if rendered == "" {
 			return
 		}

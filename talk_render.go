@@ -87,6 +87,33 @@ func renderTranscriptEntry(data json.RawMessage) string {
 	return statusStyle.Render(strings.TrimSpace(string(data)))
 }
 
+// renderDecomposedTranscript renders a transcript entry from the server's
+// pre-decomposed fields (Event, Text, ToolName, Message, ToolInput) rather
+// than from raw transcript JSON.
+func renderDecomposedTranscript(event, text, toolName, message string, toolInput json.RawMessage) string {
+	switch event {
+	case "user":
+		if text != "" {
+			return youStyle.Render("you") + " " + text
+		}
+	case "text":
+		if text != "" {
+			return text
+		}
+	case "tool_use":
+		label := "⚙ " + toolName
+		if message != "" {
+			label += " " + message
+		}
+		return toolUseStyle.Render(label)
+	case "tool_result":
+		if message != "" {
+			return toolResultStyle.Render(message)
+		}
+	}
+	return ""
+}
+
 func renderClaudeMessage(role string, content json.RawMessage) string {
 	// content is either an array of blocks or a plain string.
 	var blocks []contentBlock
