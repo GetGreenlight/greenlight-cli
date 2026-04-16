@@ -188,6 +188,7 @@ func (d *Daemon) spawnAgentSession(agentInstanceID, agentName, harnessName, cwd 
 		Cwd:      cwd,
 		Detached: true,
 		RelayID:  agentInstanceID,
+		Winsize:  &ipcWinsize{Rows: 40, Cols: 120},
 	}
 	s, err := d.newSession(req)
 	if err != nil {
