@@ -31,8 +31,8 @@ func serverBaseURL() (string, error) {
 // registerUser registers a user by email and returns the user_id and the
 // organization_id of the user's primary organization (auto-created on first
 // registration).
-func registerUser(baseURL, email string) (userID, orgID string, err error) {
-	payload := map[string]string{"email": email}
+func registerUser(baseURL, email, name, orgName string) (userID, orgID string, err error) {
+	payload := map[string]string{"email": email, "name": name, "org_name": orgName}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to encode request: %w", err)

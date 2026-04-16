@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"regexp"
@@ -17,6 +18,11 @@ func runRegister(args []string) {
 	}
 
 	email := args[0]
+	reader := bufio.NewReader(os.Stdin)
+
+	// Prompt for user and organization names
+	name := promptWithDefault(reader, "Your name", email)
+	orgName := promptWithDefault(reader, "Organization name", name+"'s org")
 
 	baseURL, err := serverBaseURL()
 	if err != nil {
@@ -25,7 +31,7 @@ func runRegister(args []string) {
 	}
 
 	// Register user by email, get back user_id and the user's primary org_id.
-	userID, orgID, err := registerUser(baseURL, email)
+	userID, orgID, err := registerUser(baseURL, email, name, orgName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
