@@ -363,8 +363,11 @@ type talkMissedWire struct {
 }
 
 func (m *talkModel) handleServerMessage(data []byte) {
+	debugLogFrame("recv", data)
+
 	var msg talkServerMsg
 	if err := json.Unmarshal(data, &msg); err != nil {
+		debugLogFrame("recv-parse-error", []byte(err.Error()))
 		return
 	}
 
@@ -379,6 +382,7 @@ func (m *talkModel) handleServerMessage(data []byte) {
 			rel = msg.SessionID
 		}
 		if rel == "" {
+			debugLogFrame("transcript-drop-no-rel", data)
 			return
 		}
 		var rendered string
@@ -388,8 +392,10 @@ func (m *talkModel) handleServerMessage(data []byte) {
 			rendered = renderDecomposedTranscript(msg.Event, msg.Text, msg.ToolName, msg.Message, msg.ToolInput)
 		}
 		if rendered == "" {
+			debugLogFrame(fmt.Sprintf("transcript-drop-empty-render event=%q text_len=%d", msg.Event, len(msg.Text)), data)
 			return
 		}
+		debugLogf("transcript-append rel=%s event=%q focused=%s match=%v rendered_len=%d", rel, msg.Event, m.focused, rel == m.focused, len(rendered))
 		m.transcripts[rel] = append(m.transcripts[rel], rendered)
 		if rel == m.focused {
 			m.refreshViewport()
