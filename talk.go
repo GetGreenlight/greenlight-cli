@@ -395,8 +395,16 @@ func (m *talkModel) handleServerMessage(data []byte) {
 			debugLogFrame(fmt.Sprintf("transcript-drop-empty-render event=%q text_len=%d", msg.Event, len(msg.Text)), data)
 			return
 		}
+		// Dedupe against the immediate prior entry. We echo user input locally
+		// when Enter is pressed (for snappy feedback), but the server will also
+		// replay it from the agent's transcript — skip the server copy when it
+		// matches what we just rendered.
+		buf := m.transcripts[rel]
+		if len(buf) > 0 && buf[len(buf)-1] == rendered {
+			return
+		}
 		debugLogf("transcript-append rel=%s event=%q focused=%s match=%v rendered_len=%d", rel, msg.Event, m.focused, rel == m.focused, len(rendered))
-		m.transcripts[rel] = append(m.transcripts[rel], rendered)
+		m.transcripts[rel] = append(buf, rendered)
 		if rel == m.focused {
 			m.refreshViewport()
 		}
