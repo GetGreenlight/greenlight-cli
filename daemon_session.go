@@ -71,29 +71,33 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		return nil, fmt.Errorf("working directory is required")
 	}
 
-	// Resolve device ID and project. Detached spawns originate inside the
-	// daemon (no client to provide a device_id), so they fall back to the
-	// daemon's own human_user_id, and the project defaults to the cwd's
-	// basename if nothing was passed.
-	var (
-		devID string
-		proj  string
-		err   error
-	)
-	if req.Detached {
-		devID = req.DeviceID
-		if devID == "" {
-			devID = d.humanUserID
-		}
-		proj = req.Project
-		if proj == "" && cwd != "" {
-			proj = filepath.Base(cwd)
-		}
-	} else {
-		devID, proj, err = resolveDeviceAndProject(req.DeviceID, req.Project, cwd)
-		if err != nil {
-			return nil, err
-		}
+	// Resolve device ID and project. device_id has been unified with
+	// human_user_id server-side, so we accept any of: explicit flag, env,
+	// config's legacy device_id, or the daemon's own human_user_id. The
+	// project falls back to the cwd basename.
+	devID := req.DeviceID
+	if devID == "" {
+		devID = os.Getenv("GREENLIGHT_DEVICE_ID")
+	}
+	if devID == "" {
+		devID = readConfigValue("device_id")
+	}
+	if devID == "" {
+		devID = d.humanUserID
+	}
+	if devID == "" {
+		return nil, fmt.Errorf("not registered — run 'greenlight register <email>' first")
+	}
+
+	proj := req.Project
+	if proj == "" {
+		proj = os.Getenv("GREENLIGHT_PROJECT")
+	}
+	if proj == "" {
+		proj = readConfigValue("project")
+	}
+	if proj == "" && cwd != "" {
+		proj = filepath.Base(cwd)
 	}
 
 	// Build agent command with session IDs and flags
