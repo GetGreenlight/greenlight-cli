@@ -48,7 +48,7 @@ type ipcRequest struct {
 	WSData    json.RawMessage   `json:"ws_data,omitempty"`     // for ws_request: the payload
 	// Detached is set by the in-process spawnAgentInstance path used by
 	// 'org agent create'. It tells newAgentInstance to skip prerequisites that
-	// only make sense for client-attached connect sessions.
+	// only make sense for client-attached 'greenlight connect' runs.
 	Detached bool `json:"-"`
 	// AIAgentInstanceID is an optional override used when the caller already
 	// has a stable identifier it wants to use as the instance's ID (e.g. the
@@ -496,7 +496,7 @@ func (d *Daemon) handleConn(conn net.Conn) {
 		log.Printf("daemon: read control message error: %v", err)
 		return
 	}
-	conn.SetReadDeadline(time.Time{}) // clear deadline for session I/O
+	conn.SetReadDeadline(time.Time{}) // clear deadline for long-lived I/O
 
 	var req ipcRequest
 	if err := json.Unmarshal(line, &req); err != nil {

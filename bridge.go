@@ -35,7 +35,7 @@ func tailBridge(path string, ws WSConn, done <-chan struct{}, agent string) {
 	defer f.Close()
 	log.Printf("bridge: opened %s", path)
 
-	// Seek to end — no backfill, fresh session
+	// Seek to end — no backfill, fresh agent instance
 	f.Seek(0, io.SeekEnd)
 
 	reader := bufio.NewReader(f)

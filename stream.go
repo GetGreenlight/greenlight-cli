@@ -77,7 +77,7 @@ func streamToBridge(transcriptPath, agentInstanceID, bridgePath string) {
 	}
 	defer f.Close()
 
-	// Start from beginning — transcript file is fresh for each session.
+	// Start from beginning — transcript file is fresh for each agent instance.
 	// No seekToLastLines backfill needed, which avoids duplicates if
 	// a second streamer is accidentally spawned.
 

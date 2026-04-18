@@ -148,7 +148,7 @@ func killStreamer(aiAgentInstanceID string) {
 	log.Printf("Killed streamer process %d", pid)
 }
 
-// writeConnectPid writes a PID file for this connect session.
+// writeConnectPid writes a PID file for this attached connect run.
 // Format: <pid> <agent> <cwd>
 func writeConnectPid(id, agent, cwd string) string {
 	p := filepath.Join(os.TempDir(), "greenlight-connect-"+id+".pid")
@@ -157,9 +157,9 @@ func writeConnectPid(id, agent, cwd string) string {
 }
 
 // cleanupAgentFiles removes agent-specific files if no other greenlight
-// connect sessions are active for the same agent and project dir.
+// connect processes are active for the same agent and project dir.
 func cleanupAgentFiles(agent, cwd string) {
-	if hasOtherSessions(agent, cwd) {
+	if hasOtherConnects(agent, cwd) {
 		return
 	}
 	switch agent {
@@ -174,9 +174,9 @@ func cleanupAgentFiles(agent, cwd string) {
 	}
 }
 
-// hasOtherSessions checks if any other greenlight connect processes are alive
+// hasOtherConnects checks if any other greenlight connect processes are alive
 // for the same agent and working directory.
-func hasOtherSessions(agent, cwd string) bool {
+func hasOtherConnects(agent, cwd string) bool {
 	pattern := filepath.Join(os.TempDir(), "greenlight-connect-*.pid")
 	matches, _ := filepath.Glob(pattern)
 	myPid := os.Getpid()

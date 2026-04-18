@@ -87,7 +87,7 @@ func formatToolDetail(toolName string, toolInput map[string]interface{}) string 
 }
 
 // startInterposeSock creates a Unix socket listener for interpose permission
-// requests and returns the socket path and a per-session relay reference.
+// requests and returns the socket path and a per-instance relay reference.
 // The caller must call SetRelay on the returned interposeRelay once the
 // Relay is created.
 func startInterposeSock(id, agent string) (string, func(), *interposeRelay, error) {
@@ -102,7 +102,7 @@ func startInterposeSock(id, agent string) (string, func(), *interposeRelay, erro
 			listener, err = net.Listen("unix", sockPath)
 		} else {
 			conn.Close()
-			// Socket is live — another session owns it
+			// Socket is live — another agent instance owns it
 		}
 		if err != nil {
 			return "", nil, nil, fmt.Errorf("interpose socket %s: %w", sockPath, err)

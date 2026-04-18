@@ -358,8 +358,8 @@ const promptHeight uint16 = 4
 var stdoutMu sync.Mutex
 
 // drawPromptLocked draws a permission prompt in the reserved area below the
-// scroll region. The scroll region is set once at session start and on
-// resize, so this function only writes into the reserved rows.
+// scroll region. The scroll region is set once when the connect client
+// starts and on resize, so this function only writes into the reserved rows.
 // Caller must hold stdoutMu.
 func drawPromptLocked(toolName, detail string) {
 	ws, err := getWinsize(os.Stdin.Fd())

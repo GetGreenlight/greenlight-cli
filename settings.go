@@ -12,7 +12,7 @@ import (
 // installGreenlightInstructions creates an agent-specific instruction file
 // that teaches the agent how to interpret [GREENLIGHT] permission denial messages.
 // For codex, aiAgentInstanceID is embedded as a sentinel so we can match the
-// transcript to this session even when multiple sessions share the same CWD.
+// transcript to this instance even when multiple instances share the same CWD.
 func installGreenlightInstructions(agent, aiAgentInstanceID string) error {
 	var instrPath string
 	switch agent {
