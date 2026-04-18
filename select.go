@@ -407,9 +407,8 @@ func createWorkingDirectoryInteractive(orgID string) (string, error) {
 		return "", fmt.Errorf("host ID not found — run 'greenlight daemon start' to enroll this host")
 	}
 
-	cwd, _ := os.Getwd()
 	reader := bufio.NewReader(os.Stdin)
-	dir := promptWithDefault(reader, "Directory path", cwd)
+	dir := promptWithDefault(reader, "Directory path", defaultAgentWorkingDir())
 
 	payload := map[string]interface{}{
 		"organization_id": orgID,

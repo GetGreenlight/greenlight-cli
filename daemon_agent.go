@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 )
 
 // localAgentForHarness translates a server-side harness name (the value in
@@ -179,6 +180,15 @@ func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName, harnessName, cwd
 	localAgent := localAgentForHarness(harnessName)
 	if localAgent == "" {
 		return 0, fmt.Errorf("no local CLI binary maps to harness %q", harnessName)
+	}
+
+	// Ensure the agent's working directory exists. The default template is
+	// $HOME/greenlight_agents which most users won't have yet; without this
+	// the exec.Cmd.Dir = cwd below would fail with ENOENT.
+	if cwd != "" {
+		if err := os.MkdirAll(cwd, 0755); err != nil {
+			return 0, fmt.Errorf("create working directory %s: %w", cwd, err)
+		}
 	}
 
 	req := ipcRequest{

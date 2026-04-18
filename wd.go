@@ -11,9 +11,26 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
+
+// defaultAgentWorkingDir returns the default base directory where new
+// agent instances should operate: $HOME/greenlight_agents. Falls back
+// to the current working directory if the home directory can't be
+// resolved. The directory is NOT created — callers that actually spawn
+// an agent into it are responsible for mkdir.
+func defaultAgentWorkingDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			return cwd
+		}
+		return ""
+	}
+	return filepath.Join(home, "greenlight_agents")
+}
 
 // apiHarness mirrors the server's Harness struct for JSON decoding.
 type apiHarness struct {
@@ -67,7 +84,7 @@ func runWDCreate(args []string) {
 	nameFlag := fs.String("name", "", "Human name for this working directory (e.g. \"Alice\")")
 	harnessFlag := fs.String("harness", "", "Agent harness name (e.g. claude-code, windsurf)")
 	modelFlag := fs.String("model", "", "AI model name (e.g. claude-sonnet-4-6)")
-	dirFlag := fs.String("dir", "", "Directory path (defaults to current directory)")
+	dirFlag := fs.String("dir", "", "Directory path (defaults to $HOME/greenlight_agents)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `Usage: greenlight wd create [flags]
 
@@ -188,8 +205,7 @@ Flags:
 	// --- Directory path ---
 	dirPath := *dirFlag
 	if dirPath == "" {
-		cwd, _ := os.Getwd()
-		dirPath = promptWithDefault(reader, "\nDirectory path", cwd)
+		dirPath = promptWithDefault(reader, "\nDirectory path", defaultAgentWorkingDir())
 	}
 
 	// --- Create ---

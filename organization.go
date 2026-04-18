@@ -353,7 +353,7 @@ func runOrganizationWD(args []string) {
 	case "create":
 		fs := flag.NewFlagSet("wd create", flag.ExitOnError)
 		hostID := fs.String("host-id", "", "Host ID (defaults to daemon's host)")
-		dir := fs.String("dir", "", "Directory path (defaults to cwd)")
+		dir := fs.String("dir", "", "Directory path (defaults to $HOME/greenlight_agents)")
 		fs.Parse(args[1:])
 
 		orgID := workingOrgID()
@@ -375,8 +375,7 @@ func runOrganizationWD(args []string) {
 			os.Exit(1)
 		}
 		if *dir == "" {
-			cwd, _ := os.Getwd()
-			*dir = promptWithDefault(reader, "Directory path", cwd)
+			*dir = promptWithDefault(reader, "Directory path", defaultAgentWorkingDir())
 		}
 
 		payload := map[string]interface{}{
