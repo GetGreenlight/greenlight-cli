@@ -49,7 +49,7 @@ func renderPills(instances []talkInstance, focusedID string) string {
 	for _, s := range instances {
 		label := s.project
 		if label == "" {
-			label = "session"
+			label = "agent"
 		}
 		if s.aiAgentInstanceID == focusedID {
 			parts = append(parts, pillFocusedStyle.Render("● "+label))
@@ -359,7 +359,7 @@ func renderHelp(terminalWidth int) string {
 	var b strings.Builder
 	b.WriteString(modalHeaderStyle.Render("greenlight talk") + "\n\n")
 	b.WriteString(modalLabelStyle.Render("Normal mode") + "\n")
-	b.WriteString(row("tab", "switch focused session") + "\n")
+	b.WriteString(row("tab", "switch focused agent") + "\n")
 	b.WriteString(row("shift+tab", "switch backwards") + "\n")
 	b.WriteString(row("pgup / pgdn", "scroll the transcript") + "\n")
 	b.WriteString(row("enter", "send the input as a message") + "\n")

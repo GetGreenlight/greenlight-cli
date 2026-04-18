@@ -39,7 +39,7 @@ type interposeResponse struct {
 }
 
 
-// interposeRelay is a per-socket reference to the session's Relay.
+// interposeRelay is a per-socket reference to the agent instance's Relay.
 // Created by startInterposeSock, set via SetRelay after the Relay is created.
 type interposeRelay struct {
 	mu sync.Mutex

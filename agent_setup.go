@@ -10,11 +10,13 @@ import (
 	"runtime"
 )
 
-// AgentSetup holds the results of building the agent command and session IDs.
+// AgentSetup holds the results of building the agent command, the
+// agent-internal session ID (used to locate the agent's transcript
+// JSONL on disk), and the ai_agent_instance_id used for server routing.
 type AgentSetup struct {
 	Command           string
 	Args              []string
-	AgentSessionID    string // deterministic session ID for transcript path derivation
+	AgentSessionID    string // deterministic agent-internal session ID for transcript path derivation
 	AIAgentInstanceID string // ai_agent_instance_id for server communication
 }
 
@@ -24,7 +26,7 @@ type InterposeSetup struct {
 	LibExtracted bool
 	SockPath     string
 	SockCleanup  func()
-	Relay        *interposeRelay // per-session relay reference; caller must call SetRelay
+	Relay        *interposeRelay // per-instance relay reference; caller must call SetRelay
 }
 
 // buildAgentCommand constructs the agent binary command, flags, and IDs.
