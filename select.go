@@ -349,6 +349,14 @@ func createAgentJobDescriptionInteractive(orgID string) (string, error) {
 // =============================================================================
 
 func selectWorkingDirectory(orgID string) (string, error) {
+	return selectWorkingDirectoryForPosition(orgID, "")
+}
+
+// selectWorkingDirectoryForPosition is like selectWorkingDirectory, but when
+// the user chooses "Create new…" the path prompt defaults to a subdirectory
+// named after the (snake_cased) position — so a position "Head Gardener"
+// defaults its wd to $HOME/greenlight_agents/head_gardener.
+func selectWorkingDirectoryForPosition(orgID, positionName string) (string, error) {
 	payload := map[string]interface{}{}
 	if orgID != "" {
 		payload["organization_id"] = orgID
@@ -371,7 +379,7 @@ func selectWorkingDirectory(orgID string) (string, error) {
 
 	if len(resp.WorkingDirectories) == 0 {
 		fmt.Println("No working directories found. Let's create one.")
-		return createWorkingDirectoryInteractive(orgID)
+		return createWorkingDirectoryInteractive(orgID, positionName)
 	}
 
 	items := make([]selectItem[string], len(resp.WorkingDirectories))
@@ -389,12 +397,12 @@ func selectWorkingDirectory(orgID string) (string, error) {
 		return "", err
 	}
 	if id == sentinelCreateNew {
-		return createWorkingDirectoryInteractive(orgID)
+		return createWorkingDirectoryInteractive(orgID, positionName)
 	}
 	return id, nil
 }
 
-func createWorkingDirectoryInteractive(orgID string) (string, error) {
+func createWorkingDirectoryInteractive(orgID, positionName string) (string, error) {
 	if orgID == "" {
 		orgID = workingOrgID()
 	}
@@ -408,7 +416,7 @@ func createWorkingDirectoryInteractive(orgID string) (string, error) {
 	}
 
 	reader := bufio.NewReader(os.Stdin)
-	dir := promptWithDefault(reader, "Directory path", defaultAgentWorkingDir())
+	dir := promptWithDefault(reader, "Directory path", defaultAgentWorkingDirFor(positionName))
 
 	payload := map[string]interface{}{
 		"organization_id": orgID,
@@ -496,12 +504,19 @@ func createOrganizationPositionInteractive(orgID string) (string, error) {
 	}
 
 	reader := bufio.NewReader(os.Stdin)
-	name := promptLine(reader, "Name: ")
-	if name == "" {
+	rawName := promptLine(reader, "Name: ")
+	if rawName == "" {
 		return "", fmt.Errorf("name required")
 	}
+	name := toSnakeCase(rawName)
+	if name == "" {
+		return "", fmt.Errorf("name must contain at least one alphanumeric character")
+	}
+	if name != rawName {
+		fmt.Printf("Position name stored as %q (snake_case).\n", name)
+	}
 
-	wdID, err := selectWorkingDirectory(orgID)
+	wdID, err := selectWorkingDirectoryForPosition(orgID, name)
 	if err != nil {
 		return "", err
 	}

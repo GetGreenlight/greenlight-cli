@@ -32,6 +32,43 @@ func defaultAgentWorkingDir() string {
 	return filepath.Join(home, "greenlight_agents")
 }
 
+// defaultAgentWorkingDirFor returns the suggested working directory for a
+// given position name: $HOME/greenlight_agents/<snake_case_name>. If the
+// name is empty, returns defaultAgentWorkingDir().
+func defaultAgentWorkingDirFor(positionName string) string {
+	base := defaultAgentWorkingDir()
+	sub := toSnakeCase(positionName)
+	if sub == "" {
+		return base
+	}
+	return filepath.Join(base, sub)
+}
+
+// toSnakeCase lowercases the input and replaces any run of non-alphanumeric
+// characters with a single underscore. Leading / trailing underscores are
+// trimmed. Example: "Head Gardener" → "head_gardener".
+func toSnakeCase(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	prevUnderscore := true // suppress leading underscores
+	for _, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + 32)
+			prevUnderscore = false
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			prevUnderscore = false
+		default:
+			if !prevUnderscore {
+				b.WriteByte('_')
+				prevUnderscore = true
+			}
+		}
+	}
+	return strings.TrimRight(b.String(), "_")
+}
+
 // apiHarness mirrors the server's Harness struct for JSON decoding.
 type apiHarness struct {
 	ID          int    `json:"id"`
