@@ -98,13 +98,13 @@ Usage: greenlight [flags]
 When no command is given, 'connect' is used by default.
 
 Commands:
-  connect    Start an agent session with a remote relay to the Greenlight app
+  connect    Launch an agent instance and relay it to the Greenlight app
   register   Register with your email and enroll this host
   agent      Get or set the default agent runtime (claude, codex, copilot, cursor, gemini, pi)
   daemon     Manage the background daemon (start, stop, status)
   org        Manage multi-agent organization entities (org, user, wd, job, pos, agent, model)
   wd         Manage working directories (create, list)
-  talk       Open a TUI to talk to your active agent sessions
+  talk       Open a TUI to talk to your active agent instances
   update     Update greenlight to the latest version
   version    Print version and build settings
 

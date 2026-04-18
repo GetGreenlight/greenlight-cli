@@ -103,7 +103,7 @@ func (d *Daemon) newAgentInstance(req ipcRequest) (*AgentInstance, error) {
 		proj = filepath.Base(cwd)
 	}
 
-	// Build agent command with session IDs and flags
+	// Build agent command with its agent-internal session ID and flags
 	setup, err := buildAgentCommand(agent)
 	if err != nil {
 		return nil, err

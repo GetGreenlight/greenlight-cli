@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 )
 
-// Relay holds the state for a running PTY relay session.
+// Relay holds the state for an attached PTY — one per live agent instance.
 type Relay struct {
 	cmd    *exec.Cmd
 	master *os.File

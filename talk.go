@@ -22,10 +22,10 @@ func runTalk(args []string) {
 		fmt.Fprintf(os.Stderr, `Usage: greenlight talk
 
 Opens a TUI that connects to your Greenlight account and shows live
-transcripts from any agent instance you have running (started via
-'greenlight connect'). Type a message and press Enter to send it to the
-focused instance. Press Tab to switch focus between instances. Press
-ctrl+c or esc to quit.
+transcripts from any agent instance you have running (launched via
+'greenlight connect' or spawned via 'greenlight org agent create').
+Type a message and press Enter to send it to the focused instance.
+Press Tab to switch focus between instances. Press ctrl+c or esc to quit.
 `)
 		os.Exit(0)
 	}
@@ -63,7 +63,7 @@ ctrl+c or esc to quit.
 // model
 // =============================================================================
 
-type talkSession struct {
+type talkInstance struct {
 	aiAgentInstanceID string
 	project           string
 	version           string
@@ -84,7 +84,7 @@ type talkModel struct {
 	ws *talkWS
 
 	// Instances known to the model, in order received from the server.
-	sessions []talkSession
+	instances []talkInstance
 	// Currently focused instance's ai_agent_instance_id ("" if none).
 	focused string
 	// Per-instance transcript buffers, in-memory only.
@@ -242,7 +242,7 @@ func (m talkModel) View() string {
 	if !m.ready {
 		return m.status
 	}
-	pills := renderPills(m.sessions, m.focused)
+	pills := renderPills(m.instances, m.focused)
 
 	if m.helpOpen {
 		help := renderHelp(m.width)
@@ -428,7 +428,7 @@ func (m *talkModel) handleServerMessage(data []byte) {
 }
 
 func (m *talkModel) applyInstances(wire []talkInstanceWire) {
-	m.sessions = m.sessions[:0]
+	m.instances = m.instances[:0]
 	for _, s := range wire {
 		if s.ID == "" {
 			continue
@@ -437,21 +437,21 @@ func (m *talkModel) applyInstances(wire []talkInstanceWire) {
 		if s.Status == "retired" {
 			continue
 		}
-		m.sessions = append(m.sessions, talkSession{
+		m.instances = append(m.instances, talkInstance{
 			aiAgentInstanceID: s.ID,
 			project:           s.Name,
 		})
 	}
 	stillThere := false
-	for _, s := range m.sessions {
+	for _, s := range m.instances {
 		if s.aiAgentInstanceID == m.focused {
 			stillThere = true
 			break
 		}
 	}
 	if !stillThere {
-		if len(m.sessions) > 0 {
-			m.focused = m.sessions[0].aiAgentInstanceID
+		if len(m.instances) > 0 {
+			m.focused = m.instances[0].aiAgentInstanceID
 		} else {
 			m.focused = ""
 		}
@@ -459,22 +459,22 @@ func (m *talkModel) applyInstances(wire []talkInstanceWire) {
 }
 
 func (m *talkModel) cycleFocus(delta int) {
-	if len(m.sessions) == 0 {
+	if len(m.instances) == 0 {
 		return
 	}
 	idx := -1
-	for i, s := range m.sessions {
+	for i, s := range m.instances {
 		if s.aiAgentInstanceID == m.focused {
 			idx = i
 			break
 		}
 	}
 	if idx == -1 {
-		m.focused = m.sessions[0].aiAgentInstanceID
+		m.focused = m.instances[0].aiAgentInstanceID
 		return
 	}
-	idx = (idx + delta + len(m.sessions)) % len(m.sessions)
-	m.focused = m.sessions[idx].aiAgentInstanceID
+	idx = (idx + delta + len(m.instances)) % len(m.instances)
+	m.focused = m.instances[idx].aiAgentInstanceID
 }
 
 func (m *talkModel) refreshViewport() {

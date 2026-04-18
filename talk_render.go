@@ -41,12 +41,12 @@ var (
 // pills
 // =============================================================================
 
-func renderPills(sessions []talkSession, focusedID string) string {
-	if len(sessions) == 0 {
-		return emptyStyle.Render("(no active sessions — start one with 'greenlight connect')")
+func renderPills(instances []talkInstance, focusedID string) string {
+	if len(instances) == 0 {
+		return emptyStyle.Render("(no active agent instances — start one with 'greenlight connect')")
 	}
-	parts := make([]string, 0, len(sessions))
-	for _, s := range sessions {
+	parts := make([]string, 0, len(instances))
+	for _, s := range instances {
 		label := s.project
 		if label == "" {
 			label = "session"
