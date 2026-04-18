@@ -11,9 +11,9 @@ import (
 
 // installGreenlightInstructions creates an agent-specific instruction file
 // that teaches the agent how to interpret [GREENLIGHT] permission denial messages.
-// For codex, relayID is embedded as a sentinel so we can match the transcript
-// to this session even when multiple sessions share the same CWD.
-func installGreenlightInstructions(agent, relayID string) error {
+// For codex, aiAgentInstanceID is embedded as a sentinel so we can match the
+// transcript to this session even when multiple sessions share the same CWD.
+func installGreenlightInstructions(agent, aiAgentInstanceID string) error {
 	var instrPath string
 	switch agent {
 	case "gemini":
@@ -44,8 +44,8 @@ func installGreenlightInstructions(agent, relayID string) error {
 	}
 
 	content := "<!-- Greenlight -->\n" + greenlightSystemPrompt + "\n"
-	if agent == "codex" && relayID != "" {
-		content += "<!-- greenlight-relay:" + relayID + " -->\n"
+	if agent == "codex" && aiAgentInstanceID != "" {
+		content += "<!-- greenlight-agent-instance:" + aiAgentInstanceID + " -->\n"
 	}
 	if err := os.WriteFile(instrPath, []byte(content), 0644); err != nil {
 		return err

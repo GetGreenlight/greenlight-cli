@@ -51,7 +51,7 @@ func renderPills(sessions []talkSession, focusedID string) string {
 		if label == "" {
 			label = "session"
 		}
-		if s.relayID == focusedID {
+		if s.aiAgentInstanceID == focusedID {
 			parts = append(parts, pillFocusedStyle.Render("● "+label))
 		} else {
 			parts = append(parts, pillStyle.Render("○ "+label))

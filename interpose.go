@@ -90,9 +90,9 @@ func formatToolDetail(toolName string, toolInput map[string]interface{}) string 
 // requests and returns the socket path and a per-session relay reference.
 // The caller must call SetRelay on the returned interposeRelay once the
 // Relay is created.
-func startInterposeSock(relayID, agent string) (string, func(), *interposeRelay, error) {
+func startInterposeSock(id, agent string) (string, func(), *interposeRelay, error) {
 	// Unix socket paths are limited to ~104 bytes on macOS, keep it short
-	sockPath := "/tmp/gl-" + relayID[:8] + ".sock"
+	sockPath := "/tmp/gl-" + id[:8] + ".sock"
 
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {

@@ -15,19 +15,16 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// runTalk launches the interactive TUI for talking to active agent sessions
+// runTalk launches the interactive TUI for talking to active agent instances
 // over the same /ws endpoint the phone uses.
-//
-// Phase 2: structured transcript rendering, session pills, text input. No
-// permission modal yet (phase 3).
 func runTalk(args []string) {
 	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h") {
 		fmt.Fprintf(os.Stderr, `Usage: greenlight talk
 
 Opens a TUI that connects to your Greenlight account and shows live
-transcripts from any agent session you have running (started via
+transcripts from any agent instance you have running (started via
 'greenlight connect'). Type a message and press Enter to send it to the
-focused session. Press Tab to switch focus between sessions. Press
+focused instance. Press Tab to switch focus between instances. Press
 ctrl+c or esc to quit.
 `)
 		os.Exit(0)
@@ -51,17 +48,6 @@ ctrl+c or esc to quit.
 
 	m := newTalkModel(ws)
 
-	// TODO(phone-coexistence): the server's /ws endpoint stores at most one
-	// connection per human_user_id, so opening this TUI will knock the phone
-	// (and any other live /ws client for the same user) offline. Acceptable
-	// for v0; fixing it requires turning s.connections into a fan-out map
-	// on the server.
-	//
-	// TODO(transcript-persistence): the model holds per-session transcript
-	// buffers in memory only. Quitting the TUI loses everything. Phone
-	// parity needs per-session JSON files under ~/.greenlight/talk/<id>.jsonl
-	// that get tailed on next launch.
-
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	ws.program = p
 	go ws.run()
@@ -78,42 +64,36 @@ ctrl+c or esc to quit.
 // =============================================================================
 
 type talkSession struct {
-	relayID string
-	project string
-	version string
+	aiAgentInstanceID string
+	project           string
+	version           string
 }
 
 // talkPendingPermission holds the in-flight permission_request the user needs
 // to act on. Only one can be displayed at a time; subsequent permission_request
-// messages while a modal is up overwrite the previous one (rare in practice,
-// since the same /ws connection only fields one outstanding request per
-// session at a time).
+// messages while a modal is up overwrite the previous one.
 type talkPendingPermission struct {
-	requestID string
-	toolName  string
-	project   string
-	relayID   string
-	toolInput json.RawMessage
+	requestID         string
+	toolName          string
+	project           string
+	aiAgentInstanceID string
+	toolInput         json.RawMessage
 }
 
 type talkModel struct {
 	ws *talkWS
 
-	// Sessions known to the model, in order received from the server.
+	// Instances known to the model, in order received from the server.
 	sessions []talkSession
-	// Currently focused session's relay_id ("" if none).
+	// Currently focused instance's ai_agent_instance_id ("" if none).
 	focused string
-	// Per-session transcript buffers, in-memory only. Each entry is one
-	// already-rendered (lipgloss-styled) string.
+	// Per-instance transcript buffers, in-memory only.
 	transcripts map[string][]string
 
-	// Pending permission request (modal state). When non-nil the View
-	// renders the modal in place of the viewport and key handling routes
-	// through the modal branch.
+	// Pending permission request (modal state).
 	pending *talkPendingPermission
 
-	// Help overlay. When true, View renders the help box and any key
-	// dismisses it (except ctrl+c which always quits).
+	// Help overlay.
 	helpOpen bool
 
 	viewport viewport.Model
@@ -148,7 +128,6 @@ func (m talkModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// Help overlay: any key dismisses it (ctrl+c always quits).
 		if m.helpOpen {
 			if msg.String() == "ctrl+c" {
 				return m, tea.Quit
@@ -157,7 +136,6 @@ func (m talkModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// Modal mode: route a/d/A/esc directly, swallow everything else.
 		if m.pending != nil {
 			switch msg.String() {
 			case "ctrl+c":
@@ -172,14 +150,11 @@ func (m talkModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.respondToPermission("always_allow")
 				return m, nil
 			case "esc":
-				// Local dismiss only — does not respond to the server.
 				m.pending = nil
 				m.input.Focus()
 				m.refreshViewport()
 				return m, nil
 			}
-			// Swallow everything else so typing doesn't bleed into the
-			// input field while the modal is up.
 			return m, nil
 		}
 
@@ -187,9 +162,6 @@ func (m talkModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "esc":
 			return m, tea.Quit
 		case "?":
-			// Only treat ? as a help shortcut when the input field is
-			// empty — otherwise it's just a character in the message
-			// the user is typing.
 			if m.input.Value() == "" {
 				m.helpOpen = true
 				return m, nil
@@ -228,7 +200,6 @@ func (m talkModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		// Forward all other keys to the input field for typing.
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		cmds = append(cmds, cmd)
@@ -237,15 +208,12 @@ func (m talkModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.input.Width = msg.Width - 4
-		// Layout: pills(1) + viewport(rest) + input(1) + status(1) = height
 		vpHeight := msg.Height - 3
 		if vpHeight < 1 {
 			vpHeight = 1
 		}
 		if !m.ready {
 			m.viewport = viewport.New(msg.Width, vpHeight)
-			// Disable the viewport's default keymap; we route scroll
-			// keys explicitly so they don't fight the input field.
 			m.viewport.KeyMap = viewport.KeyMap{}
 			m.refreshViewport()
 			m.ready = true
@@ -276,7 +244,6 @@ func (m talkModel) View() string {
 	}
 	pills := renderPills(m.sessions, m.focused)
 
-	// Help overlay takes precedence over everything except quit.
 	if m.helpOpen {
 		help := renderHelp(m.width)
 		centered := lipgloss.Place(m.width, m.viewport.Height,
@@ -289,8 +256,6 @@ func (m talkModel) View() string {
 		}, "\n")
 	}
 
-	// Modal mode: replace the viewport pane with the centered modal and
-	// the input row with a help line listing the modal key bindings.
 	if m.pending != nil {
 		modal := renderPermissionModal(m.pending, m.width)
 		centered := lipgloss.Place(m.width, m.viewport.Height,
@@ -312,7 +277,6 @@ func (m talkModel) View() string {
 	}, "\n")
 }
 
-// statusBar combines the current status string with contextual key hints.
 func (m talkModel) statusBar() string {
 	hints := statusHints(m.pending != nil, m.helpOpen)
 	if hints == "" {
@@ -326,32 +290,29 @@ func (m talkModel) statusBar() string {
 // =============================================================================
 
 // talkServerMsg is the union of every server-sent /ws field this TUI reads.
-// Matches the WSMessage struct on the server side.
 type talkServerMsg struct {
-	Type      string                 `json:"type"`
-	SessionID string                 `json:"session_id,omitempty"`
-	RelayID   string                 `json:"relay_id,omitempty"`
-	Project   string                 `json:"project,omitempty"`
-	Agent     string                 `json:"agent,omitempty"`
-	Sessions  []talkSessionWire      `json:"sessions,omitempty"`
-	Data      json.RawMessage        `json:"data,omitempty"`
-	Status    string                 `json:"status,omitempty"`
-	Text      string                 `json:"text,omitempty"`
-	Message   string                 `json:"message,omitempty"`
-	Event     string                 `json:"event,omitempty"`
-	ToolName  string                 `json:"tool_name,omitempty"`
-	ToolInput json.RawMessage        `json:"tool_input,omitempty"`
-	RequestID string                 `json:"request_id,omitempty"`
-	Missed    []talkMissedWire       `json:"missed,omitempty"`
-	Error     string                 `json:"error,omitempty"`
-	Extra     map[string]interface{} `json:"-"`
+	Type              string                 `json:"type"`
+	AIAgentInstanceID string                 `json:"ai_agent_instance_id,omitempty"`
+	Project           string                 `json:"project,omitempty"`
+	Agent             string                 `json:"agent,omitempty"`
+	Instances         []talkInstanceWire     `json:"instances,omitempty"`
+	Data              json.RawMessage        `json:"data,omitempty"`
+	Status            string                 `json:"status,omitempty"`
+	Text              string                 `json:"text,omitempty"`
+	Message           string                 `json:"message,omitempty"`
+	Event             string                 `json:"event,omitempty"`
+	ToolName          string                 `json:"tool_name,omitempty"`
+	ToolInput         json.RawMessage        `json:"tool_input,omitempty"`
+	RequestID         string                 `json:"request_id,omitempty"`
+	Missed            []talkMissedWire       `json:"missed,omitempty"`
+	Error             string                 `json:"error,omitempty"`
+	Extra             map[string]interface{} `json:"-"`
 }
 
-type talkSessionWire struct {
-	SessionID string `json:"session_id"`
-	RelayID   string `json:"relay_id"`
-	Project   string `json:"project,omitempty"`
-	Version   string `json:"version,omitempty"`
+type talkInstanceWire struct {
+	AIAgentInstanceID string `json:"ai_agent_instance_id"`
+	Project           string `json:"project,omitempty"`
+	Version           string `json:"version,omitempty"`
 }
 
 type talkMissedWire struct {
@@ -372,17 +333,14 @@ func (m *talkModel) handleServerMessage(data []byte) {
 	}
 
 	switch msg.Type {
-	case "relay_sessions":
-		m.applySessions(msg.Sessions)
+	case "agent_instances", "relay_sessions":
+		m.applyInstances(msg.Instances)
 		m.refreshViewport()
 
 	case "transcript_entry":
-		rel := msg.RelayID
-		if rel == "" {
-			rel = msg.SessionID
-		}
-		if rel == "" {
-			debugLogFrame("transcript-drop-no-rel", data)
+		id := msg.AIAgentInstanceID
+		if id == "" {
+			debugLogFrame("transcript-drop-no-id", data)
 			return
 		}
 		var rendered string
@@ -395,31 +353,24 @@ func (m *talkModel) handleServerMessage(data []byte) {
 			debugLogFrame(fmt.Sprintf("transcript-drop-empty-render event=%q text_len=%d", msg.Event, len(msg.Text)), data)
 			return
 		}
-		// Dedupe against the immediate prior entry. We echo user input locally
-		// when Enter is pressed (for snappy feedback), but the server will also
-		// replay it from the agent's transcript — skip the server copy when it
-		// matches what we just rendered.
-		buf := m.transcripts[rel]
+		buf := m.transcripts[id]
 		if len(buf) > 0 && buf[len(buf)-1] == rendered {
 			return
 		}
-		debugLogf("transcript-append rel=%s event=%q focused=%s match=%v rendered_len=%d", rel, msg.Event, m.focused, rel == m.focused, len(rendered))
-		m.transcripts[rel] = append(buf, rendered)
-		if rel == m.focused {
+		debugLogf("transcript-append id=%s event=%q focused=%s match=%v rendered_len=%d", id, msg.Event, m.focused, id == m.focused, len(rendered))
+		m.transcripts[id] = append(buf, rendered)
+		if id == m.focused {
 			m.refreshViewport()
 		}
 
 	case "activity_event":
-		rel := msg.RelayID
-		if rel == "" {
-			rel = msg.SessionID
-		}
-		if rel == "" {
+		id := msg.AIAgentInstanceID
+		if id == "" {
 			return
 		}
-		m.transcripts[rel] = append(m.transcripts[rel],
+		m.transcripts[id] = append(m.transcripts[id],
 			renderActivityEvent(msg.Event, msg.ToolName, msg.Project))
-		if rel == m.focused {
+		if id == m.focused {
 			m.refreshViewport()
 		}
 
@@ -433,11 +384,11 @@ func (m *talkModel) handleServerMessage(data []byte) {
 
 	case "permission_request":
 		m.pending = &talkPendingPermission{
-			requestID: msg.RequestID,
-			toolName:  msg.ToolName,
-			project:   msg.Project,
-			relayID:   msg.RelayID,
-			toolInput: msg.ToolInput,
+			requestID:         msg.RequestID,
+			toolName:          msg.ToolName,
+			project:           msg.Project,
+			aiAgentInstanceID: msg.AIAgentInstanceID,
+			toolInput:         msg.ToolInput,
 		}
 		m.input.Blur()
 
@@ -449,10 +400,6 @@ func (m *talkModel) handleServerMessage(data []byte) {
 		}
 
 	case "missed_requests":
-		// MissedRequest doesn't carry a relay_id, so we can't route per
-		// session. Append each item to whichever session is currently
-		// focused. If nothing's focused yet, drop them — the user can
-		// reconnect once a session is up.
 		if m.focused == "" {
 			return
 		}
@@ -466,34 +413,28 @@ func (m *talkModel) handleServerMessage(data []byte) {
 	}
 }
 
-func (m *talkModel) applySessions(wire []talkSessionWire) {
+func (m *talkModel) applyInstances(wire []talkInstanceWire) {
 	m.sessions = m.sessions[:0]
 	for _, s := range wire {
-		rel := s.RelayID
-		if rel == "" {
-			rel = s.SessionID
-		}
-		if rel == "" {
+		if s.AIAgentInstanceID == "" {
 			continue
 		}
 		m.sessions = append(m.sessions, talkSession{
-			relayID: rel,
-			project: s.Project,
-			version: s.Version,
+			aiAgentInstanceID: s.AIAgentInstanceID,
+			project:           s.Project,
+			version:           s.Version,
 		})
 	}
-	// If the previously focused session disappeared, fall back to the first
-	// available (or unset).
 	stillThere := false
 	for _, s := range m.sessions {
-		if s.relayID == m.focused {
+		if s.aiAgentInstanceID == m.focused {
 			stillThere = true
 			break
 		}
 	}
 	if !stillThere {
 		if len(m.sessions) > 0 {
-			m.focused = m.sessions[0].relayID
+			m.focused = m.sessions[0].aiAgentInstanceID
 		} else {
 			m.focused = ""
 		}
@@ -506,17 +447,17 @@ func (m *talkModel) cycleFocus(delta int) {
 	}
 	idx := -1
 	for i, s := range m.sessions {
-		if s.relayID == m.focused {
+		if s.aiAgentInstanceID == m.focused {
 			idx = i
 			break
 		}
 	}
 	if idx == -1 {
-		m.focused = m.sessions[0].relayID
+		m.focused = m.sessions[0].aiAgentInstanceID
 		return
 	}
 	idx = (idx + delta + len(m.sessions)) % len(m.sessions)
-	m.focused = m.sessions[idx].relayID
+	m.focused = m.sessions[idx].aiAgentInstanceID
 }
 
 func (m *talkModel) refreshViewport() {
@@ -533,9 +474,9 @@ func (m *talkModel) refreshViewport() {
 
 func (m *talkModel) sendInput(text string) error {
 	payload, err := json.Marshal(map[string]interface{}{
-		"type":     "relay_input",
-		"relay_id": m.focused,
-		"text":     text,
+		"type":                 "relay_input",
+		"ai_agent_instance_id": m.focused,
+		"text":                 text,
 	})
 	if err != nil {
 		return err
@@ -544,8 +485,7 @@ func (m *talkModel) sendInput(text string) error {
 }
 
 // respondToPermission sends a permission_response with the given behavior
-// ("allow", "deny", "always_allow") for the in-flight modal. On any send
-// error it leaves the modal up so the user can retry.
+// ("allow", "deny", "always_allow") for the in-flight modal.
 func (m *talkModel) respondToPermission(behavior string) {
 	if m.pending == nil {
 		return
@@ -563,15 +503,13 @@ func (m *talkModel) respondToPermission(behavior string) {
 		m.status = "respond failed: " + err.Error()
 		return
 	}
-	// Drop a faint trail line into the relevant transcript so the user can
-	// see what they decided.
-	rel := m.pending.relayID
-	if rel == "" {
-		rel = m.focused
+	id := m.pending.aiAgentInstanceID
+	if id == "" {
+		id = m.focused
 	}
-	if rel != "" {
-		m.transcripts[rel] = append(
-			m.transcripts[rel],
+	if id != "" {
+		m.transcripts[id] = append(
+			m.transcripts[id],
 			statusStyle.Render(fmt.Sprintf("→ %s %s", behavior, m.pending.toolName)),
 		)
 	}

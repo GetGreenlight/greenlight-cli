@@ -351,14 +351,14 @@ func deriveCursorTranscriptPath(cwd string) string {
 }
 
 // deriveCodexTranscriptBySentinel scans recent Codex transcript files for
-// a greenlight-relay sentinel embedded in the AGENTS.md content that Codex
-// serializes into the transcript at session start.
-func deriveCodexTranscriptBySentinel(relayID string) string {
+// a greenlight-agent-instance sentinel embedded in the AGENTS.md content that
+// Codex serializes into the transcript at session start.
+func deriveCodexTranscriptBySentinel(aiAgentInstanceID string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	sentinel := "greenlight-relay:" + relayID
+	sentinel := "greenlight-agent-instance:" + aiAgentInstanceID
 	sessionsDir := filepath.Join(home, ".codex", "sessions")
 
 	// Collect candidates sorted newest first to find our session quickly.

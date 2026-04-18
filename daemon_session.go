@@ -18,15 +18,17 @@ import (
 	"time"
 )
 
-// Session represents a single agent session owned by the daemon.
-type Session struct {
-	relayID   string
-	agent     string
-	project   string
-	cwd       string
-	deviceID  string
-	startedAt time.Time
-	daemon    *Daemon
+// AgentInstance represents a single running agent owned by the daemon.
+// Each AgentInstance corresponds exactly to one ai_agent_instance_id (one
+// conversation) on the server.
+type AgentInstance struct {
+	aiAgentInstanceID string
+	agent             string
+	project           string
+	cwd               string
+	deviceID          string
+	startedAt         time.Time
+	daemon            *Daemon
 
 	relay *Relay
 
@@ -34,9 +36,9 @@ type Session struct {
 	interposeClean func()
 	interposeRelay *interposeRelay
 
-	bridgePath      string
-	bridgeDone      chan struct{}
-	bridgeFinished  chan struct{}
+	bridgePath     string
+	bridgeDone     chan struct{}
+	bridgeFinished chan struct{}
 
 	transcriptCancel context.CancelFunc
 
@@ -53,10 +55,11 @@ type Session struct {
 	promptCh chan byte
 }
 
-// newSession creates and starts a new agent session. This is the daemon-side
-// equivalent of runConnect — it sets up the PTY, WebSocket, interpose, bridge,
-// and transcript streamer, but does NOT touch the terminal (that's the client's job).
-func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
+// newAgentInstance creates and starts a new agent instance. This is the
+// daemon-side equivalent of runConnect — it sets up the PTY, WebSocket,
+// interpose, bridge, and transcript streamer, but does NOT touch the terminal
+// (that's the client's job).
+func (d *Daemon) newAgentInstance(req ipcRequest) (*AgentInstance, error) {
 	if wsURL == "" {
 		return nil, fmt.Errorf("no relay server URL configured")
 	}
@@ -101,59 +104,59 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	}
 
 	// Build agent command with session IDs and flags
-	setup, err := buildAgentCommand(agent, req.Resume)
+	setup, err := buildAgentCommand(agent)
 	if err != nil {
 		return nil, err
 	}
 	command := setup.Command
 	cmdArgs := setup.Args
-	relayID := setup.RelayID
-	// Honor an explicit relay_id override (used by spawnAgentSession so the
-	// session is keyed by the ai_agent_instance_id rather than a fresh UUID).
-	if req.RelayID != "" {
-		relayID = req.RelayID
-		setup.RelayID = req.RelayID
+	aiAgentInstanceID := setup.AIAgentInstanceID
+	// Honor an explicit ai_agent_instance_id override (used by spawnAgentInstance
+	// so the instance is keyed by the supplied ID rather than a fresh UUID).
+	if req.AIAgentInstanceID != "" {
+		aiAgentInstanceID = req.AIAgentInstanceID
+		setup.AIAgentInstanceID = req.AIAgentInstanceID
 		if agent == "codex" {
-			// Codex reuses RelayID as its agent-session sentinel.
-			setup.AgentSessionID = req.RelayID
+			// Codex reuses the instance ID as its agent-session sentinel.
+			setup.AgentSessionID = req.AIAgentInstanceID
 		}
 	}
 
-	// Register session with the server via daemon WS (no phone approval needed)
+	// Register instance with the server via daemon WS (no phone approval needed)
 	if d.daemonWS == nil {
 		return nil, fmt.Errorf("daemon WebSocket not connected")
 	}
-	if err := d.daemonWS.StartSession(relayID, proj, agentServerName(agent), cwd, version); err != nil {
-		return nil, fmt.Errorf("session start failed: %w", err)
+	if err := d.daemonWS.ConnectAgentInstance(aiAgentInstanceID, proj, agentServerName(agent), cwd, version); err != nil {
+		return nil, fmt.Errorf("agent_instance_connect failed: %w", err)
 	}
 
-	installAgentFiles(agent, relayID)
+	installAgentFiles(agent, aiAgentInstanceID)
 
-	s := &Session{
-		relayID:   relayID,
-		agent:     agent,
-		project:   proj,
-		cwd:       cwd,
-		deviceID:  devID,
-		startedAt: time.Now(),
-		promptCh:  make(chan byte, 32),
-		daemon:    d,
+	s := &AgentInstance{
+		aiAgentInstanceID: aiAgentInstanceID,
+		agent:             agent,
+		project:           proj,
+		cwd:               cwd,
+		deviceID:          devID,
+		startedAt:         time.Now(),
+		promptCh:          make(chan byte, 32),
+		daemon:            d,
 	}
 
 	// Write connect PID file (skipped for detached spawns — that file is a
 	// marker for `greenlight connect` clients).
 	if !req.Detached {
-		s.connectPidFile = writeConnectPid(relayID, agent, cwd)
+		s.connectPidFile = writeConnectPid(aiAgentInstanceID, agent, cwd)
 	}
 
 	// Create bridge file
-	s.bridgePath = filepath.Join(os.TempDir(), "greenlight-bridge-"+relayID)
+	s.bridgePath = filepath.Join(os.TempDir(), "greenlight-bridge-"+aiAgentInstanceID)
 	if f, err := os.Create(s.bridgePath); err == nil {
 		f.Close()
 	}
 
-	exportEnvs := buildExportEnvs(devID, relayID, proj, s.bridgePath, agent)
-	command, cmdArgs, interpose, err := setupInterpose(agent, command, cmdArgs, relayID, cwd, exportEnvs)
+	exportEnvs := buildExportEnvs(devID, aiAgentInstanceID, proj, s.bridgePath, agent)
+	command, cmdArgs, interpose, err := setupInterpose(agent, command, cmdArgs, aiAgentInstanceID, cwd, exportEnvs)
 	if err != nil {
 		s.cleanup()
 		return nil, fmt.Errorf("interpose setup failed: %w", err)
@@ -164,7 +167,7 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	s.interposeClean = interpose.SockCleanup
 	s.interposeRelay = interpose.Relay
 
-	// Create the relay (PTY only, no per-session WebSocket) in daemon mode
+	// Create the relay (PTY only, no per-instance WebSocket) in daemon mode
 	r, err := NewDaemon(command, cmdArgs, exportEnvs, cwd, req.Winsize, req.Env)
 	if err != nil {
 		s.cleanup()
@@ -172,7 +175,7 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	}
 	s.relay = r
 
-	// Register this session with the daemon's shared WebSocket
+	// Register this instance with the daemon's shared WebSocket
 	killFunc := func() {
 		if r.cmd.Process != nil {
 			r.killed = true
@@ -180,18 +183,18 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		}
 	}
 	if d.daemonWS != nil {
-		sw := d.daemonWS.RegisterSession(relayID, r.Inject, killFunc)
-		sw.project = proj
-		sw.agent = agentServerName(agent)
-		sw.cwd = cwd
-		sw.version = version
-		r.wsConn = sw
+		aw := d.daemonWS.RegisterAgentInstance(aiAgentInstanceID, r.Inject, killFunc)
+		aw.project = proj
+		aw.agent = agentServerName(agent)
+		aw.cwd = cwd
+		aw.version = version
+		r.wsConn = aw
 
-		// Start bridge tailer using the session's WS handle
+		// Start bridge tailer using the instance's WS handle
 		s.bridgeDone = make(chan struct{})
 		s.bridgeFinished = make(chan struct{})
 		go func() {
-			tailBridge(s.bridgePath, sw, s.bridgeDone, agentServerName(agent))
+			tailBridge(s.bridgePath, aw, s.bridgeDone, agentServerName(agent))
 			close(s.bridgeFinished)
 		}()
 	}
@@ -203,7 +206,7 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	startTime := time.Now()
 	var transcriptCtx context.Context
 	transcriptCtx, s.transcriptCancel = context.WithCancel(context.Background())
-	go startTranscriptStreamer(transcriptCtx, agent, relayID, setup.AgentSessionID, s.bridgePath, cwd, startTime)
+	go startTranscriptStreamer(transcriptCtx, agent, aiAgentInstanceID, setup.AgentSessionID, s.bridgePath, cwd, startTime)
 
 	// Note: don't start the relay yet — wait until a client attaches
 	// so no PTY output is lost. runRelay() is called from AttachClient.
@@ -211,20 +214,17 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	return s, nil
 }
 
-// runRelay runs the PTY child process. When it exits, the session is done.
-func (s *Session) runRelay() {
+// runRelay runs the PTY child process. When it exits, the instance is done.
+func (s *AgentInstance) runRelay() {
 	err := s.relay.RunDaemon()
 
 	s.transcriptCancel()
-	killStreamer(s.relayID)
+	killStreamer(s.aiAgentInstanceID)
 
 	if s.bridgeDone != nil {
 		close(s.bridgeDone)
 		<-s.bridgeFinished
 	}
-
-	// Persist session state for potential future resume/wake
-	saveSessionRecord(s)
 
 	// Send exit frame to attached client
 	s.clientMu.Lock()
@@ -240,12 +240,12 @@ func (s *Session) runRelay() {
 		writeFrame(client, frameExit, exitData)
 	}
 
-	log.Printf("daemon: session %s relay exited (err=%v)", s.relayID, err)
+	log.Printf("daemon: agent instance %s relay exited (err=%v)", s.aiAgentInstanceID, err)
 }
 
 // AttachClient enters the binary I/O relay phase with the given client connection.
-// Blocks until the client disconnects or the session ends.
-func (s *Session) AttachClient(conn net.Conn) {
+// Blocks until the client disconnects or the instance ends.
+func (s *AgentInstance) AttachClient(conn net.Conn) {
 	s.clientMu.Lock()
 	s.client = conn
 	s.clientMu.Unlock()
@@ -291,7 +291,9 @@ func (s *Session) AttachClient(conn net.Conn) {
 			}
 
 		case frameSignal:
-			var sig struct{ Signal string `json:"signal"` }
+			var sig struct {
+				Signal string `json:"signal"`
+			}
 			if json.Unmarshal(payload, &sig) == nil && s.relay.cmd.Process != nil {
 				switch sig.Signal {
 				case "INT":
@@ -316,8 +318,8 @@ func (s *Session) AttachClient(conn net.Conn) {
 	}
 }
 
-// Stop terminates the session, killing the child process and cleaning up.
-func (s *Session) Stop() {
+// Stop terminates the instance, killing the child process and cleaning up.
+func (s *AgentInstance) Stop() {
 	if s.relay != nil && s.relay.cmd != nil && s.relay.cmd.Process != nil {
 		s.relay.cmd.Process.Signal(syscall.SIGTERM)
 		// Give it a moment, then force kill
@@ -331,8 +333,8 @@ func (s *Session) Stop() {
 	s.cleanup()
 }
 
-// cleanup removes session-specific files and resources.
-func (s *Session) cleanup() {
+// cleanup removes instance-specific files and resources.
+func (s *AgentInstance) cleanup() {
 	if s.interposeClean != nil {
 		s.interposeClean()
 	}
@@ -353,8 +355,8 @@ func (s *Session) cleanup() {
 
 	// Notify server and unregister from daemon's shared WebSocket
 	if s.daemon != nil && s.daemon.daemonWS != nil {
-		s.daemon.daemonWS.EndSession(s.relayID)
-		s.daemon.daemonWS.UnregisterSession(s.relayID)
+		s.daemon.daemonWS.DisconnectAgentInstance(s.aiAgentInstanceID)
+		s.daemon.daemonWS.UnregisterAgentInstance(s.aiAgentInstanceID)
 	}
 }
 

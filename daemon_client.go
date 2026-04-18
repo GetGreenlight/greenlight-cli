@@ -21,7 +21,7 @@ import (
 // connectViaDaemon is the thin client implementation of `greenlight connect`.
 // It sends a connect request to the daemon, then enters raw mode and proxies
 // terminal I/O over the IPC socket using binary framing.
-func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
+func connectViaDaemon(agent, deviceID, project, cwd string) {
 	conn, err := net.DialTimeout("unix", daemonSockPath(), 5*time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "greenlight: cannot connect to daemon: %v\n", err)
@@ -50,7 +50,6 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 		Agent:    agent,
 		DeviceID: deviceID,
 		Project:  project,
-		Resume:   resume,
 		Cwd:      cwd,
 		Winsize:  winsize,
 		Env:      clientEnv,
@@ -81,7 +80,7 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 		os.Exit(1)
 	}
 
-	if resp.Type != "session_started" {
+	if resp.Type != "agent_instance_started" {
 		fmt.Fprintf(os.Stderr, "greenlight: unexpected response: %s\n", resp.Type)
 		os.Exit(1)
 	}

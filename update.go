@@ -47,7 +47,6 @@ func runUpdate(args []string) {
 			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stderr, "greenlight: updated from %s\n", updateURL)
-		printResumeInstructions()
 		return
 	}
 
@@ -85,9 +84,6 @@ func runUpdate(args []string) {
 	}
 
 	fmt.Fprintf(os.Stderr, "greenlight: updated to %s\n", latestVersion)
-
-	// Show resume instructions for any sessions that were saved
-	printResumeInstructions()
 }
 
 // fetchLatestTag resolves the latest release tag from GitHub.
@@ -239,27 +235,23 @@ func applyUpdate(downloadURL, newVersion string, force bool) error {
 }
 
 // shutdownDaemonForUpdate sends an update_shutdown IPC message to the daemon.
-// If there are active sessions and force is false, it prompts the user.
+// If there are active instances and force is false, it prompts the user.
 func shutdownDaemonForUpdate(force bool) error {
-	sessions, err := sendUpdateShutdown(force)
+	instances, err := sendUpdateShutdown(force)
 	if err != nil {
 		return err
 	}
 
-	if sessions == nil {
-		// Daemon accepted shutdown (no active sessions or force was true)
+	if instances == nil {
+		// Daemon accepted shutdown (no active instances or force was true)
 		return waitForDaemonExit()
 	}
 
-	// Active sessions — show them and prompt
-	fmt.Fprintf(os.Stderr, "greenlight: %d active session(s) will be terminated:\n", len(sessions))
-	for _, s := range sessions {
-		tag := "(not resumable)"
-		if s.Resumable {
-			tag = "(resumable)"
-		}
-		fmt.Fprintf(os.Stderr, "  %-10s %-8s %-20s %s %s\n",
-			s.SessionID[:min(10, len(s.SessionID))], s.Agent, s.Project, s.Cwd, tag)
+	// Active instances — show them and prompt
+	fmt.Fprintf(os.Stderr, "greenlight: %d active instance(s) will be terminated:\n", len(instances))
+	for _, s := range instances {
+		fmt.Fprintf(os.Stderr, "  %-10s %-8s %-20s %s\n",
+			s.AIAgentInstanceID[:min(10, len(s.AIAgentInstanceID))], s.Agent, s.Project, s.Cwd)
 	}
 	fmt.Fprintf(os.Stderr, "Continue? [y/N] ")
 
@@ -278,8 +270,8 @@ func shutdownDaemonForUpdate(force bool) error {
 }
 
 // sendUpdateShutdown sends the update_shutdown IPC message and returns
-// the active sessions list (nil if the daemon accepted shutdown).
-func sendUpdateShutdown(force bool) ([]sessionInfo, error) {
+// the active instances list (nil if the daemon accepted shutdown).
+func sendUpdateShutdown(force bool) ([]instanceInfo, error) {
 	conn, err := net.DialTimeout("unix", daemonSockPath(), 2*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("cannot connect to daemon: %w", err)
@@ -305,8 +297,8 @@ func sendUpdateShutdown(force bool) ([]sessionInfo, error) {
 	case "ok":
 		fmt.Fprintf(os.Stderr, "greenlight: daemon shutting down for update...\n")
 		return nil, nil
-	case "active_sessions":
-		return resp.Sessions, nil
+	case "active_instances":
+		return resp.Instances, nil
 	case "error":
 		return nil, fmt.Errorf("daemon error: %s", resp.Message)
 	default:
@@ -330,33 +322,4 @@ func waitForDaemonExit() error {
 		}
 	}
 	return fmt.Errorf("daemon did not exit in time")
-}
-
-// printResumeInstructions shows how to resume sessions that were saved
-// during the update shutdown.
-func printResumeInstructions() {
-	records := listSessionRecords()
-	if len(records) == 0 {
-		return
-	}
-
-	// Only show recent records (saved in the last minute, i.e. from this update)
-	var resumable []sessionRecord
-	cutoff := time.Now().Add(-1 * time.Minute)
-	for _, rec := range records {
-		if t, err := time.Parse(time.RFC3339, rec.EndedAt); err == nil && t.After(cutoff) {
-			if agentSupportsResume(rec.Agent) {
-				resumable = append(resumable, rec)
-			}
-		}
-	}
-	if len(resumable) == 0 {
-		return
-	}
-
-	fmt.Fprintf(os.Stderr, "\ngreenlight: resume sessions with:\n")
-	for _, rec := range resumable {
-		fmt.Fprintf(os.Stderr, "  greenlight connect --resume %s   # %s / %s\n",
-			rec.ConversationID, rec.Agent, rec.Project)
-	}
 }

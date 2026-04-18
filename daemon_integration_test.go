@@ -85,8 +85,8 @@ func TestIntegration_Daemon_StartStop(t *testing.T) {
 	if resp.Type != "status_response" {
 		t.Errorf("expected status_response, got %q", resp.Type)
 	}
-	if len(resp.Sessions) != 0 {
-		t.Errorf("expected 0 sessions, got %d", len(resp.Sessions))
+	if len(resp.Instances) != 0 {
+		t.Errorf("expected 0 sessions, got %d", len(resp.Instances))
 	}
 
 	// Stop via IPC

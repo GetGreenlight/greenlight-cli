@@ -24,49 +24,47 @@ import (
 
 // IPC frame types for binary-framed PTY I/O between client and daemon.
 const (
-	frameStdin         byte = 0x01
-	frameStdout        byte = 0x02
-	frameResize        byte = 0x03
-	frameSignal        byte = 0x04
-	frameExit          byte = 0x05
-	framePrompt        byte = 0x06
-	framePromptResp    byte = 0x07
-	framePromptCancel  byte = 0x08
+	frameStdin        byte = 0x01
+	frameStdout       byte = 0x02
+	frameResize       byte = 0x03
+	frameSignal       byte = 0x04
+	frameExit         byte = 0x05
+	framePrompt       byte = 0x06
+	framePromptResp   byte = 0x07
+	framePromptCancel byte = 0x08
 )
 
 // ipcRequest is the JSON control message sent by the client to the daemon.
 type ipcRequest struct {
-	Type      string            `json:"type"`               // connect, status, stop, update_shutdown, ws_request
+	Type      string            `json:"type"` // connect, status, stop, update_shutdown, ws_request
 	Agent     string            `json:"agent,omitempty"`
 	DeviceID  string            `json:"device_id,omitempty"`
 	Project   string            `json:"project,omitempty"`
-	Resume    string            `json:"resume,omitempty"`
 	Cwd       string            `json:"cwd,omitempty"`
 	Winsize   *ipcWinsize       `json:"winsize,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
 	Force     bool              `json:"force,omitempty"`
 	WSMsgType string            `json:"ws_msg_type,omitempty"` // for ws_request: the CRUD message type
 	WSData    json.RawMessage   `json:"ws_data,omitempty"`     // for ws_request: the payload
-	// Detached is set by the in-process spawnAgentSession path used by
-	// 'org agent create'. It tells newSession to skip prerequisites that
+	// Detached is set by the in-process spawnAgentInstance path used by
+	// 'org agent create'. It tells newAgentInstance to skip prerequisites that
 	// only make sense for client-attached connect sessions.
 	Detached bool `json:"-"`
-	// RelayID is an optional override used when the caller already has a
-	// stable identifier it wants to use as the session's relay_id (e.g.
-	// the ai_agent_instance_id). When empty, buildAgentCommand generates one.
-	RelayID string `json:"-"`
+	// AIAgentInstanceID is an optional override used when the caller already
+	// has a stable identifier it wants to use as the instance's ID (e.g. the
+	// row id from create_ai_agent_instance). When empty, buildAgentCommand
+	// generates one.
+	AIAgentInstanceID string `json:"-"`
 }
 
 // ipcResponse is the JSON control message sent by the daemon to the client.
 type ipcResponse struct {
-	Type      string          `json:"type"`                 // session_started, error, status_response, ok, ws_response
-	SessionID string          `json:"session_id,omitempty"`
-	RelayID   string          `json:"relay_id,omitempty"`
-	Message   string          `json:"message,omitempty"`
-	Version   string          `json:"version,omitempty"`
-	Sessions  []sessionInfo   `json:"sessions,omitempty"`
-	History   []sessionRecord `json:"history,omitempty"`
-	Data      json.RawMessage `json:"data,omitempty"` // for ws_response: the server response payload
+	Type              string          `json:"type"` // agent_instance_started, error, status_response, ok, ws_response
+	AIAgentInstanceID string          `json:"ai_agent_instance_id,omitempty"`
+	Message           string          `json:"message,omitempty"`
+	Version           string          `json:"version,omitempty"`
+	Instances         []instanceInfo  `json:"instances,omitempty"`
+	Data              json.RawMessage `json:"data,omitempty"` // for ws_response: the server response payload
 }
 
 type ipcWinsize struct {
@@ -74,25 +72,24 @@ type ipcWinsize struct {
 	Cols uint16 `json:"cols"`
 }
 
-type sessionInfo struct {
-	SessionID string `json:"session_id"`
-	Agent     string `json:"agent"`
-	Project   string `json:"project"`
-	Cwd       string `json:"cwd"`
-	StartedAt string `json:"started_at"`
-	Resumable bool   `json:"resumable,omitempty"`
+type instanceInfo struct {
+	AIAgentInstanceID string `json:"ai_agent_instance_id"`
+	Agent             string `json:"agent"`
+	Project           string `json:"project"`
+	Cwd               string `json:"cwd"`
+	StartedAt         string `json:"started_at"`
 }
 
-// Daemon manages the lifecycle of agent sessions and the IPC socket.
+// Daemon manages the lifecycle of agent instances and the IPC socket.
 type Daemon struct {
-	listener  net.Listener
-	sockPath  string
-	sessions  map[string]*Session
-	mu        sync.RWMutex
-	done      chan struct{}
-	wg        sync.WaitGroup
-	daemonWS    *DaemonWS // multiplexed WebSocket for all sessions + wake
-	sessionID   string    // daemon's own enrolled session ID
+	listener    net.Listener
+	sockPath    string
+	instances   map[string]*AgentInstance
+	mu          sync.RWMutex
+	done        chan struct{}
+	wg          sync.WaitGroup
+	daemonWS    *DaemonWS // multiplexed WebSocket for all instances
+	hostID      string    // daemon's registered host ID
 	humanUserID string    // resolved human_user ID
 }
 
@@ -220,7 +217,8 @@ func ensureDaemon(deviceIDFlag string) error {
 		exePath = resolved
 	}
 
-	// Resolve device ID and host ID, enrolling if this is the first run on this host
+	// Resolve device ID and host ID, registering the host if this is the
+	// first run on this machine.
 	var hostID, deviceID string
 	if wsURL != "" {
 		// Resolve device ID: flag > env > config (same priority as connect)
@@ -232,7 +230,7 @@ func ensureDaemon(deviceIDFlag string) error {
 			deviceID = readConfigValue("device_id")
 		}
 
-		// Use persisted host_id if available; otherwise generate and enroll
+		// Use persisted host_id if available; otherwise generate and register
 		hostID = readConfigValue("host_id")
 		if hostID == "" {
 			hostID = generateUUID()
@@ -242,26 +240,17 @@ func ensureDaemon(deviceIDFlag string) error {
 			}
 			hostname, _ := os.Hostname()
 
-			if deviceID != "" {
-				// Legacy flow: enroll host via device_id (requires phone approval)
-				fmt.Fprintf(os.Stderr, "greenlight: enrolling host (approve on your phone)...\n")
-				if err := enrollSession(baseURL, deviceID, hostID, "", "", "", hostname); err != nil {
-					return fmt.Errorf("host enrollment failed: %w", err)
-				}
-			} else {
-				// New flow: register host via user_id
-				userID := readConfigValue("user_id")
-				if userID == "" {
-					return fmt.Errorf("not registered — run 'greenlight register <email>' first")
-				}
-				ioDeviceID, err := registerHost(baseURL, userID, hostID, hostname)
-				if err != nil {
-					return fmt.Errorf("host registration failed: %w", err)
-				}
-				if ioDeviceID != "" {
-					if err := writeConfigValue("io_device_id", ioDeviceID); err != nil {
-						return fmt.Errorf("failed to persist io_device_id: %w", err)
-					}
+			userID := readConfigValue("user_id")
+			if userID == "" {
+				return fmt.Errorf("not registered — run 'greenlight register <email>' first")
+			}
+			ioDeviceID, err := registerHost(baseURL, userID, hostID, hostname)
+			if err != nil {
+				return fmt.Errorf("host registration failed: %w", err)
+			}
+			if ioDeviceID != "" {
+				if err := writeConfigValue("io_device_id", ioDeviceID); err != nil {
+					return fmt.Errorf("failed to persist io_device_id: %w", err)
 				}
 			}
 			if err := writeConfigValue("host_id", hostID); err != nil {
@@ -278,7 +267,7 @@ func ensureDaemon(deviceIDFlag string) error {
 	// Pass host ID and device ID to the daemon via env
 	if hostID != "" {
 		cmd.Env = append(os.Environ(),
-			"GREENLIGHT_DAEMON_SESSION_ID="+hostID,
+			"GREENLIGHT_DAEMON_HOST_ID="+hostID,
 			"GREENLIGHT_DEVICE_ID="+deviceID,
 		)
 	}
@@ -325,10 +314,10 @@ func runDaemonForeground() {
 	}
 
 	d := &Daemon{
-		listener: listener,
-		sockPath: sockPath,
-		sessions: make(map[string]*Session),
-		done:     make(chan struct{}),
+		listener:  listener,
+		sockPath:  sockPath,
+		instances: make(map[string]*AgentInstance),
+		done:      make(chan struct{}),
 	}
 
 	// Write PID file
@@ -340,16 +329,16 @@ func runDaemonForeground() {
 
 	// Resolve human_user ID and host ID (set by ensureDaemon after registration, or from config)
 	d.humanUserID = readConfigValue("user_id")
-	d.sessionID = os.Getenv("GREENLIGHT_DAEMON_SESSION_ID")
-	if d.sessionID == "" && d.humanUserID != "" {
-		d.sessionID = readConfigValue("host_id")
+	d.hostID = os.Getenv("GREENLIGHT_DAEMON_HOST_ID")
+	if d.hostID == "" && d.humanUserID != "" {
+		d.hostID = readConfigValue("host_id")
 	}
-	if d.sessionID != "" {
-		log.Printf("daemon: using host %s", d.sessionID)
+	if d.hostID != "" {
+		log.Printf("daemon: using host %s", d.hostID)
 	}
 
-	// Start the multiplexed WebSocket — all sessions share this connection
-	// for transcript, permissions, and control messages (wake, kill).
+	// Start the multiplexed WebSocket — all instances share this connection
+	// for transcript, permissions, and control messages.
 	d.startDaemonWS()
 
 	// Handle shutdown signals
@@ -388,7 +377,7 @@ func (d *Daemon) Run() {
 	}
 }
 
-// Shutdown gracefully stops the daemon, terminating all sessions.
+// Shutdown gracefully stops the daemon, terminating all instances.
 func (d *Daemon) Shutdown() {
 	close(d.done)
 	d.listener.Close()
@@ -399,62 +388,47 @@ func (d *Daemon) Shutdown() {
 		d.daemonWS.Close()
 	}
 
-	// Stop all sessions (this includes detached spawn sessions from
-	// 'org agent create' since they live in d.sessions too).
+	// Stop all instances (this includes detached spawn instances from
+	// 'org agent create' since they live in d.instances too).
 	d.mu.Lock()
-	for id, s := range d.sessions {
-		log.Printf("daemon: stopping session %s", id)
+	for id, s := range d.instances {
+		log.Printf("daemon: stopping agent instance %s", id)
 		s.Stop()
 	}
 	d.mu.Unlock()
 }
 
 // handleUpdateShutdown handles the update_shutdown IPC request.
-// If there are active sessions and force is false, it reports them back.
-// Otherwise it saves session records and shuts down.
+// If there are active instances and force is false, it reports them back.
+// Otherwise it shuts down.
 func (d *Daemon) handleUpdateShutdown(conn net.Conn, req ipcRequest) {
 	d.mu.RLock()
-	count := len(d.sessions)
+	count := len(d.instances)
 	d.mu.RUnlock()
 
 	if count > 0 && !req.Force {
-		// Report active sessions so the update command can prompt the user
+		// Report active instances so the update command can prompt the user
 		d.mu.RLock()
-		var sessions []sessionInfo
-		for _, s := range d.sessions {
-			resumable := agentSupportsResume(s.agent) && lookupConversationID(s.relayID) != ""
-			sessions = append(sessions, sessionInfo{
-				SessionID: s.relayID,
-				Agent:     s.agent,
-				Project:   s.project,
-				Cwd:       s.cwd,
-				StartedAt: s.startedAt.Format(time.RFC3339),
-				Resumable: resumable,
+		var instances []instanceInfo
+		for _, s := range d.instances {
+			instances = append(instances, instanceInfo{
+				AIAgentInstanceID: s.aiAgentInstanceID,
+				Agent:             s.agent,
+				Project:           s.project,
+				Cwd:               s.cwd,
+				StartedAt:         s.startedAt.Format(time.RFC3339),
 			})
 		}
 		d.mu.RUnlock()
-		sendControl(conn, ipcResponse{Type: "active_sessions", Sessions: sessions})
+		sendControl(conn, ipcResponse{Type: "active_instances", Instances: instances})
 		return
 	}
 
 	sendControl(conn, ipcResponse{Type: "ok"})
-	go d.ShutdownForUpdate()
+	go d.Shutdown()
 }
 
-// ShutdownForUpdate saves session records before stopping sessions,
-// so they can be resumed after the update.
-func (d *Daemon) ShutdownForUpdate() {
-	// Save session records before killing sessions
-	d.mu.RLock()
-	for _, s := range d.sessions {
-		saveSessionRecord(s)
-	}
-	d.mu.RUnlock()
-
-	d.Shutdown()
-}
-
-// startDaemonWS starts the multiplexed WebSocket connection. All sessions
+// startDaemonWS starts the multiplexed WebSocket connection. All instances
 // share this single connection for transcript, permissions, and control messages.
 // The connection is maintained with auto-reconnect for the lifetime of the daemon.
 func (d *Daemon) startDaemonWS() {
@@ -468,8 +442,8 @@ func (d *Daemon) startDaemonWS() {
 		return
 	}
 
-	if d.sessionID == "" {
-		log.Printf("daemon: no enrolled session, WebSocket disabled")
+	if d.hostID == "" {
+		log.Printf("daemon: no host ID configured, WebSocket disabled")
 		return
 	}
 
@@ -482,7 +456,7 @@ func (d *Daemon) startDaemonWS() {
 	// Replace /ws/relay path with /ws/daemon
 	dialURL.Path = strings.TrimSuffix(dialURL.Path, "/relay") + "/daemon"
 	q := dialURL.Query()
-	q.Set("session_id", d.sessionID)
+	q.Set("host_id", d.hostID)
 	if hostname, err := os.Hostname(); err == nil {
 		q.Set("hostname", hostname)
 	}
@@ -492,15 +466,12 @@ func (d *Daemon) startDaemonWS() {
 	dialURL.RawQuery = q.Encode()
 
 	d.daemonWS = NewDaemonWS(dialURL.String(), d.humanUserID)
-	d.daemonWS.SetWakeHandler(func(data []byte) {
-		d.handleWakeMessage(data)
-	})
 
 	go d.daemonWS.Run()
 
 	// Wait for the WebSocket to connect before accepting IPC connections,
-	// so the first session_start message is sent over a live connection
-	// rather than queued and drained later.
+	// so the first agent_instance_connect message is sent over a live
+	// connection rather than queued and drained later.
 	for i := 0; i < 100; i++ {
 		if d.daemonWS.IsConnected() {
 			break
@@ -510,7 +481,7 @@ func (d *Daemon) startDaemonWS() {
 	if !d.daemonWS.IsConnected() {
 		log.Printf("daemon: WARNING WebSocket not connected after 5s, proceeding anyway")
 	}
-	log.Printf("daemon: WebSocket started (human_user %s, session %s)", d.humanUserID, d.sessionID)
+	log.Printf("daemon: WebSocket started (human_user %s, host %s)", d.humanUserID, d.hostID)
 }
 
 // handleConn processes a single client connection.
@@ -544,8 +515,6 @@ func (d *Daemon) handleConn(conn net.Conn) {
 		go d.Shutdown()
 	case "update_shutdown":
 		d.handleUpdateShutdown(conn, req)
-	case "session_history":
-		sendControl(conn, ipcResponse{Type: "session_history_response", History: listSessionRecords()})
 	case "ws_request":
 		d.handleWSRequest(conn, req)
 	default:
@@ -573,9 +542,9 @@ func (d *Daemon) handleWSRequest(conn net.Conn, req ipcRequest) {
 	}
 
 	// update_ai_agent_instance with a non-empty retired_at is the "stop"
-	// path: terminate the local session (if any) before forwarding the row
-	// update. Sessions from spawnAgentSession are keyed by ai_agent_instance_id
-	// in d.sessions, so the lookup is direct.
+	// path: terminate the local instance (if any) before forwarding the row
+	// update. Instances from spawnAgentInstance are keyed by
+	// ai_agent_instance_id in d.instances, so the lookup is direct.
 	if req.WSMsgType == "update_ai_agent_instance" {
 		var probe struct {
 			ID        string `json:"id"`
@@ -583,11 +552,11 @@ func (d *Daemon) handleWSRequest(conn net.Conn, req ipcRequest) {
 		}
 		if json.Unmarshal(req.WSData, &probe) == nil && probe.RetiredAt != "" && probe.ID != "" {
 			d.mu.Lock()
-			s := d.sessions[probe.ID]
-			delete(d.sessions, probe.ID)
+			s := d.instances[probe.ID]
+			delete(d.instances, probe.ID)
 			d.mu.Unlock()
 			if s != nil {
-				log.Printf("daemon: stopping spawned agent session %s on retire", probe.ID)
+				log.Printf("daemon: stopping spawned agent instance %s on retire", probe.ID)
 				s.Stop()
 			}
 		}
@@ -602,58 +571,57 @@ func (d *Daemon) handleWSRequest(conn net.Conn, req ipcRequest) {
 	sendControl(conn, ipcResponse{Type: "ws_response", Data: json.RawMessage(resp)})
 }
 
-// handleStatus sends session information back to the client.
+// handleStatus sends instance information back to the client.
 func (d *Daemon) handleStatus(conn net.Conn) {
 	d.mu.RLock()
-	var sessions []sessionInfo
-	for _, s := range d.sessions {
-		sessions = append(sessions, sessionInfo{
-			SessionID: s.relayID,
-			Agent:     s.agent,
-			Project:   s.project,
-			Cwd:       s.cwd,
-			StartedAt: s.startedAt.Format(time.RFC3339),
+	var instances []instanceInfo
+	for _, s := range d.instances {
+		instances = append(instances, instanceInfo{
+			AIAgentInstanceID: s.aiAgentInstanceID,
+			Agent:             s.agent,
+			Project:           s.project,
+			Cwd:               s.cwd,
+			StartedAt:         s.startedAt.Format(time.RFC3339),
 		})
 	}
 	d.mu.RUnlock()
 
 	sendControl(conn, ipcResponse{
-		Type:     "status_response",
-		Sessions: sessions,
+		Type:      "status_response",
+		Instances: instances,
 	})
 }
 
-// handleConnect creates a new session and enters the I/O relay phase.
+// handleConnect creates a new agent instance and enters the I/O relay phase.
 func (d *Daemon) handleConnect(conn net.Conn, req ipcRequest) {
 	// TODO: re-add an IPC identity guard once the connect IPC carries human_user_id.
 
-	s, err := d.newSession(req)
+	s, err := d.newAgentInstance(req)
 	if err != nil {
 		sendControl(conn, ipcResponse{Type: "error", Message: err.Error()})
 		return
 	}
 
 	d.mu.Lock()
-	d.sessions[s.relayID] = s
+	d.instances[s.aiAgentInstanceID] = s
 	d.mu.Unlock()
 
 	// Send success response to client
 	sendControl(conn, ipcResponse{
-		Type:      "session_started",
-		SessionID: s.relayID,
-		RelayID:   s.relayID,
+		Type:              "agent_instance_started",
+		AIAgentInstanceID: s.aiAgentInstanceID,
 	})
 
-	// Enter binary I/O relay phase — blocks until session ends or client disconnects
+	// Enter binary I/O relay phase — blocks until instance ends or client disconnects
 	s.AttachClient(conn)
 
-	// Clean up session after client disconnects
+	// Clean up instance after client disconnects
 	d.mu.Lock()
-	delete(d.sessions, s.relayID)
+	delete(d.instances, s.aiAgentInstanceID)
 	d.mu.Unlock()
 
 	s.Stop()
-	log.Printf("daemon: session %s ended", s.relayID)
+	log.Printf("daemon: agent instance %s ended", s.aiAgentInstanceID)
 }
 
 // sendControl writes a JSON control message followed by a newline.
@@ -698,14 +666,14 @@ func readFrame(r io.Reader) (byte, []byte, error) {
 }
 
 func stopDaemon() {
-	// Check for active sessions first
+	// Check for active instances first
 	conn, err := net.DialTimeout("unix", daemonSockPath(), 2*time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "greenlight: daemon is not running\n")
 		return
 	}
 
-	// Query status to check for active sessions
+	// Query status to check for active instances
 	statusMsg, _ := json.Marshal(ipcRequest{Type: "status"})
 	statusMsg = append(statusMsg, '\n')
 	conn.Write(statusMsg)
@@ -716,11 +684,11 @@ func stopDaemon() {
 
 	if err == nil {
 		var status ipcResponse
-		if json.Unmarshal(line, &status) == nil && len(status.Sessions) > 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: %d active session(s) will be terminated:\n", len(status.Sessions))
-			for _, s := range status.Sessions {
+		if json.Unmarshal(line, &status) == nil && len(status.Instances) > 0 {
+			fmt.Fprintf(os.Stderr, "greenlight: %d active instance(s) will be terminated:\n", len(status.Instances))
+			for _, s := range status.Instances {
 				fmt.Fprintf(os.Stderr, "  %-10s %-8s %s\n",
-					s.SessionID[:min(10, len(s.SessionID))], s.Agent, s.Project)
+					s.AIAgentInstanceID[:min(10, len(s.AIAgentInstanceID))], s.Agent, s.Project)
 			}
 			fmt.Fprintf(os.Stderr, "Continue? [y/N] ")
 			var answer string
@@ -784,12 +752,12 @@ func daemonStatus() {
 	pidData, _ := os.ReadFile(daemonPidPath())
 	pid := strings.TrimSpace(string(pidData))
 
-	if len(resp.Sessions) == 0 {
-		fmt.Fprintf(os.Stderr, "greenlight: daemon is running (pid %s), no active sessions\n", pid)
+	if len(resp.Instances) == 0 {
+		fmt.Fprintf(os.Stderr, "greenlight: daemon is running (pid %s), no active instances\n", pid)
 	} else {
-		fmt.Fprintf(os.Stderr, "greenlight: daemon is running (pid %s), %d active session(s):\n", pid, len(resp.Sessions))
-		for _, s := range resp.Sessions {
-			fmt.Fprintf(os.Stderr, "  %s  %s  %s  %s\n", s.SessionID[:8], s.Agent, s.Project, s.Cwd)
+		fmt.Fprintf(os.Stderr, "greenlight: daemon is running (pid %s), %d active instance(s):\n", pid, len(resp.Instances))
+		for _, s := range resp.Instances {
+			fmt.Fprintf(os.Stderr, "  %s  %s  %s  %s\n", s.AIAgentInstanceID[:8], s.Agent, s.Project, s.Cwd)
 		}
 	}
 }

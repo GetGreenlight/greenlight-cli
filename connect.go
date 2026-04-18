@@ -20,7 +20,6 @@ import (
 
 func runConnect(args []string) {
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
-	resume := fs.String("resume", "", "Resume a previous session by ID")
 	deviceID := fs.String("device-id", "", "Device ID (overrides GREENLIGHT_DEVICE_ID env and config file)")
 	project := fs.String("project", "", "Project name (overrides GREENLIGHT_PROJECT env and config file)")
 	agentFlag := fs.String("agent", "", "Agent runtime: claude, codex, copilot, cursor, gemini, pi (overrides GREENLIGHT_AGENT env and config file)")
@@ -33,30 +32,6 @@ func runConnect(args []string) {
 	if wsURL == "" {
 		fmt.Fprintf(os.Stderr, "greenlight: no relay server URL configured (binary must be built with -ldflags)\n")
 		os.Exit(1)
-	}
-
-	// When resuming, load the saved session record and use its values
-	// as defaults. Explicit flags still override.
-	if *resume != "" {
-		if rec, err := loadSessionRecord(*resume); err == nil {
-			if *agentFlag == "" {
-				*agentFlag = rec.Agent
-			}
-			if *deviceID == "" {
-				*deviceID = rec.DeviceID
-			}
-			if *project == "" {
-				*project = rec.Project
-			}
-			// cd to the session's original directory if we're not already there
-			if rec.Cwd != "" {
-				if cwd, err := os.Getwd(); err == nil && cwd != rec.Cwd {
-					if err := os.Chdir(rec.Cwd); err == nil {
-						log.Printf("Resumed session cwd: %s", rec.Cwd)
-					}
-				}
-			}
-		}
 	}
 
 	// Resolve device ID early so the daemon can verify it matches
@@ -72,20 +47,20 @@ func runConnect(args []string) {
 		os.Exit(1)
 	}
 	cwd, _ := os.Getwd()
-	connectViaDaemon(*agentFlag, resolvedDeviceID, *project, *resume, cwd)
+	connectViaDaemon(*agentFlag, resolvedDeviceID, *project, cwd)
 }
 
 // startTranscriptStreamer polls for the agent's transcript file to appear,
 // then spawns `greenlight stream --bridge` to tail it into the bridge file.
-func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID, bridgePath, cwd string, notBefore time.Time) {
-	// Poll until the agent creates its transcript file or the session ends.
+func startTranscriptStreamer(ctx context.Context, agent, aiAgentInstanceID, agentSessionID, bridgePath, cwd string, notBefore time.Time) {
+	// Poll until the agent creates its transcript file or the instance ends.
 	// Some agents (e.g. Codex) only create the file on first user prompt,
-	// so we poll for the entire session lifetime rather than using a fixed cap.
+	// so we poll for the entire instance lifetime rather than using a fixed cap.
 	var transcriptPath string
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("Transcript: session ended before transcript file appeared for %s", agent)
+			log.Printf("Transcript: instance ended before transcript file appeared for %s", agent)
 			return
 		case <-time.After(500 * time.Millisecond):
 		}
@@ -118,28 +93,6 @@ func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID
 	}
 	log.Printf("Transcript: found %s", transcriptPath)
 
-	// Extract conversation ID from transcript path and persist the
-	// conversation→relay mapping so resumed sessions reuse the same relay ID.
-	// Copilot uses the parent directory name (session UUID) since all
-	// transcripts are named "events.jsonl". Gemini stores the session UUID
-	// in the JSON body (sessionId field). Other agents use the filename.
-	var convID string
-	switch agent {
-	case "copilot":
-		convID = filepath.Base(filepath.Dir(transcriptPath))
-	case "gemini":
-		convID = extractGeminiSessionID(transcriptPath)
-	default:
-		base := filepath.Base(transcriptPath)
-		if ext := filepath.Ext(base); ext != "" {
-			convID = strings.TrimSuffix(base, ext)
-		}
-	}
-	if convID != "" {
-		saveRelayID(convID, relayID)
-		log.Printf("Transcript: saved relay mapping %s → %s", convID, relayID)
-	}
-
 	exePath, err := os.Executable()
 	if err != nil {
 		log.Printf("Transcript: failed to resolve executable: %v", err)
@@ -151,8 +104,7 @@ func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID
 
 	cmdArgs := []string{"stream",
 		"--transcript", transcriptPath,
-		"--session-id", relayID,
-		"--relay-id", relayID,
+		"--agent-instance-id", aiAgentInstanceID,
 		"--bridge", bridgePath,
 		"--agent", agent,
 	}
@@ -168,15 +120,15 @@ func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID
 	}
 
 	// Write PID file so future hooks don't spawn a duplicate
-	pidFile := filepath.Join(os.TempDir(), "greenlight-stream-"+relayID+".pid")
-	os.WriteFile(pidFile, []byte(fmt.Sprintf("%d %s", cmd.Process.Pid, relayID)), 0644)
+	pidFile := filepath.Join(os.TempDir(), "greenlight-stream-"+aiAgentInstanceID+".pid")
+	os.WriteFile(pidFile, []byte(fmt.Sprintf("%d %s", cmd.Process.Pid, aiAgentInstanceID)), 0644)
 
 	cmd.Process.Release()
 }
 
 // killStreamer kills the detached transcript streamer process and removes its PID file.
-func killStreamer(relayID string) {
-	pidFile := filepath.Join(os.TempDir(), "greenlight-stream-"+relayID+".pid")
+func killStreamer(aiAgentInstanceID string) {
+	pidFile := filepath.Join(os.TempDir(), "greenlight-stream-"+aiAgentInstanceID+".pid")
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
 		return
@@ -198,8 +150,8 @@ func killStreamer(relayID string) {
 
 // writeConnectPid writes a PID file for this connect session.
 // Format: <pid> <agent> <cwd>
-func writeConnectPid(relayID, agent, cwd string) string {
-	p := filepath.Join(os.TempDir(), "greenlight-connect-"+relayID+".pid")
+func writeConnectPid(id, agent, cwd string) string {
+	p := filepath.Join(os.TempDir(), "greenlight-connect-"+id+".pid")
 	os.WriteFile(p, []byte(fmt.Sprintf("%d %s %s", os.Getpid(), agent, cwd)), 0644)
 	return p
 }

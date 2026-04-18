@@ -18,8 +18,7 @@ import (
 func runStream(args []string) {
 	fs := flag.NewFlagSet("stream", flag.ExitOnError)
 	transcriptPath := fs.String("transcript", "", "Path to transcript file")
-	sessionID := fs.String("session-id", "", "Session ID")
-	relayID := fs.String("relay-id", "", "Relay ID")
+	agentInstanceID := fs.String("agent-instance-id", "", "AI agent instance ID")
 	bridge := fs.String("bridge", "", "Bridge file path")
 	agentFlag := fs.String("agent", "", "Agent runtime (claude, gemini)")
 	fs.Parse(args)
@@ -28,14 +27,14 @@ func runStream(args []string) {
 		os.Exit(1)
 	}
 
-	if *transcriptPath == "" || *sessionID == "" || *bridge == "" {
-		fmt.Fprintf(os.Stderr, "greenlight stream: missing required flags (--transcript, --session-id, --bridge)\n")
+	if *transcriptPath == "" || *agentInstanceID == "" || *bridge == "" {
+		fmt.Fprintf(os.Stderr, "greenlight stream: missing required flags (--transcript, --agent-instance-id, --bridge)\n")
 		os.Exit(1)
 	}
 
 	// Write PID file for the hook to check
-	pidFile := filepath.Join(os.TempDir(), "greenlight-stream-"+*sessionID+".pid")
-	os.WriteFile(pidFile, []byte(fmt.Sprintf("%d %s", os.Getpid(), *relayID)), 0644)
+	pidFile := filepath.Join(os.TempDir(), "greenlight-stream-"+*agentInstanceID+".pid")
+	os.WriteFile(pidFile, []byte(fmt.Sprintf("%d %s", os.Getpid(), *agentInstanceID)), 0644)
 	defer os.Remove(pidFile)
 
 	agent := *agentFlag
@@ -55,13 +54,13 @@ func runStream(args []string) {
 	case "pi":
 		streamPiBridge(*transcriptPath, *bridge)
 	default:
-		streamToBridge(*transcriptPath, *sessionID, *bridge)
+		streamToBridge(*transcriptPath, *agentInstanceID, *bridge)
 	}
 }
 
 // streamToBridge tails a JSONL transcript file and appends each line to the bridge file.
-// The bridge file is tailed by `connect` which sends lines over the relay WebSocket.
-func streamToBridge(transcriptPath, sessionID, bridgePath string) {
+// The bridge file is tailed by `connect` which sends lines over the daemon WebSocket.
+func streamToBridge(transcriptPath, agentInstanceID, bridgePath string) {
 	// Wait for transcript file to appear (may not exist at SessionStart)
 	var f *os.File
 	for i := 0; i < 300; i++ { // up to 30 seconds

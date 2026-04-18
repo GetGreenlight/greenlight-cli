@@ -3,19 +3,17 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"sync"
 	"time"
 )
 
-// WSConn is the interface used by sessions for WebSocket communication.
-// Both *WSClient (direct) and *sessionWS (multiplexed via daemon) implement it.
+// WSConn is the interface used by agent instances for WebSocket communication.
+// Both *WSClient (direct) and *agentWS (multiplexed via daemon) implement it.
 type WSConn interface {
 	SendText(data []byte)
 	Send(data []byte)
@@ -24,34 +22,33 @@ type WSConn interface {
 	Close()
 }
 
-// DaemonWS is a multiplexed WebSocket owned by the daemon. All sessions
+// DaemonWS is a multiplexed WebSocket owned by the daemon. All agent instances
 // share this single connection. Outgoing text frames are tagged with
-// relay_id so the server can route them. Incoming messages are dispatched
-// to the correct session by relay_id.
+// ai_agent_instance_id so the server can route them. Incoming messages are
+// dispatched to the correct agent instance by ai_agent_instance_id.
 type DaemonWS struct {
-	ws          *WSClient
-	wakeHandler func([]byte)
+	ws *WSClient
 
-	mu       sync.RWMutex
-	sessions map[string]*sessionWS // relay_id → session handle
+	mu        sync.RWMutex
+	instances map[string]*agentWS // ai_agent_instance_id → agent instance handle
 }
 
-// sessionWS is a per-session handle to the shared daemon WebSocket.
-type sessionWS struct {
-	daemon     *DaemonWS
-	relayID    string
-	project    string
-	agent      string
-	cwd        string
-	version    string
-	injectFunc func([]byte) error
-	killFunc   func()
+// agentWS is a per-agent-instance handle to the shared daemon WebSocket.
+type agentWS struct {
+	daemon            *DaemonWS
+	aiAgentInstanceID string
+	project           string
+	agent             string
+	cwd               string
+	version           string
+	injectFunc        func([]byte) error
+	killFunc          func()
 }
 
 // NewDaemonWS creates a multiplexed WebSocket connection.
 func NewDaemonWS(url, humanUserID string) *DaemonWS {
 	d := &DaemonWS{
-		sessions: make(map[string]*sessionWS),
+		instances: make(map[string]*agentWS),
 	}
 
 	// The inject callback receives text frames from the server (input injection).
@@ -63,15 +60,15 @@ func NewDaemonWS(url, humanUserID string) *DaemonWS {
 	}
 
 	// Catch any text frame not matched by routePermissionResponse.
-	// The server tags phone input with relay_id so we can route to
-	// the correct session's PTY.
+	// The server tags phone input with ai_agent_instance_id so we can route
+	// to the correct agent instance's PTY.
 	d.ws.textFrameFunc = func(data []byte) bool {
 		return d.handleTextFrame(data)
 	}
 
-	// On reconnect, re-register all active sessions with the server.
+	// On reconnect, re-register all active agent instances with the server.
 	d.ws.reconnectFunc = func() {
-		d.reregisterSessions()
+		d.reregisterAgentInstances()
 	}
 
 	return d
@@ -92,124 +89,118 @@ func (d *DaemonWS) IsConnected() bool {
 	return d.ws.IsConnected()
 }
 
-// SetWakeHandler sets the handler for wake control messages.
-func (d *DaemonWS) SetWakeHandler(fn func([]byte)) {
-	d.wakeHandler = fn
-}
-
-// RegisterSession creates a per-session handle for the given relay ID.
-func (d *DaemonWS) RegisterSession(relayID string, injectFunc func([]byte) error, killFunc func()) *sessionWS {
-	sw := &sessionWS{
-		daemon:     d,
-		relayID:    relayID,
-		injectFunc: injectFunc,
-		killFunc:   killFunc,
+// RegisterAgentInstance creates a per-instance handle for the given ID.
+func (d *DaemonWS) RegisterAgentInstance(id string, injectFunc func([]byte) error, killFunc func()) *agentWS {
+	aw := &agentWS{
+		daemon:            d,
+		aiAgentInstanceID: id,
+		injectFunc:        injectFunc,
+		killFunc:          killFunc,
 	}
 	d.mu.Lock()
-	d.sessions[relayID] = sw
+	d.instances[id] = aw
 	d.mu.Unlock()
-	log.Printf("daemon-ws: registered session %s", relayID)
-	return sw
+	log.Printf("daemon-ws: registered agent instance %s", id)
+	return aw
 }
 
-// UnregisterSession removes a session handle.
-func (d *DaemonWS) UnregisterSession(relayID string) {
+// UnregisterAgentInstance removes an agent instance handle.
+func (d *DaemonWS) UnregisterAgentInstance(id string) {
 	d.mu.Lock()
-	delete(d.sessions, relayID)
+	delete(d.instances, id)
 	d.mu.Unlock()
-	log.Printf("daemon-ws: unregistered session %s", relayID)
+	log.Printf("daemon-ws: unregistered agent instance %s", id)
 }
 
-// StartSession sends a session_start message over the daemon WS and waits
-// for the server to acknowledge it. This replaces HTTP enrollment for
-// sessions within an already-enrolled daemon.
-func (d *DaemonWS) StartSession(relayID, project, agent, cwd, version string) error {
-	// Store metadata on the session handle so we can re-register on reconnect
+// ConnectAgentInstance sends an agent_instance_connect message over the daemon
+// WS and waits for the server to acknowledge it. This replaces HTTP enrollment
+// for agent instances within an already-enrolled daemon.
+func (d *DaemonWS) ConnectAgentInstance(id, project, agent, cwd, version string) error {
+	// Store metadata on the instance handle so we can re-register on reconnect
 	d.mu.RLock()
-	sw := d.sessions[relayID]
+	aw := d.instances[id]
 	d.mu.RUnlock()
-	if sw != nil {
-		sw.project = project
-		sw.agent = agent
-		sw.cwd = cwd
-		sw.version = version
+	if aw != nil {
+		aw.project = project
+		aw.agent = agent
+		aw.cwd = cwd
+		aw.version = version
 	}
 
-	return d.sendSessionStart(relayID, project, agent, cwd, version)
+	return d.sendAgentInstanceConnect(id, agent, version)
 }
 
-// sendSessionStart sends a session_start message and waits for ack.
-func (d *DaemonWS) sendSessionStart(relayID, project, agent, cwd, version string) error {
-	hostname, _ := os.Hostname()
+// sendAgentInstanceConnect sends an agent_instance_connect message and waits
+// for ack. Server resolves project/cwd from the DB row — we just send the agent
+// harness name and client version.
+func (d *DaemonWS) sendAgentInstanceConnect(id, agent, version string) error {
 	data := map[string]string{
-		"project": project,
 		"agent":   agent,
-		"cwd":     cwd,
 		"version": version,
 	}
 	dataBytes, _ := json.Marshal(data)
 
 	msg := map[string]interface{}{
-		"type":     "session_start",
-		"relay_id": relayID,
-		"hostname": hostname,
-		"data":     json.RawMessage(dataBytes),
+		"type":                 "agent_instance_connect",
+		"ai_agent_instance_id": id,
+		"data":                 json.RawMessage(dataBytes),
 	}
 	msgBytes, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
 
-	// Register a pending response keyed by relay_id so we can wait for the ack
-	ch := d.ws.RegisterPending("session_start:" + relayID)
-	defer d.ws.RemovePending("session_start:" + relayID)
+	// Register a pending response keyed by instance ID so we can wait for the ack
+	ch := d.ws.RegisterPending("agent_instance_connect:" + id)
+	defer d.ws.RemovePending("agent_instance_connect:" + id)
 
 	d.ws.SendText(msgBytes)
 
 	select {
 	case resp := <-ch:
 		var ack struct {
-			Type    string `json:"type"`
-			Project string `json:"project"`
-			Error   string `json:"error,omitempty"`
+			Type  string `json:"type"`
+			Error string `json:"error,omitempty"`
 		}
 		if json.Unmarshal(resp, &ack) == nil && ack.Error != "" {
-			return fmt.Errorf("session_start failed: %s", ack.Error)
+			return fmt.Errorf("agent_instance_connect failed: %s", ack.Error)
 		}
 		return nil
 	case <-time.After(10 * time.Second):
-		return fmt.Errorf("session_start timed out")
+		return fmt.Errorf("agent_instance_connect timed out")
 	}
 }
 
-// reregisterSessions re-sends session_start for all active sessions after a reconnect.
-func (d *DaemonWS) reregisterSessions() {
+// reregisterAgentInstances re-sends agent_instance_connect for all active
+// instances after a reconnect.
+func (d *DaemonWS) reregisterAgentInstances() {
 	d.mu.RLock()
-	sessions := make([]*sessionWS, 0, len(d.sessions))
-	for _, sw := range d.sessions {
-		sessions = append(sessions, sw)
+	instances := make([]*agentWS, 0, len(d.instances))
+	for _, aw := range d.instances {
+		instances = append(instances, aw)
 	}
 	d.mu.RUnlock()
 
-	if len(sessions) == 0 {
+	if len(instances) == 0 {
 		return
 	}
 
-	log.Printf("daemon-ws: reconnected, re-registering %d session(s)", len(sessions))
-	for _, sw := range sessions {
-		if err := d.sendSessionStart(sw.relayID, sw.project, sw.agent, sw.cwd, sw.version); err != nil {
-			log.Printf("daemon-ws: failed to re-register session %s: %v", sw.relayID, err)
+	log.Printf("daemon-ws: reconnected, re-registering %d agent instance(s)", len(instances))
+	for _, aw := range instances {
+		if err := d.sendAgentInstanceConnect(aw.aiAgentInstanceID, aw.agent, aw.version); err != nil {
+			log.Printf("daemon-ws: failed to re-register agent instance %s: %v", aw.aiAgentInstanceID, err)
 		} else {
-			log.Printf("daemon-ws: re-registered session %s", sw.relayID)
+			log.Printf("daemon-ws: re-registered agent instance %s", aw.aiAgentInstanceID)
 		}
 	}
 }
 
-// EndSession sends a session_end message over the daemon WS.
-func (d *DaemonWS) EndSession(relayID string) {
+// DisconnectAgentInstance sends an agent_instance_disconnect message over the
+// daemon WS.
+func (d *DaemonWS) DisconnectAgentInstance(id string) {
 	msg := map[string]string{
-		"type":     "session_end",
-		"relay_id": relayID,
+		"type":                 "agent_instance_disconnect",
+		"ai_agent_instance_id": id,
 	}
 	msgBytes, _ := json.Marshal(msg)
 	d.ws.SendText(msgBytes)
@@ -218,8 +209,8 @@ func (d *DaemonWS) EndSession(relayID string) {
 // routeControlFrame handles binary control frames from the server.
 func (d *DaemonWS) routeControlFrame(data []byte) {
 	var msg struct {
-		Type    string `json:"type"`
-		RelayID string `json:"relay_id"`
+		Type              string `json:"type"`
+		AIAgentInstanceID string `json:"ai_agent_instance_id"`
 	}
 	if json.Unmarshal(data, &msg) != nil {
 		return
@@ -228,48 +219,46 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 	switch msg.Type {
 	case "kill":
 		d.mu.RLock()
-		sw := d.sessions[msg.RelayID]
+		aw := d.instances[msg.AIAgentInstanceID]
 		d.mu.RUnlock()
-		if sw != nil && sw.killFunc != nil {
-			log.Printf("daemon-ws: kill session %s", msg.RelayID)
-			sw.killFunc()
+		if aw != nil && aw.killFunc != nil {
+			log.Printf("daemon-ws: kill agent instance %s", msg.AIAgentInstanceID)
+			aw.killFunc()
 		}
-	case "wake":
-		if d.wakeHandler != nil {
-			d.wakeHandler(data)
-		}
-	case "session_history":
-		d.handleSessionHistory()
-	case "session_transcript":
-		d.handleSessionTranscript(data)
+	case "delete_agent_instance":
+		// Drop any local state for this instance — the server has deleted the row.
+		d.mu.Lock()
+		delete(d.instances, msg.AIAgentInstanceID)
+		d.mu.Unlock()
+		log.Printf("daemon-ws: deleted agent instance %s", msg.AIAgentInstanceID)
 	default:
 		log.Printf("daemon-ws: unknown control message: %s", msg.Type)
 	}
 }
 
 // handleTextFrame handles text frames not matched by routePermissionResponse.
-// It tries to parse JSON with a relay_id and route the content as PTY input
-// to the matching session. Returns true if the frame was consumed.
+// It tries to parse JSON with an ai_agent_instance_id and route the content as
+// PTY input to the matching instance. Returns true if the frame was consumed.
 func (d *DaemonWS) handleTextFrame(data []byte) bool {
 	if len(data) == 0 || data[0] != '{' {
 		return false
 	}
 
 	var msg struct {
-		Type    string `json:"type"`
-		RelayID string `json:"relay_id"`
-		Text    string `json:"text"`
-		Data    string `json:"data"`
+		Type              string `json:"type"`
+		AIAgentInstanceID string `json:"ai_agent_instance_id"`
+		Text              string `json:"text"`
+		Data              string `json:"data"`
 	}
-	if json.Unmarshal(data, &msg) != nil || msg.RelayID == "" {
+	if json.Unmarshal(data, &msg) != nil || msg.AIAgentInstanceID == "" {
 		return false
 	}
 
 	d.mu.RLock()
-	sw := d.sessions[msg.RelayID]
+	aw := d.instances[msg.AIAgentInstanceID]
 	d.mu.RUnlock()
-	if sw == nil || sw.injectFunc == nil {
-		log.Printf("daemon-ws: text frame for unknown session %s", msg.RelayID)
+	if aw == nil || aw.injectFunc == nil {
+		log.Printf("daemon-ws: text frame for unknown agent instance %s", msg.AIAgentInstanceID)
 		return false
 	}
 
@@ -279,7 +268,7 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 		content = msg.Data
 	}
 	if content == "" {
-		log.Printf("daemon-ws: text frame for %s has no text/data field", msg.RelayID)
+		log.Printf("daemon-ws: text frame for %s has no text/data field", msg.AIAgentInstanceID)
 		return true // consumed but nothing to inject
 	}
 
@@ -295,14 +284,16 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 	// After decoding, check if the payload is a known control message
 	// (e.g. {"type":"kill"}) and route it instead of injecting as text.
 	if len(decoded) > 0 && decoded[0] == '{' {
-		var ctrl struct{ Type string `json:"type"` }
+		var ctrl struct {
+			Type string `json:"type"`
+		}
 		if json.Unmarshal(decoded, &ctrl) == nil {
 			switch ctrl.Type {
-			case "kill", "wake", "session_history", "session_transcript":
+			case "kill", "delete_agent_instance":
 				var full map[string]interface{}
 				if json.Unmarshal(decoded, &full) == nil {
-					if _, ok := full["relay_id"]; !ok {
-						full["relay_id"] = msg.RelayID
+					if _, ok := full["ai_agent_instance_id"]; !ok {
+						full["ai_agent_instance_id"] = msg.AIAgentInstanceID
 					}
 					if tagged, err := json.Marshal(full); err == nil {
 						d.routeControlFrame(tagged)
@@ -322,149 +313,56 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 	needsSubmit := len(text) < len(input) || len(text) > 0
 
 	if len(text) > 0 {
-		if err := sw.injectFunc(text); err != nil {
-			log.Printf("daemon-ws: inject error for %s: %v", msg.RelayID, err)
+		if err := aw.injectFunc(text); err != nil {
+			log.Printf("daemon-ws: inject error for %s: %v", msg.AIAgentInstanceID, err)
 		}
 	}
 
 	if needsSubmit {
 		time.Sleep(50 * time.Millisecond)
-		if err := sw.injectFunc([]byte{'\r'}); err != nil {
-			log.Printf("daemon-ws: inject error for %s: %v", msg.RelayID, err)
+		if err := aw.injectFunc([]byte{'\r'}); err != nil {
+			log.Printf("daemon-ws: inject error for %s: %v", msg.AIAgentInstanceID, err)
 		}
 	}
 
 	return true
 }
 
-// handleSessionHistory loads persisted session records and sends them back to the server.
-func (d *DaemonWS) handleSessionHistory() {
-	records := listSessionRecords()
-	log.Printf("daemon-ws: session_history request, returning %d records", len(records))
-
-	resp := map[string]interface{}{
-		"type":    "session_history_response",
-		"entries": records,
-	}
-	data, err := json.Marshal(resp)
-	if err != nil {
-		log.Printf("daemon-ws: failed to marshal session history: %v", err)
-		return
-	}
-	d.ws.SendText(data)
-}
-
-// handleSessionTranscript loads a transcript file for a session and sends the entries back.
-func (d *DaemonWS) handleSessionTranscript(data []byte) {
-	var msg struct {
-		RelayID string `json:"relay_id"`
-	}
-	if json.Unmarshal(data, &msg) != nil || msg.RelayID == "" {
-		log.Printf("daemon-ws: session_transcript missing relay_id")
-		d.sendTranscriptResponse("", nil, "missing relay_id")
-		return
-	}
-
-	convID := lookupConversationID(msg.RelayID)
-	if convID == "" {
-		log.Printf("daemon-ws: session_transcript: no conversation ID for relay %s", msg.RelayID)
-		d.sendTranscriptResponse(msg.RelayID, nil, "no conversation ID found for relay_id")
-		return
-	}
-
-	rec, err := loadSessionRecord(convID)
-	if err != nil {
-		log.Printf("daemon-ws: session_transcript: failed to load session record %s: %v", convID, err)
-		d.sendTranscriptResponse(msg.RelayID, nil, fmt.Sprintf("session record not found: %v", err))
-		return
-	}
-
-	transcriptPath := deriveTranscriptPath(rec.Agent, convID, rec.Cwd)
-	if transcriptPath == "" {
-		log.Printf("daemon-ws: session_transcript: could not derive transcript path for %s", convID)
-		d.sendTranscriptResponse(msg.RelayID, nil, "could not derive transcript path")
-		return
-	}
-
-	f, err := os.Open(transcriptPath)
-	if err != nil {
-		log.Printf("daemon-ws: session_transcript: failed to open %s: %v", transcriptPath, err)
-		d.sendTranscriptResponse(msg.RelayID, nil, fmt.Sprintf("transcript file not found: %v", err))
-		return
-	}
-	defer f.Close()
-
-	var entries []json.RawMessage
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		// Validate it's valid JSON before including
-		if json.Valid(line) {
-			entries = append(entries, json.RawMessage(append([]byte(nil), line...)))
-		}
-	}
-
-	log.Printf("daemon-ws: session_transcript for relay %s: %d entries", msg.RelayID, len(entries))
-	d.sendTranscriptResponse(msg.RelayID, entries, "")
-}
-
-// sendTranscriptResponse sends a session_transcript_response message.
-func (d *DaemonWS) sendTranscriptResponse(relayID string, entries []json.RawMessage, message string) {
-	resp := map[string]interface{}{
-		"type":     "session_transcript_response",
-		"relay_id": relayID,
-		"entries":  entries,
-	}
-	if message != "" {
-		resp["message"] = message
-	}
-	data, err := json.Marshal(resp)
-	if err != nil {
-		log.Printf("daemon-ws: failed to marshal transcript response: %v", err)
-		return
-	}
-	d.ws.SendText(data)
-}
-
-// SendText sends a text frame tagged with the session's relay_id.
-func (sw *sessionWS) SendText(data []byte) {
+// SendText sends a text frame tagged with the instance's ai_agent_instance_id.
+func (aw *agentWS) SendText(data []byte) {
 	var msg map[string]interface{}
 	if json.Unmarshal(data, &msg) != nil {
 		return
 	}
 
-	// For permission requests, relay_id goes inside "data" (server expects it there).
+	// For permission requests, the ID goes inside "data" (server expects it there).
 	// For everything else (transcript, cancel), it goes at the top level.
 	msgType, _ := msg["type"].(string)
 	if msgType == "permission_request" {
 		if dataField, ok := msg["data"].(map[string]interface{}); ok {
-			dataField["relay_id"] = sw.relayID
+			dataField["ai_agent_instance_id"] = aw.aiAgentInstanceID
 		}
 	}
-	msg["relay_id"] = sw.relayID
+	msg["ai_agent_instance_id"] = aw.aiAgentInstanceID
 
 	tagged, err := json.Marshal(msg)
 	if err != nil {
 		return
 	}
-	sw.daemon.ws.SendText(tagged)
+	aw.daemon.ws.SendText(tagged)
 }
 
 // RegisterPending creates a channel for receiving a permission response.
-func (sw *sessionWS) RegisterPending(requestID string) <-chan []byte {
-	return sw.daemon.ws.RegisterPending(requestID)
+func (aw *agentWS) RegisterPending(requestID string) <-chan []byte {
+	return aw.daemon.ws.RegisterPending(requestID)
 }
 
 // RemovePending removes a pending request channel.
-func (sw *sessionWS) RemovePending(requestID string) {
-	sw.daemon.ws.RemovePending(requestID)
+func (aw *agentWS) RemovePending(requestID string) {
+	aw.daemon.ws.RemovePending(requestID)
 }
 
-// SendWSRequest sends a organization CRUD request to the server over the daemon
+// SendWSRequest sends an organization CRUD request to the server over the daemon
 // WebSocket and waits for the response. correlationID must be unique per call.
 func (d *DaemonWS) SendWSRequest(correlationID, msgType string, data json.RawMessage) ([]byte, error) {
 	msg := map[string]interface{}{
@@ -494,7 +392,7 @@ func (d *DaemonWS) SendWSRequest(correlationID, msgType string, data json.RawMes
 }
 
 // Send is a no-op — PTY output is not sent to the server.
-func (sw *sessionWS) Send(data []byte) {}
+func (aw *agentWS) Send(data []byte) {}
 
 // Close is a no-op — the shared connection is owned by the daemon.
-func (sw *sessionWS) Close() {}
+func (aw *agentWS) Close() {}

@@ -31,9 +31,9 @@ func localAgentForHarness(harness string) string {
 // handleCreateAgentInstance is the special-cased ws_request handler for
 // create_ai_agent_instance. It pre-checks that the agent's working directory
 // lives on this host (aborting before any row is created if not), forwards the
-// create message to the server, then spawns a full session for the agent that
-// shows up alongside `greenlight connect` sessions in relay_sessions and is
-// reachable from the phone/talk TUI.
+// create message to the server, then spawns a full instance for the agent that
+// shows up alongside `greenlight connect` instances and is reachable from the
+// phone/talk TUI.
 func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 	// Parse the create payload to find the organization_position_id we need
 	// to pre-check. The server validates everything else.
@@ -99,11 +99,11 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 	}
 
 	// Hard-fail before creating the row if the agent isn't local to this daemon.
-	if wdWrap.WorkingDirectory.HostID != d.sessionID {
+	if wdWrap.WorkingDirectory.HostID != d.hostID {
 		sendControl(conn, ipcResponse{
 			Type: "error",
 			Message: fmt.Sprintf("agent's working_directory is on host %s but this daemon is %s — refusing to create",
-				wdWrap.WorkingDirectory.HostID, d.sessionID),
+				wdWrap.WorkingDirectory.HostID, d.hostID),
 		})
 		return
 	}
@@ -136,8 +136,8 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 		return
 	}
 
-	// Step 4: spawn a full session (relay-registered, transcript-streamed).
-	pid, spawnErr := d.spawnAgentSession(
+	// Step 4: spawn a full instance (relay-registered, transcript-streamed).
+	pid, spawnErr := d.spawnAgentInstance(
 		createWrap.AIAgentInstance.ID,
 		createWrap.AIAgentInstance.Name,
 		createWrap.SpawnContext.HarnessName,
@@ -153,8 +153,8 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 		out["spawn_error"] = spawnErr.Error()
 	} else {
 		out["spawn"] = map[string]interface{}{
-			"pid":      pid,
-			"relay_id": createWrap.AIAgentInstance.ID,
+			"pid":                  pid,
+			"ai_agent_instance_id": createWrap.AIAgentInstance.ID,
 		}
 		// Mark agent as active in the DB
 		d.updateAgentStatus(createWrap.AIAgentInstance.ID, "active")
@@ -167,63 +167,63 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 	sendControl(conn, ipcResponse{Type: "ws_response", Data: merged})
 }
 
-// spawnAgentSession creates a fully-functioning agent session — same daemon
-// machinery `greenlight connect` uses (interpose hook, transcript bridge,
-// relay registration with the server) — but detached: no client is attached,
-// the PTY runs immediately in the background, and the session shows up in
-// relay_sessions so the phone and `greenlight talk` can talk to it.
+// spawnAgentInstance creates a fully-functioning agent instance — same daemon
+// machinery `greenlight connect` uses (interpose hook, transcript bridge, WS
+// registration with the server) — but detached: no client is attached, the PTY
+// runs immediately in the background, and the instance shows up so the phone
+// and `greenlight talk` can talk to it.
 //
-// The session's relay_id is the ai_agent_instance_id, so 'org agent stop'
-// can find and terminate it without any extra bookkeeping.
-func (d *Daemon) spawnAgentSession(agentInstanceID, agentName, harnessName, cwd string) (int, error) {
+// The instance's id is the ai_agent_instance_id, so 'org agent stop' can find
+// and terminate it without any extra bookkeeping.
+func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName, harnessName, cwd string) (int, error) {
 	localAgent := localAgentForHarness(harnessName)
 	if localAgent == "" {
 		return 0, fmt.Errorf("no local CLI binary maps to harness %q", harnessName)
 	}
 
 	req := ipcRequest{
-		Type:     "connect",
-		Agent:    localAgent,
-		Project:  agentName, // surface the agent name as the "project" pill
-		Cwd:      cwd,
-		Detached: true,
-		RelayID:  agentInstanceID,
-		Winsize:  &ipcWinsize{Rows: 40, Cols: 120},
+		Type:              "connect",
+		Agent:             localAgent,
+		Project:           agentName, // surface the agent name as the "project" pill
+		Cwd:               cwd,
+		Detached:          true,
+		AIAgentInstanceID: agentInstanceID,
+		Winsize:           &ipcWinsize{Rows: 40, Cols: 120},
 	}
-	s, err := d.newSession(req)
+	s, err := d.newAgentInstance(req)
 	if err != nil {
 		return 0, err
 	}
 
 	d.mu.Lock()
-	d.sessions[s.relayID] = s
+	d.instances[s.aiAgentInstanceID] = s
 	d.mu.Unlock()
 
 	// Run the relay PTY in the background. When the child exits, drop the
-	// session from the registry and run cleanup. No client is attached, so
+	// instance from the registry and run cleanup. No client is attached, so
 	// the PTY drain inside runRelay discards any output the child writes
 	// directly to its terminal (transcripts still flow via the streamer).
 	go func() {
 		s.runRelay()
 		d.mu.Lock()
-		_, wasTracked := d.sessions[s.relayID]
-		delete(d.sessions, s.relayID)
+		_, wasTracked := d.instances[s.aiAgentInstanceID]
+		delete(d.instances, s.aiAgentInstanceID)
 		d.mu.Unlock()
 		s.Stop()
-		// Only mark inactive if the session was still tracked — if it was
+		// Only mark inactive if the instance was still tracked — if it was
 		// already removed (e.g., by a retire/stop), the caller set the
 		// status to 'retired' and we shouldn't overwrite it.
 		if wasTracked {
 			d.updateAgentStatus(agentInstanceID, "inactive")
 		}
-		log.Printf("daemon: spawned agent session %s ended", s.relayID)
+		log.Printf("daemon: spawned agent instance %s ended", s.aiAgentInstanceID)
 	}()
 
 	pid := 0
 	if s.relay != nil && s.relay.cmd != nil && s.relay.cmd.Process != nil {
 		pid = s.relay.cmd.Process.Pid
 	}
-	log.Printf("daemon: spawned agent session %s (pid %d, cwd %s)", s.relayID, pid, cwd)
+	log.Printf("daemon: spawned agent instance %s (pid %d, cwd %s)", s.aiAgentInstanceID, pid, cwd)
 	return pid, nil
 }
 
@@ -233,7 +233,7 @@ func (d *Daemon) updateAgentStatus(agentInstanceID, status string) {
 	data, _ := json.Marshal(map[string]string{
 		"id":      agentInstanceID,
 		"status":  status,
-		"host_id": d.sessionID,
+		"host_id": d.hostID,
 	})
 	_, err := d.daemonWS.SendWSRequest(generateUUID(), "update_ai_agent_instance", data)
 	if err != nil {

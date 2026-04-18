@@ -5,8 +5,6 @@
 //   go run scripts/test-ws-client.go -device-id <id> [-server ws://localhost:8080] <command> [args...]
 //
 // Commands:
-//   history                    - request session history from daemon
-//   wake <relay-id>            - wake a past session by relay ID
 //   listen                     - connect and print all messages (for debugging)
 
 package main
@@ -36,7 +34,7 @@ func main() {
 
 	args := flag.Args()
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "Commands: history, wake <relay-id>, listen\n")
+		fmt.Fprintf(os.Stderr, "Commands: listen\n")
 		os.Exit(1)
 	}
 
@@ -55,55 +53,12 @@ func main() {
 	defer conn.Close(websocket.StatusNormalClosure, "done")
 
 	switch args[0] {
-	case "history":
-		sendAndWait(ctx, conn, map[string]string{"type": "session_history"}, "session_history_response")
-	case "wake":
-		if len(args) < 2 {
-			fmt.Fprintf(os.Stderr, "Usage: wake <relay-id>\n")
-			os.Exit(1)
-		}
-		sendAndWait(ctx, conn, map[string]string{"type": "wake_session", "relay_id": args[1]}, "wake_result")
 	case "listen":
 		listen(ctx, conn)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", args[0])
 		os.Exit(1)
 	}
-}
-
-func sendAndWait(ctx context.Context, conn *websocket.Conn, msg interface{}, expectType string) {
-	data, _ := json.Marshal(msg)
-	fmt.Fprintf(os.Stderr, "Sending: %s\n", string(data))
-
-	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
-		fmt.Fprintf(os.Stderr, "Write error: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Read messages until we get the expected type (skip server's initial messages)
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		_, resp, err := conn.Read(ctx)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Read error: %v\n", err)
-			os.Exit(1)
-		}
-
-		var envelope struct {
-			Type string `json:"type"`
-		}
-		if json.Unmarshal(resp, &envelope) == nil && envelope.Type == expectType {
-			// Pretty print
-			var pretty map[string]interface{}
-			json.Unmarshal(resp, &pretty)
-			out, _ := json.MarshalIndent(pretty, "", "  ")
-			fmt.Println(string(out))
-			return
-		}
-		fmt.Fprintf(os.Stderr, "  (skipping %s message)\n", envelope.Type)
-	}
-	fmt.Fprintf(os.Stderr, "Timeout waiting for %s\n", expectType)
-	os.Exit(1)
 }
 
 func listen(ctx context.Context, conn *websocket.Conn) {

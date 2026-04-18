@@ -12,10 +12,10 @@ import (
 
 // AgentSetup holds the results of building the agent command and session IDs.
 type AgentSetup struct {
-	Command        string
-	Args           []string
-	AgentSessionID string // deterministic session ID for transcript path derivation
-	RelayID        string // relay ID for server communication
+	Command           string
+	Args              []string
+	AgentSessionID    string // deterministic session ID for transcript path derivation
+	AIAgentInstanceID string // ai_agent_instance_id for server communication
 }
 
 // InterposeSetup holds interpose library state for the caller to manage cleanup.
@@ -27,42 +27,28 @@ type InterposeSetup struct {
 	Relay        *interposeRelay // per-session relay reference; caller must call SetRelay
 }
 
-// buildAgentCommand constructs the agent binary command, flags, session IDs,
-// and relay ID. This is the shared core between direct and daemon modes.
-func buildAgentCommand(agent, resume string) (*AgentSetup, error) {
+// buildAgentCommand constructs the agent binary command, flags, and IDs.
+// Every invocation produces a fresh ai_agent_instance_id — resume is gone.
+func buildAgentCommand(agent string) (*AgentSetup, error) {
 	command := agentBinary(agent)
 	var cmdArgs []string
 
-	// Generate a session ID for agents that support it. This lets us
-	// derive the transcript path deterministically, avoiding the bug where
-	// two concurrent sessions in the same CWD pick up the same transcript.
-	var agentSessionID string
-	if resume != "" {
-		// Resuming: the conversation ID IS the agent session ID
-		agentSessionID = resume
-	} else if agent == "claude" || agent == "copilot" || agent == "pi" {
-		agentSessionID = generateUUID()
-	}
+	// Every connect creates a fresh ai_agent_instance_id.
+	aiAgentInstanceID := generateUUID()
 
-	// Agent-specific resume handling
-	if resume != "" {
-		switch agent {
-		case "codex":
-			// Codex uses a subcommand: codex resume <id>
-			cmdArgs = append(cmdArgs, "resume", resume)
-		case "pi":
-			return nil, fmt.Errorf("--resume is not supported for pi; use /resume to pick a session once pi starts")
-		default:
-			cmdArgs = append(cmdArgs, "--resume", resume)
-		}
+	// Generate an agent-internal session ID for agents that support it. This
+	// lets us derive the transcript path deterministically, avoiding the bug
+	// where two concurrent sessions in the same CWD pick up the same transcript.
+	var agentSessionID string
+	if agent == "claude" || agent == "copilot" || agent == "pi" {
+		agentSessionID = generateUUID()
 	}
 
 	// Agent-specific flags
 	switch agent {
 	case "copilot":
 		cmdArgs = append(cmdArgs, "--allow-all")
-		// Set session ID for new sessions (--resume also works for new Copilot sessions)
-		if resume == "" && agentSessionID != "" {
+		if agentSessionID != "" {
 			cmdArgs = append(cmdArgs, "--resume", agentSessionID)
 		}
 	case "cursor":
@@ -73,7 +59,7 @@ func buildAgentCommand(agent, resume string) (*AgentSetup, error) {
 		cmdArgs = append(cmdArgs, "--dangerously-bypass-approvals-and-sandbox")
 	case "claude":
 		cmdArgs = append(cmdArgs, "--dangerously-skip-permissions", "--append-system-prompt", greenlightSystemPrompt)
-		if resume == "" && agentSessionID != "" {
+		if agentSessionID != "" {
 			cmdArgs = append(cmdArgs, "--session-id", agentSessionID)
 		}
 	case "pi":
@@ -86,24 +72,16 @@ func buildAgentCommand(agent, resume string) (*AgentSetup, error) {
 		}
 	}
 
-	// Generate relay ID (reuse for resumed conversations)
-	var relayID string
-	if resume != "" {
-		relayID = lookupRelayID(resume)
-	}
-	if relayID == "" {
-		relayID = generateUUID()
-	}
-	// For Codex, use relay ID as the sentinel for transcript matching.
+	// For Codex, use ai_agent_instance_id as the sentinel for transcript matching.
 	if agent == "codex" {
-		agentSessionID = relayID
+		agentSessionID = aiAgentInstanceID
 	}
 
 	return &AgentSetup{
-		Command:        command,
-		Args:           cmdArgs,
-		AgentSessionID: agentSessionID,
-		RelayID:        relayID,
+		Command:           command,
+		Args:              cmdArgs,
+		AgentSessionID:    agentSessionID,
+		AIAgentInstanceID: aiAgentInstanceID,
 	}, nil
 }
 
@@ -139,22 +117,22 @@ func resolveDeviceAndProject(deviceID, project, cwd string) (string, string, err
 }
 
 // installAgentFiles installs agent-specific instruction files for agents that use them.
-func installAgentFiles(agent, relayID string) {
+func installAgentFiles(agent, aiAgentInstanceID string) {
 	if agent == "gemini" || agent == "copilot" || agent == "cursor" || agent == "codex" {
-		if err := installGreenlightInstructions(agent, relayID); err != nil {
+		if err := installGreenlightInstructions(agent, aiAgentInstanceID); err != nil {
 			log.Printf("Warning: failed to install agent instructions: %v", err)
 		}
 	}
 }
 
 // buildExportEnvs returns the GREENLIGHT_* environment variables for the child process.
-func buildExportEnvs(devID, relayID, proj, bridgePath, agent string) map[string]string {
+func buildExportEnvs(devID, aiAgentInstanceID, proj, bridgePath, agent string) map[string]string {
 	return map[string]string{
-		"GREENLIGHT_DEVICE_ID":  devID,
-		"GREENLIGHT_SESSION_ID": relayID,
-		"GREENLIGHT_PROJECT":    proj,
-		"GREENLIGHT_BRIDGE":     bridgePath,
-		"GREENLIGHT_AGENT":      agent,
+		"GREENLIGHT_DEVICE_ID":        devID,
+		"GREENLIGHT_AGENT_INSTANCE_ID": aiAgentInstanceID,
+		"GREENLIGHT_PROJECT":          proj,
+		"GREENLIGHT_BRIDGE":           bridgePath,
+		"GREENLIGHT_AGENT":            agent,
 	}
 }
 
@@ -162,7 +140,7 @@ func buildExportEnvs(devID, relayID, proj, bridgePath, agent string) map[string]
 // LD_PRELOAD), starts the interpose socket, and resolves script commands.
 // It modifies exportEnvs in place and may modify command/args for dyld.
 // Returns the resolved command, args, and interpose state for cleanup.
-func setupInterpose(agent, command string, args []string, relayID string, cwd string, exportEnvs map[string]string) (string, []string, *InterposeSetup, error) {
+func setupInterpose(agent, command string, args []string, aiAgentInstanceID string, cwd string, exportEnvs map[string]string) (string, []string, *InterposeSetup, error) {
 	setup := &InterposeSetup{}
 	setup.LibPath, setup.LibExtracted = findInterposeLib()
 	if setup.LibPath == "" {
@@ -170,7 +148,7 @@ func setupInterpose(agent, command string, args []string, relayID string, cwd st
 	}
 
 	if version == "" || version == "dev" {
-		logPath := filepath.Join(os.TempDir(), "greenlight-interpose-"+relayID+".log")
+		logPath := filepath.Join(os.TempDir(), "greenlight-interpose-"+aiAgentInstanceID+".log")
 		exportEnvs["GREENLIGHT_INTERPOSE_LOG"] = logPath
 	}
 
@@ -196,7 +174,7 @@ func setupInterpose(agent, command string, args []string, relayID string, cwd st
 	}
 
 	// Start permission socket for interpose library
-	sockPath, sockCleanup, ir, err := startInterposeSock(relayID, agentServerName(agent))
+	sockPath, sockCleanup, ir, err := startInterposeSock(aiAgentInstanceID, agentServerName(agent))
 	if err != nil {
 		return "", nil, nil, err
 	}

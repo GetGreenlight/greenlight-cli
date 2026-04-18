@@ -67,10 +67,10 @@ func readStdinToFile(outputPath string) {
 
 func runTranscriptTest(transcriptPath string) {
 	bridgePath := os.Getenv("GREENLIGHT_BRIDGE")
-	sessionID := os.Getenv("GREENLIGHT_SESSION_ID")
+	sessionID := os.Getenv("GREENLIGHT_AGENT_INSTANCE_ID")
 
 	if bridgePath == "" || sessionID == "" {
-		fmt.Fprintf(os.Stderr, "GREENLIGHT_BRIDGE and GREENLIGHT_SESSION_ID required\n")
+		fmt.Fprintf(os.Stderr, "GREENLIGHT_BRIDGE and GREENLIGHT_AGENT_INSTANCE_ID required\n")
 		os.Exit(1)
 	}
 
@@ -88,8 +88,7 @@ func runTranscriptTest(transcriptPath string) {
 	// greenlight is on PATH (same temp dir as this binary).
 	cmd := exec.Command("greenlight", "stream",
 		"--transcript", transcriptPath,
-		"--session-id", sessionID,
-		"--relay-id", sessionID,
+		"--agent-instance-id", sessionID,
 		"--bridge", bridgePath,
 	)
 	cmd.Stdout = os.Stderr // don't pollute stdout
@@ -109,10 +108,10 @@ func runTranscriptTest(transcriptPath string) {
 
 func runTranscriptTestIncremental(transcriptPath string) {
 	bridgePath := os.Getenv("GREENLIGHT_BRIDGE")
-	sessionID := os.Getenv("GREENLIGHT_SESSION_ID")
+	sessionID := os.Getenv("GREENLIGHT_AGENT_INSTANCE_ID")
 
 	if bridgePath == "" || sessionID == "" {
-		fmt.Fprintf(os.Stderr, "GREENLIGHT_BRIDGE and GREENLIGHT_SESSION_ID required\n")
+		fmt.Fprintf(os.Stderr, "GREENLIGHT_BRIDGE and GREENLIGHT_AGENT_INSTANCE_ID required\n")
 		os.Exit(1)
 	}
 
@@ -128,8 +127,7 @@ func runTranscriptTestIncremental(transcriptPath string) {
 	// transcript file and must pick up lines as they arrive.
 	cmd := exec.Command("greenlight", "stream",
 		"--transcript", transcriptPath,
-		"--session-id", sessionID,
-		"--relay-id", sessionID,
+		"--agent-instance-id", sessionID,
 		"--bridge", bridgePath,
 	)
 	cmd.Stdout = os.Stderr

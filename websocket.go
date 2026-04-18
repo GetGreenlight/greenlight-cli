@@ -251,10 +251,10 @@ func (c *WSClient) routePermissionResponse(data []byte) bool {
 		return false
 	}
 	var msg struct {
-		Type          string `json:"type"`
-		RequestID     string `json:"request_id"`
-		RelayID       string `json:"relay_id"`
-		CorrelationID string `json:"correlation_id"`
+		Type              string `json:"type"`
+		RequestID         string `json:"request_id"`
+		AIAgentInstanceID string `json:"ai_agent_instance_id"`
+		CorrelationID     string `json:"correlation_id"`
 	}
 	if json.Unmarshal(data, &msg) != nil {
 		return false
@@ -274,9 +274,9 @@ func (c *WSClient) routePermissionResponse(data []byte) bool {
 		}
 	}
 
-	// Route session_started ack by relay_id
-	if msg.Type == "session_started" && msg.RelayID != "" {
-		key := "session_start:" + msg.RelayID
+	// Route agent_instance_connected ack by ai_agent_instance_id
+	if msg.Type == "agent_instance_connected" && msg.AIAgentInstanceID != "" {
+		key := "agent_instance_connect:" + msg.AIAgentInstanceID
 		c.pendingMu.Lock()
 		ch, ok := c.pending[key]
 		if ok {
@@ -289,8 +289,8 @@ func (c *WSClient) routePermissionResponse(data []byte) bool {
 		return true
 	}
 
-	// Route control messages (session_history, wake) to the control handler
-	if msg.Type == "session_history" || msg.Type == "wake" {
+	// Route delete_agent_instance control messages through the control handler
+	if msg.Type == "delete_agent_instance" {
 		if c.controlFunc != nil {
 			c.controlFunc(data)
 		}
@@ -424,7 +424,7 @@ func (c *WSClient) connectAndRead(firstConnect bool) error {
 		}
 
 		// Let the text frame handler try first (used by daemon WS to
-		// route input to the correct session by relay_id).
+		// route input to the correct agent instance by ai_agent_instance_id).
 		if c.textFrameFunc != nil && c.textFrameFunc(data) {
 			continue
 		}
