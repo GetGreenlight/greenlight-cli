@@ -356,9 +356,20 @@ func (m *talkModel) handleServerMessage(data []byte) {
 			debugLogFrame(fmt.Sprintf("transcript-drop-empty-render event=%q text_len=%d", msg.Event, len(msg.Text)), data)
 			return
 		}
+		// Dedupe against recent entries. Enter-to-send renders the user's
+		// line locally for snappy feedback, and the server later replays it
+		// from the agent's transcript. Scan back a few entries instead of
+		// just the last one — an activity_event or assistant block may land
+		// between the local echo and the server replay.
 		buf := m.transcripts[id]
-		if len(buf) > 0 && buf[len(buf)-1] == rendered {
-			return
+		start := len(buf) - 8
+		if start < 0 {
+			start = 0
+		}
+		for i := len(buf) - 1; i >= start; i-- {
+			if buf[i] == rendered {
+				return
+			}
 		}
 		debugLogf("transcript-append id=%s event=%q focused=%s match=%v rendered_len=%d", id, msg.Event, m.focused, id == m.focused, len(rendered))
 		m.transcripts[id] = append(buf, rendered)
