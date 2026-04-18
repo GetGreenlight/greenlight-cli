@@ -295,7 +295,7 @@ type talkServerMsg struct {
 	AIAgentInstanceID string                 `json:"ai_agent_instance_id,omitempty"`
 	Project           string                 `json:"project,omitempty"`
 	Agent             string                 `json:"agent,omitempty"`
-	Instances         []talkInstanceWire     `json:"instances,omitempty"`
+	AgentInstances    []talkInstanceWire     `json:"ai_agent_instances,omitempty"`
 	Data              json.RawMessage        `json:"data,omitempty"`
 	Status            string                 `json:"status,omitempty"`
 	Text              string                 `json:"text,omitempty"`
@@ -309,10 +309,13 @@ type talkServerMsg struct {
 	Extra             map[string]interface{} `json:"-"`
 }
 
+// talkInstanceWire mirrors the server's AIAgentInstance payload.
+// Only the fields the TUI cares about are decoded.
 type talkInstanceWire struct {
-	AIAgentInstanceID string `json:"ai_agent_instance_id"`
-	Project           string `json:"project,omitempty"`
-	Version           string `json:"version,omitempty"`
+	ID     string `json:"id"`
+	Name   string `json:"name,omitempty"`
+	Status string `json:"status,omitempty"`
+	HostID string `json:"host_id,omitempty"`
 }
 
 type talkMissedWire struct {
@@ -333,8 +336,8 @@ func (m *talkModel) handleServerMessage(data []byte) {
 	}
 
 	switch msg.Type {
-	case "agent_instances", "relay_sessions":
-		m.applyInstances(msg.Instances)
+	case "ai_agent_instances_list":
+		m.applyInstances(msg.AgentInstances)
 		m.refreshViewport()
 
 	case "transcript_entry":
@@ -416,13 +419,16 @@ func (m *talkModel) handleServerMessage(data []byte) {
 func (m *talkModel) applyInstances(wire []talkInstanceWire) {
 	m.sessions = m.sessions[:0]
 	for _, s := range wire {
-		if s.AIAgentInstanceID == "" {
+		if s.ID == "" {
+			continue
+		}
+		// Hide retired instances; the UI treats them as gone.
+		if s.Status == "retired" {
 			continue
 		}
 		m.sessions = append(m.sessions, talkSession{
-			aiAgentInstanceID: s.AIAgentInstanceID,
-			project:           s.Project,
-			version:           s.Version,
+			aiAgentInstanceID: s.ID,
+			project:           s.Name,
 		})
 	}
 	stillThere := false
