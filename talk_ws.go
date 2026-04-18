@@ -41,12 +41,12 @@ func newTalkWS(userID string) (*talkWS, error) {
 	u.Path = "/ws"
 	q := u.Query()
 	q.Set("human_user_id", userID)
-	// TODO(secret): /users/register doesn't issue a per-user secret yet,
-	// and validateHumanUserSecret on the server returns true for any user
-	// whose secret_hash column is null. Sending an empty string keeps us
-	// authed for now; once the registration flow stores a real secret
-	// we'll need to read it from ~/.greenlight/config and pass it here.
-	q.Set("secret", "")
+	// CLI-side auth: the server accepts host_id (from /hosts/register) as
+	// an alternative to the iOS Keychain secret. If the host isn't enrolled
+	// yet, `greenlight daemon` will register it on startup.
+	if hostID := readConfigValue("host_id"); hostID != "" {
+		q.Set("host_id", hostID)
+	}
 	u.RawQuery = q.Encode()
 
 	ctx, cancel := context.WithCancel(context.Background())
