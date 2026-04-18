@@ -22,10 +22,10 @@ func runTalk(args []string) {
 		fmt.Fprintf(os.Stderr, `Usage: greenlight talk
 
 Opens a TUI that connects to your Greenlight account and shows live
-transcripts from any agent instance you have running (launched via
-'greenlight connect' or spawned via 'greenlight org agent create').
-Type a message and press Enter to send it to the focused instance.
-Press Tab to switch focus between instances. Press ctrl+c or esc to quit.
+transcripts from any agent instance you have running (spawned via
+'greenlight org agent create'). Type a message and press Enter to send
+it to the focused instance. Press Tab to switch focus between instances.
+Press ctrl+c or esc to quit.
 `)
 		os.Exit(0)
 	}

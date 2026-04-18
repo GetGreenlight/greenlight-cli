@@ -39,13 +39,11 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		runConnect(nil)
-		return
+		printUsage()
+		os.Exit(1)
 	}
 
 	switch os.Args[1] {
-	case "connect":
-		runConnect(os.Args[2:])
 	case "stream":
 		runStream(os.Args[2:])
 	case "register":
@@ -67,13 +65,8 @@ func main() {
 	case "help", "--help", "-h":
 		printUsage()
 	default:
-		// If it looks like a subcommand (no leading dash), it's an error.
-		// Otherwise fall through to connect for flags like --agent.
-		if len(os.Args[1]) > 0 && os.Args[1][0] != '-' {
-			fmt.Fprintf(os.Stderr, "greenlight: unknown command %q\nRun 'greenlight help' for usage.\n", os.Args[1])
-			os.Exit(1)
-		}
-		runConnect(os.Args[1:])
+		fmt.Fprintf(os.Stderr, "greenlight: unknown command %q\nRun 'greenlight help' for usage.\n", os.Args[1])
+		os.Exit(1)
 	}
 }
 
@@ -92,13 +85,9 @@ func printVersion() {
 func printUsage() {
 	fmt.Fprintf(os.Stderr, `%s
 
-Usage: greenlight [flags]
-       greenlight <command> [flags]
-
-When no command is given, 'connect' is used by default.
+Usage: greenlight <command> [flags]
 
 Commands:
-  connect    Launch an agent instance and relay it to the Greenlight app
   register   Register with your email and enroll this host
   agent      Get or set the default agent runtime (claude, codex, copilot, cursor, gemini, pi)
   daemon     Manage the background daemon (start, stop, status)

@@ -43,7 +43,7 @@ var (
 
 func renderPills(instances []talkInstance, focusedID string) string {
 	if len(instances) == 0 {
-		return emptyStyle.Render("(no active agent instances — start one with 'greenlight connect')")
+		return emptyStyle.Render("(no active agent instances — spawn one with 'greenlight org agent create')")
 	}
 	parts := make([]string, 0, len(instances))
 	for _, s := range instances {

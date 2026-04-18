@@ -227,7 +227,7 @@ func applyUpdate(downloadURL, newVersion string, force bool) error {
 		fmt.Fprintf(os.Stderr, "greenlight: restarting daemon...\n")
 		if err := ensureDaemon(""); err != nil {
 			fmt.Fprintf(os.Stderr, "greenlight: daemon restart failed: %v\n", err)
-			fmt.Fprintf(os.Stderr, "greenlight: run 'greenlight connect' to restart manually\n")
+			fmt.Fprintf(os.Stderr, "greenlight: run 'greenlight daemon start' to restart manually\n")
 		}
 	}
 

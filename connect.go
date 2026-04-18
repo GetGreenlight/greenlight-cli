@@ -1,11 +1,16 @@
 //go:build darwin || linux
 
+// Helpers used by the agent-spawn path (agent_setup.go, daemon_session.go,
+// daemon_agent.go). The historical `greenlight connect` attached-terminal
+// entry point has been removed — agents are launched via
+// 'greenlight org agent create' and driven from the iOS app or
+// 'greenlight talk'.
+
 package main
 
 import (
 	"context"
 	"crypto/rand"
-	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -17,38 +22,6 @@ import (
 	"syscall"
 	"time"
 )
-
-func runConnect(args []string) {
-	fs := flag.NewFlagSet("connect", flag.ExitOnError)
-	deviceID := fs.String("device-id", "", "Device ID (overrides GREENLIGHT_DEVICE_ID env and config file)")
-	project := fs.String("project", "", "Project name (overrides GREENLIGHT_PROJECT env and config file)")
-	agentFlag := fs.String("agent", "", "Agent runtime: claude, codex, copilot, cursor, gemini, pi (overrides GREENLIGHT_AGENT env and config file)")
-	fs.Parse(args)
-	if fs.NArg() > 0 {
-		fmt.Fprintf(os.Stderr, "greenlight connect: unexpected argument %q\nRun 'greenlight connect --help' for usage.\n", fs.Arg(0))
-		os.Exit(1)
-	}
-
-	if wsURL == "" {
-		fmt.Fprintf(os.Stderr, "greenlight: no relay server URL configured (binary must be built with -ldflags)\n")
-		os.Exit(1)
-	}
-
-	// Resolve device ID early so the daemon can verify it matches
-	resolvedDeviceID := *deviceID
-	if resolvedDeviceID == "" {
-		resolvedDeviceID = os.Getenv("GREENLIGHT_DEVICE_ID")
-	}
-	if resolvedDeviceID == "" {
-		resolvedDeviceID = readConfigValue("device_id")
-	}
-	if err := ensureDaemon(resolvedDeviceID); err != nil {
-		fmt.Fprintf(os.Stderr, "greenlight: failed to start daemon: %v\n", err)
-		os.Exit(1)
-	}
-	cwd, _ := os.Getwd()
-	connectViaDaemon(*agentFlag, resolvedDeviceID, *project, cwd)
-}
 
 // startTranscriptStreamer polls for the agent's transcript file to appear,
 // then spawns `greenlight stream --bridge` to tail it into the bridge file.
@@ -146,84 +119,6 @@ func killStreamer(aiAgentInstanceID string) {
 	}
 	os.Remove(pidFile)
 	log.Printf("Killed streamer process %d", pid)
-}
-
-// writeConnectPid writes a PID file for this attached connect run.
-// Format: <pid> <agent> <cwd>
-func writeConnectPid(id, agent, cwd string) string {
-	p := filepath.Join(os.TempDir(), "greenlight-connect-"+id+".pid")
-	os.WriteFile(p, []byte(fmt.Sprintf("%d %s %s", os.Getpid(), agent, cwd)), 0644)
-	return p
-}
-
-// cleanupAgentFiles removes agent-specific files if no other greenlight
-// connect processes are active for the same agent and project dir.
-func cleanupAgentFiles(agent, cwd string) {
-	if hasOtherConnects(agent, cwd) {
-		return
-	}
-	switch agent {
-	case "gemini":
-		removeGreenlightInstructions(filepath.Join(cwd, "GEMINI.md"))
-	case "copilot":
-		removeGreenlightInstructions(filepath.Join(cwd, ".github", "copilot-instructions.md"))
-	case "cursor":
-		removeGreenlightInstructions(filepath.Join(cwd, ".cursor", "rules", "greenlight.mdc"))
-	case "codex":
-		removeGreenlightInstructions(filepath.Join(cwd, "AGENTS.md"))
-	}
-}
-
-// hasOtherConnects checks if any other greenlight connect processes are alive
-// for the same agent and working directory.
-func hasOtherConnects(agent, cwd string) bool {
-	pattern := filepath.Join(os.TempDir(), "greenlight-connect-*.pid")
-	matches, _ := filepath.Glob(pattern)
-	myPid := os.Getpid()
-	for _, p := range matches {
-		data, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		parts := strings.SplitN(string(data), " ", 3)
-		if len(parts) < 3 {
-			continue
-		}
-		var pid int
-		fmt.Sscanf(parts[0], "%d", &pid)
-		if pid == myPid || pid == 0 {
-			continue
-		}
-		pAgent := parts[1]
-		pCwd := parts[2]
-		if pAgent != agent || pCwd != cwd {
-			continue
-		}
-		// Check if the process is still alive and is a greenlight process
-		if isGreenlightProcess(pid) {
-			return true
-		}
-		// Stale PID file — clean it up
-		os.Remove(p)
-	}
-	return false
-}
-
-// isGreenlightProcess checks if a PID is alive and belongs to a greenlight process.
-func isGreenlightProcess(pid int) bool {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	if proc.Signal(nil) != nil {
-		return false
-	}
-	// Verify it's actually a greenlight process (PIDs can be recycled)
-	out, err := exec.Command("ps", "-p", fmt.Sprintf("%d", pid), "-o", "comm=").Output()
-	if err != nil {
-		return false
-	}
-	return strings.Contains(string(out), "greenlight")
 }
 
 // ensureAgentHelpers re-signs agent helper binaries that need

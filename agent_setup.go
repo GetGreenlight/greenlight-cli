@@ -87,37 +87,6 @@ func buildAgentCommand(agent string) (*AgentSetup, error) {
 	}, nil
 }
 
-// resolveDeviceAndProject resolves device ID and project name from explicit
-// values, falling back to env vars and config file.
-func resolveDeviceAndProject(deviceID, project, cwd string) (string, string, error) {
-	devID := deviceID
-	if devID == "" {
-		devID = os.Getenv("GREENLIGHT_DEVICE_ID")
-	}
-	if devID == "" {
-		devID = readConfigValue("device_id")
-	}
-	if devID == "" {
-		return "", "", fmt.Errorf("device ID is required (use --device-id, GREENLIGHT_DEVICE_ID, or set device_id in ~/.greenlight/config)")
-	}
-
-	proj := project
-	if proj == "" {
-		proj = os.Getenv("GREENLIGHT_PROJECT")
-	}
-	if proj == "" {
-		proj = readConfigValue("project")
-	}
-	if proj == "" && cwd != "" {
-		proj = filepath.Base(cwd)
-	}
-	if proj == "" {
-		return "", "", fmt.Errorf("project name is required (use --project)")
-	}
-
-	return devID, proj, nil
-}
-
 // installAgentFiles installs agent-specific instruction files for agents that use them.
 func installAgentFiles(agent, aiAgentInstanceID string) {
 	if agent == "gemini" || agent == "copilot" || agent == "cursor" || agent == "codex" {

@@ -298,112 +298,42 @@ func wsPermission(ctx context.Context, ws WSConn, requestID string, payload map[
 	}
 }
 
-// racePermission sends the permission request to the server via WebSocket.
-// If the server doesn't respond quickly (e.g. waiting for phone approval),
-// a terminal prompt is shown. Whichever responds first wins.
+// racePermission sends the permission request to the server via WebSocket
+// and waits for the server's decision (phone approval, rule match, or timeout).
+// There's no terminal prompt fallback — agents run detached.
 func racePermission(relay *Relay, toolName string, toolInput map[string]interface{}, payload map[string]interface{}) interposeResponse {
-	type result struct {
-		resp    interposeResponse
-		source  string
-		outcome string // terminal choice: allow, always_allow, deny, deny_stop
-	}
-	ch := make(chan result, 2)
 	requestID := generateUUID()
-
 	ws := relay.wsConn
 	wsCtx, wsCancel := context.WithCancel(context.Background())
 	defer wsCancel()
 
+	ch := make(chan interposeResponse, 1)
 	go func() {
 		log.Printf("Interpose: sending WS permission request %s for %s", requestID, toolName)
 		r, err := wsPermission(wsCtx, ws, requestID, payload)
 		if err != nil {
 			if wsCtx.Err() != nil {
-				return // cancelled by terminal
+				return // cancelled
 			}
 			log.Printf("Interpose: WS permission error for %s (req %s): %v", toolName, requestID, err)
-			ch <- result{resp: interposeResponse{Allow: false}, source: "server"}
+			ch <- interposeResponse{Allow: false}
 			return
 		}
-		ch <- result{resp: r, source: "server"}
+		ch <- r
 	}()
 
-	// Wait for a fast server response (auto-approve).
 	select {
 	case r := <-ch:
-		log.Printf("Interpose: permission %s via %s (fast)",
-			map[bool]string{true: "allowed", false: "denied"}[r.resp.Allow], r.source)
-		return r.resp
+		log.Printf("Interpose: permission %s for %s",
+			map[bool]string{true: "allowed", false: "denied"}[r.Allow], toolName)
+		return r
 	case <-relay.shutdownCh:
 		log.Printf("Interpose: relay shutting down, denying %s", toolName)
-		wsCancel()
-		return interposeResponse{Allow: false}
-	case <-time.After(200 * time.Millisecond):
-	}
-
-	// Server is waiting for phone approval — show terminal prompt
-	promptCtx, promptCancel := context.WithCancel(context.Background())
-	defer promptCancel()
-
-	log.Printf("Interpose: showing terminal prompt for %s", toolName)
-	detail := formatToolDetail(toolName, toolInput)
-	// Terminal prompt choices: 0=allow, 1=always_allow, 2=deny, 3=deny_stop
-	var terminalOutcomes = []string{"allow", "always_allow", "deny", "deny_stop"}
-
-	go func() {
-		choice, err := relay.ShowPromptDaemon(promptCtx, toolName, detail)
-		if err != nil {
-			if promptCtx.Err() != nil {
-				return // ctx cancelled, server won
-			}
-			log.Printf("Interpose: ShowPromptDaemon error for %s (req %s): %v",
-				toolName, requestID, err)
-			return
-		}
-		outcome := terminalOutcomes[choice]
-		ch <- result{
-			resp: interposeResponse{
-				Allow:     outcome == "allow" || outcome == "always_allow",
-				Interrupt: outcome == "deny_stop",
-			},
-			source:  "terminal",
-			outcome: outcome,
-		}
-	}()
-
-	// Wait for either terminal or server response, relay shutdown, or safety timeout
-	var r result
-	select {
-	case r = <-ch:
-	case <-relay.shutdownCh:
-		log.Printf("Interpose: relay shutting down, denying %s", toolName)
-		wsCancel()
-		promptCancel()
 		return interposeResponse{Allow: false}
 	case <-time.After(600 * time.Second):
 		log.Printf("Interpose: permission request timed out for %s", toolName)
-		wsCancel()
 		return interposeResponse{Allow: false}
 	}
-	log.Printf("Interpose: permission %s via %s",
-		map[bool]string{true: "allowed", false: "denied"}[r.resp.Allow], r.source)
-
-	// If the terminal won, cancel the pending server request
-	if r.source == "terminal" && ws != nil {
-		cancel := map[string]interface{}{
-			"type": "cancel_request",
-			"data": map[string]interface{}{
-				"request_id": requestID,
-				"outcome":    r.outcome,
-			},
-		}
-		if data, err := json.Marshal(cancel); err == nil {
-			ws.SendText(data)
-		}
-		wsCancel() // unblock wsPermission goroutine
-	}
-
-	return r.resp
 }
 
 func respond(conn net.Conn, r interposeResponse) {

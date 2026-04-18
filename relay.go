@@ -3,14 +3,14 @@
 package main
 
 import (
-	"io"
 	"os"
 	"os/exec"
 	"sync"
-	"sync/atomic"
 )
 
-// Relay holds the state for an attached PTY — one per live agent instance.
+// Relay holds the state for a detached PTY — one per live agent instance.
+// The PTY output is drained internally; user-visible activity flows via the
+// agent's transcript JSONL + bridge streamer, not through this PTY.
 type Relay struct {
 	cmd    *exec.Cmd
 	master *os.File
@@ -21,17 +21,6 @@ type Relay struct {
 
 	// Shutdown coordination — closed when the child process exits.
 	shutdownCh chan struct{}
-
-	// Terminal permission prompt support.
-	promptReady atomic.Bool // true once stdin goroutine is running
-	promptMu    sync.Mutex  // serializes prompts (one at a time)
-	promptCh    chan byte    // keystrokes redirected here during prompt
-
-	// Daemon mode: PTY output goes to daemonWriter instead of os.Stdout,
-	// and terminal raw mode is managed by the client, not the relay.
-	daemonMode   bool
-	daemonWriter io.Writer
-	daemonMu     sync.RWMutex
 }
 
 // Inject writes data directly to the PTY master as if it were typed.

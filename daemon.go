@@ -4,10 +4,8 @@ package main
 
 import (
 	"bufio"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/url"
@@ -22,49 +20,31 @@ import (
 	"time"
 )
 
-// IPC frame types for binary-framed PTY I/O between client and daemon.
-const (
-	frameStdin        byte = 0x01
-	frameStdout       byte = 0x02
-	frameResize       byte = 0x03
-	frameSignal       byte = 0x04
-	frameExit         byte = 0x05
-	framePrompt       byte = 0x06
-	framePromptResp   byte = 0x07
-	framePromptCancel byte = 0x08
-)
-
-// ipcRequest is the JSON control message sent by the client to the daemon.
+// ipcRequest is the JSON control message sent by CLI subcommands to the daemon.
+// It also doubles as the internal parameter object that daemon_agent.go hands
+// to newAgentInstance when spawning an agent via 'org agent create' — in that
+// case it's not serialized over IPC, just passed in-process.
 type ipcRequest struct {
-	Type      string            `json:"type"` // connect, status, stop, update_shutdown, ws_request
+	Type      string            `json:"type"` // status, stop, update_shutdown, ws_request
 	Agent     string            `json:"agent,omitempty"`
-	DeviceID  string            `json:"device_id,omitempty"`
 	Project   string            `json:"project,omitempty"`
 	Cwd       string            `json:"cwd,omitempty"`
 	Winsize   *ipcWinsize       `json:"winsize,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
 	Force     bool              `json:"force,omitempty"`
 	WSMsgType string            `json:"ws_msg_type,omitempty"` // for ws_request: the CRUD message type
 	WSData    json.RawMessage   `json:"ws_data,omitempty"`     // for ws_request: the payload
-	// Detached is set by the in-process spawnAgentInstance path used by
-	// 'org agent create'. It tells newAgentInstance to skip prerequisites that
-	// only make sense for client-attached 'greenlight connect' runs.
-	Detached bool `json:"-"`
-	// AIAgentInstanceID is an optional override used when the caller already
-	// has a stable identifier it wants to use as the instance's ID (e.g. the
-	// row id from create_ai_agent_instance). When empty, buildAgentCommand
-	// generates one.
+	// AIAgentInstanceID is the id of the ai_agent_instances row the caller
+	// wants to spawn — set by spawnAgentInstance after create_ai_agent_instance.
 	AIAgentInstanceID string `json:"-"`
 }
 
 // ipcResponse is the JSON control message sent by the daemon to the client.
 type ipcResponse struct {
-	Type              string          `json:"type"` // agent_instance_started, error, status_response, ok, ws_response
-	AIAgentInstanceID string          `json:"ai_agent_instance_id,omitempty"`
-	Message           string          `json:"message,omitempty"`
-	Version           string          `json:"version,omitempty"`
-	Instances         []instanceInfo  `json:"instances,omitempty"`
-	Data              json.RawMessage `json:"data,omitempty"` // for ws_response: the server response payload
+	Type      string          `json:"type"` // error, status_response, ok, ws_response
+	Message   string          `json:"message,omitempty"`
+	Version   string          `json:"version,omitempty"`
+	Instances []instanceInfo  `json:"instances,omitempty"`
+	Data      json.RawMessage `json:"data,omitempty"` // for ws_response: the server response payload
 }
 
 type ipcWinsize struct {
@@ -506,8 +486,6 @@ func (d *Daemon) handleConn(conn net.Conn) {
 	}
 
 	switch req.Type {
-	case "connect":
-		d.handleConnect(conn, req)
 	case "status":
 		d.handleStatus(conn)
 	case "stop":
@@ -592,77 +570,11 @@ func (d *Daemon) handleStatus(conn net.Conn) {
 	})
 }
 
-// handleConnect creates a new agent instance and enters the I/O relay phase.
-func (d *Daemon) handleConnect(conn net.Conn, req ipcRequest) {
-	// TODO: re-add an IPC identity guard once the connect IPC carries human_user_id.
-
-	s, err := d.newAgentInstance(req)
-	if err != nil {
-		sendControl(conn, ipcResponse{Type: "error", Message: err.Error()})
-		return
-	}
-
-	d.mu.Lock()
-	d.instances[s.aiAgentInstanceID] = s
-	d.mu.Unlock()
-
-	// Send success response to client
-	sendControl(conn, ipcResponse{
-		Type:              "agent_instance_started",
-		AIAgentInstanceID: s.aiAgentInstanceID,
-	})
-
-	// Enter binary I/O relay phase — blocks until instance ends or client disconnects
-	s.AttachClient(conn)
-
-	// Clean up instance after client disconnects
-	d.mu.Lock()
-	delete(d.instances, s.aiAgentInstanceID)
-	d.mu.Unlock()
-
-	s.Stop()
-	log.Printf("daemon: agent instance %s ended", s.aiAgentInstanceID)
-}
-
 // sendControl writes a JSON control message followed by a newline.
 func sendControl(conn net.Conn, resp ipcResponse) {
 	data, _ := json.Marshal(resp)
 	data = append(data, '\n')
 	conn.Write(data)
-}
-
-// writeFrame writes a binary IPC frame: [type:1][length:4][payload].
-func writeFrame(w io.Writer, frameType byte, payload []byte) error {
-	header := [5]byte{frameType}
-	binary.BigEndian.PutUint32(header[1:], uint32(len(payload)))
-	if _, err := w.Write(header[:]); err != nil {
-		return err
-	}
-	if len(payload) > 0 {
-		_, err := w.Write(payload)
-		return err
-	}
-	return nil
-}
-
-// readFrame reads a binary IPC frame. Returns type and payload.
-func readFrame(r io.Reader) (byte, []byte, error) {
-	var header [5]byte
-	if _, err := io.ReadFull(r, header[:]); err != nil {
-		return 0, nil, err
-	}
-	frameType := header[0]
-	length := binary.BigEndian.Uint32(header[1:])
-	if length > 1<<20 { // 1MB sanity limit
-		return 0, nil, fmt.Errorf("frame too large: %d bytes", length)
-	}
-	payload := make([]byte, length)
-	if length > 0 {
-		if _, err := io.ReadFull(r, payload); err != nil {
-			return 0, nil, err
-		}
-	}
-	return frameType, payload, nil
 }
 
 func stopDaemon() {

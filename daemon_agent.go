@@ -32,9 +32,8 @@ func localAgentForHarness(harness string) string {
 // handleCreateAgentInstance is the special-cased ws_request handler for
 // create_ai_agent_instance. It pre-checks that the agent's working directory
 // lives on this host (aborting before any row is created if not), forwards the
-// create message to the server, then spawns a full instance for the agent that
-// shows up alongside `greenlight connect` instances and is reachable from the
-// phone/talk TUI.
+// create message to the server, then spawns a full instance reachable from the
+// phone and the `greenlight talk` TUI.
 func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 	// Parse the create payload to find the organization_position_id we need
 	// to pre-check. The server validates everything else.
@@ -168,11 +167,10 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 	sendControl(conn, ipcResponse{Type: "ws_response", Data: merged})
 }
 
-// spawnAgentInstance creates a fully-functioning agent instance — same daemon
-// machinery `greenlight connect` uses (interpose hook, transcript bridge, WS
-// registration with the server) — but detached: no client is attached, the PTY
-// runs immediately in the background, and the instance shows up so the phone
-// and `greenlight talk` can talk to it.
+// spawnAgentInstance creates a fully-functioning agent instance with the full
+// daemon machinery (interpose hook, transcript bridge, WS registration with
+// the server). The PTY runs detached in the background; the phone and
+// `greenlight talk` drive it.
 //
 // The instance's id is the ai_agent_instance_id, so 'org agent stop' can find
 // and terminate it without any extra bookkeeping.
@@ -192,11 +190,9 @@ func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName, harnessName, cwd
 	}
 
 	req := ipcRequest{
-		Type:              "connect",
 		Agent:             localAgent,
 		Project:           agentName, // surface the agent name as the "project" pill
 		Cwd:               cwd,
-		Detached:          true,
 		AIAgentInstanceID: agentInstanceID,
 		Winsize:           &ipcWinsize{Rows: 40, Cols: 120},
 	}
