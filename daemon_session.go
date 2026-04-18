@@ -133,7 +133,7 @@ func (d *Daemon) newAgentInstance(req ipcRequest) (*AgentInstance, error) {
 		f.Close()
 	}
 
-	exportEnvs := buildExportEnvs(devID, aiAgentInstanceID, proj, s.bridgePath, agent)
+	exportEnvs := buildExportEnvs(devID, aiAgentInstanceID, proj, s.bridgePath, agent, req.ModelName)
 	command, cmdArgs, interpose, err := setupInterpose(agent, command, cmdArgs, aiAgentInstanceID, cwd, exportEnvs)
 	if err != nil {
 		s.cleanup()

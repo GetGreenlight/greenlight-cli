@@ -5,7 +5,6 @@ package main
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,15 +24,15 @@ var knownAgents = map[string]bool{
 
 const defaultAgent = "claude"
 
-// resolveAgent resolves the agent runtime from flag > env > config > default.
+// resolveAgent resolves the agent runtime from the caller's preference, then
+// the GREENLIGHT_AGENT env var, then falls back to the default. Org-spawned
+// agents always pass an explicit value derived from the harness; this fallback
+// chain exists for edge cases like the stream subcommand without --agent.
 func resolveAgent(flagVal string) string {
 	if flagVal != "" {
 		return flagVal
 	}
 	if v := os.Getenv("GREENLIGHT_AGENT"); v != "" {
-		return v
-	}
-	if v := readConfigValue("agent"); v != "" {
 		return v
 	}
 	return defaultAgent
@@ -492,31 +491,3 @@ func derivePiTranscriptPath(cwd string) string {
 	return ""
 }
 
-func runAgent(args []string) {
-	if len(args) == 0 {
-		// Print current agent
-		agent := resolveAgent("")
-		fmt.Fprintf(os.Stderr, "%s\n", agent)
-		return
-	}
-
-	if args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight agent [name]\n\n")
-		fmt.Fprintf(os.Stderr, "Without arguments, prints the current default agent.\n")
-		fmt.Fprintf(os.Stderr, "With a name, sets the default agent in ~/.greenlight/config.\n\n")
-		fmt.Fprintf(os.Stderr, "Supported agents: claude, codex, copilot, cursor, gemini, pi\n")
-		os.Exit(0)
-	}
-
-	name := args[0]
-	if !knownAgents[name] {
-		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, codex, copilot, cursor, gemini, pi)\n", name)
-		os.Exit(1)
-	}
-
-	if err := writeConfigValue("agent", name); err != nil {
-		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Fprintf(os.Stderr, "Default agent set to %s\n", name)
-}

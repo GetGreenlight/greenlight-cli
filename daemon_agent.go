@@ -123,6 +123,8 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 			HarnessName   string `json:"harness_name"`
 			HostID        string `json:"host_id"`
 			DirectoryPath string `json:"directory_path"`
+			ModelProvider string `json:"model_provider"`
+			ModelName     string `json:"model_name"`
 		} `json:"spawn_context"`
 		Error string `json:"error"`
 	}
@@ -142,6 +144,8 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 		createWrap.AIAgentInstance.Name,
 		createWrap.SpawnContext.HarnessName,
 		createWrap.SpawnContext.DirectoryPath,
+		createWrap.SpawnContext.ModelProvider,
+		createWrap.SpawnContext.ModelName,
 	)
 
 	out := map[string]interface{}{
@@ -174,7 +178,7 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 //
 // The instance's id is the ai_agent_instance_id, so 'org agent stop' can find
 // and terminate it without any extra bookkeeping.
-func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName, harnessName, cwd string) (int, error) {
+func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName, harnessName, cwd, modelProvider, modelName string) (int, error) {
 	localAgent := localAgentForHarness(harnessName)
 	if localAgent == "" {
 		return 0, fmt.Errorf("no local CLI binary maps to harness %q", harnessName)
@@ -195,6 +199,8 @@ func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName, harnessName, cwd
 		Cwd:               cwd,
 		AIAgentInstanceID: agentInstanceID,
 		Winsize:           &ipcWinsize{Rows: 40, Cols: 120},
+		ModelProvider:     modelProvider,
+		ModelName:         modelName,
 	}
 	s, err := d.newAgentInstance(req)
 	if err != nil {

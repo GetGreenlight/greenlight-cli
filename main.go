@@ -48,8 +48,6 @@ func main() {
 		runStream(os.Args[2:])
 	case "register":
 		runRegister(os.Args[2:])
-	case "agent":
-		runAgent(os.Args[2:])
 	case "daemon":
 		runDaemon(os.Args[2:])
 	case "org":
@@ -89,7 +87,6 @@ Usage: greenlight <command> [flags]
 
 Commands:
   register   Register with your email and enroll this host
-  agent      Get or set the default agent runtime (claude, codex, copilot, cursor, gemini, pi)
   daemon     Manage the background daemon (start, stop, status)
   org        Manage multi-agent organization entities (org, user, wd, job, pos, agent, model)
   wd         Manage working directories (create, list)

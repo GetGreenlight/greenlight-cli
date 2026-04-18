@@ -96,15 +96,33 @@ func installAgentFiles(agent, aiAgentInstanceID string) {
 	}
 }
 
-// buildExportEnvs returns the GREENLIGHT_* environment variables for the child process.
-func buildExportEnvs(devID, aiAgentInstanceID, proj, bridgePath, agent string) map[string]string {
-	return map[string]string{
-		"GREENLIGHT_DEVICE_ID":        devID,
+// buildExportEnvs returns the GREENLIGHT_* environment variables for the child
+// process, plus any agent-specific model env vars when modelName is non-empty.
+func buildExportEnvs(devID, aiAgentInstanceID, proj, bridgePath, agent, modelName string) map[string]string {
+	envs := map[string]string{
+		"GREENLIGHT_DEVICE_ID":         devID,
 		"GREENLIGHT_AGENT_INSTANCE_ID": aiAgentInstanceID,
-		"GREENLIGHT_PROJECT":          proj,
-		"GREENLIGHT_BRIDGE":           bridgePath,
-		"GREENLIGHT_AGENT":            agent,
+		"GREENLIGHT_PROJECT":           proj,
+		"GREENLIGHT_BRIDGE":            bridgePath,
+		"GREENLIGHT_AGENT":             agent,
 	}
+	// Pin the child to the org's chosen model. Every agent binary uses a
+	// different knob; see each case below. If modelName is empty we skip —
+	// the agent falls back to its own default.
+	if modelName != "" {
+		switch agent {
+		case "claude":
+			// Anthropic CLI reads ANTHROPIC_MODEL for the primary model.
+			envs["ANTHROPIC_MODEL"] = modelName
+		case "codex":
+			// codex reads OPENAI_MODEL.
+			envs["OPENAI_MODEL"] = modelName
+		}
+		// copilot, cursor, gemini, pi: no documented env var for model
+		// selection — model is configured inside the tool's own UI. Leave
+		// modelName informational; the agent will use its own default.
+	}
+	return envs
 }
 
 // setupInterpose configures library interposition (DYLD_INSERT_LIBRARIES or

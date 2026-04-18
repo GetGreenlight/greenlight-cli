@@ -36,6 +36,12 @@ type ipcRequest struct {
 	// AIAgentInstanceID is the id of the ai_agent_instances row the caller
 	// wants to spawn — set by spawnAgentInstance after create_ai_agent_instance.
 	AIAgentInstanceID string `json:"-"`
+	// ModelProvider + ModelName come from the spawn_context of
+	// create_ai_agent_instance. They translate into per-agent env vars (e.g.
+	// ANTHROPIC_MODEL for claude) so the child agent respects the user's
+	// model choice instead of falling back to its own default.
+	ModelProvider string `json:"-"`
+	ModelName     string `json:"-"`
 }
 
 // ipcResponse is the JSON control message sent by the daemon to the client.
