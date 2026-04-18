@@ -608,6 +608,7 @@ func runOrganizationPos(args []string) {
 		wdID := fs.String("wd", "", "Working directory ID")
 		parentID := fs.String("parent", "", "Parent position ID (optional)")
 		name := fs.String("name", "", "Human-readable name (optional)")
+		hostID := fs.String("host-id", "", "Host for a new wd if the wd picker creates one (defaults to this host)")
 		fs.Parse(args[1:])
 
 		orgID := workingOrgID()
@@ -637,7 +638,7 @@ func runOrganizationPos(args []string) {
 		}
 
 		if *wdID == "" {
-			id, err := selectWorkingDirectoryForPosition(orgID, *name)
+			id, err := selectWorkingDirectoryForPosition(orgID, *name, *hostID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 				os.Exit(1)
@@ -740,6 +741,7 @@ func runOrganizationAgent(args []string) {
 		modelID := fs.String("model", "", "AI brain model ID")
 		harnessID := fs.Int("harness", 0, "Harness ID")
 		name := fs.String("name", "", "Human-readable name")
+		hostID := fs.String("host-id", "", "Host on which the agent should run (defaults to this host; picker only — new hosts must be enrolled via 'greenlight daemon start' on that machine)")
 		fs.Parse(args[1:])
 
 		orgID := workingOrgID()
@@ -755,6 +757,18 @@ func runOrganizationAgent(args []string) {
 		if *name == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: name required\n")
 			os.Exit(1)
+		}
+
+		// Host — cursor defaults to this daemon's host_id. No "create new"
+		// entry; a new host has to be enrolled out-of-band by running
+		// 'greenlight daemon start' on the target machine.
+		if *hostID == "" {
+			id, err := selectHost(readConfigValue("host_id"))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+				os.Exit(1)
+			}
+			*hostID = id
 		}
 
 		if *harnessID == 0 {
@@ -776,7 +790,7 @@ func runOrganizationAgent(args []string) {
 		}
 
 		if *posID == "" {
-			id, err := selectOrganizationPosition(orgID)
+			id, err := selectOrganizationPosition(orgID, *hostID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 				os.Exit(1)

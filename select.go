@@ -76,6 +76,54 @@ func selectHarness() (int, error) {
 }
 
 // =============================================================================
+// selectHost — picks from the caller's enrolled hosts. No "create new" option
+// because host enrollment happens out-of-band via `greenlight daemon start`.
+// =============================================================================
+
+func selectHost(defaultHostID string) (string, error) {
+	data, err := sendWSRequest("list_hosts", map[string]interface{}{})
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch hosts: %w", err)
+	}
+	var resp struct {
+		Hosts []struct {
+			HostID   string `json:"host_id"`
+			Hostname string `json:"hostname"`
+		} `json:"hosts"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", fmt.Errorf("failed to parse hosts: %w", err)
+	}
+	if resp.Error != "" {
+		return "", fmt.Errorf("list_hosts: %s", resp.Error)
+	}
+	if len(resp.Hosts) == 0 {
+		return "", fmt.Errorf("no hosts enrolled — run 'greenlight daemon start' on the host you want to use")
+	}
+
+	// Put the default host first so it's the initial cursor position in the
+	// picker. (selectFromList highlights items[0] by default.)
+	items := make([]selectItem[string], 0, len(resp.Hosts))
+	var rest []selectItem[string]
+	for _, h := range resp.Hosts {
+		label := h.Hostname
+		if label == "" {
+			label = h.HostID
+		}
+		if h.HostID == defaultHostID {
+			label += " (this host)"
+			items = append(items, selectItem[string]{Label: label, ID: h.HostID})
+		} else {
+			rest = append(rest, selectItem[string]{Label: label, ID: h.HostID})
+		}
+	}
+	items = append(items, rest...)
+
+	return selectFromList("Host", items)
+}
+
+// =============================================================================
 // selectAIBrainModel
 // =============================================================================
 
@@ -349,14 +397,16 @@ func createAgentJobDescriptionInteractive(orgID string) (string, error) {
 // =============================================================================
 
 func selectWorkingDirectory(orgID string) (string, error) {
-	return selectWorkingDirectoryForPosition(orgID, "")
+	return selectWorkingDirectoryForPosition(orgID, "", "")
 }
 
 // selectWorkingDirectoryForPosition is like selectWorkingDirectory, but when
 // the user chooses "Create new…" the path prompt defaults to a subdirectory
 // named after the (snake_cased) position — so a position "Head Gardener"
-// defaults its wd to $HOME/greenlight_agents/head_gardener.
-func selectWorkingDirectoryForPosition(orgID, positionName string) (string, error) {
+// defaults its wd to $HOME/greenlight_agents/head_gardener. If hostID is
+// non-empty, new wds are created on that host instead of the daemon's local
+// host_id from config.
+func selectWorkingDirectoryForPosition(orgID, positionName, hostID string) (string, error) {
 	payload := map[string]interface{}{}
 	if orgID != "" {
 		payload["organization_id"] = orgID
@@ -379,7 +429,7 @@ func selectWorkingDirectoryForPosition(orgID, positionName string) (string, erro
 
 	if len(resp.WorkingDirectories) == 0 {
 		fmt.Println("No working directories found. Let's create one.")
-		return createWorkingDirectoryInteractive(orgID, positionName)
+		return createWorkingDirectoryInteractive(orgID, positionName, hostID)
 	}
 
 	items := make([]selectItem[string], len(resp.WorkingDirectories))
@@ -397,12 +447,16 @@ func selectWorkingDirectoryForPosition(orgID, positionName string) (string, erro
 		return "", err
 	}
 	if id == sentinelCreateNew {
-		return createWorkingDirectoryInteractive(orgID, positionName)
+		return createWorkingDirectoryInteractive(orgID, positionName, hostID)
 	}
 	return id, nil
 }
 
-func createWorkingDirectoryInteractive(orgID, positionName string) (string, error) {
+// createWorkingDirectoryInteractive creates a new working_directory row on the
+// given host. If hostID is empty, falls back to the daemon's local host_id from
+// config (for backward-compat callers like 'wd create' that don't yet prompt
+// for host).
+func createWorkingDirectoryInteractive(orgID, positionName, hostID string) (string, error) {
 	if orgID == "" {
 		orgID = workingOrgID()
 	}
@@ -410,7 +464,9 @@ func createWorkingDirectoryInteractive(orgID, positionName string) (string, erro
 		return "", fmt.Errorf("no working organization set (run 'greenlight org org use --id <ID>')")
 	}
 
-	hostID := readConfigValue("host_id")
+	if hostID == "" {
+		hostID = readConfigValue("host_id")
+	}
 	if hostID == "" {
 		return "", fmt.Errorf("host ID not found — run 'greenlight daemon start' to enroll this host")
 	}
@@ -448,7 +504,7 @@ func createWorkingDirectoryInteractive(orgID, positionName string) (string, erro
 // selectOrganizationPosition
 // =============================================================================
 
-func selectOrganizationPosition(orgID string) (string, error) {
+func selectOrganizationPosition(orgID, hostID string) (string, error) {
 	payload := map[string]interface{}{}
 	if orgID != "" {
 		payload["organization_id"] = orgID
@@ -472,7 +528,7 @@ func selectOrganizationPosition(orgID string) (string, error) {
 
 	if len(resp.OrganizationPositions) == 0 {
 		fmt.Println("No organization positions found. Let's create one.")
-		return createOrganizationPositionInteractive(orgID)
+		return createOrganizationPositionInteractive(orgID, hostID)
 	}
 
 	items := make([]selectItem[string], len(resp.OrganizationPositions))
@@ -490,12 +546,12 @@ func selectOrganizationPosition(orgID string) (string, error) {
 		return "", err
 	}
 	if id == sentinelCreateNew {
-		return createOrganizationPositionInteractive(orgID)
+		return createOrganizationPositionInteractive(orgID, hostID)
 	}
 	return id, nil
 }
 
-func createOrganizationPositionInteractive(orgID string) (string, error) {
+func createOrganizationPositionInteractive(orgID, hostID string) (string, error) {
 	if orgID == "" {
 		orgID = workingOrgID()
 	}
@@ -516,7 +572,7 @@ func createOrganizationPositionInteractive(orgID string) (string, error) {
 		fmt.Printf("Position name stored as %q (snake_case).\n", name)
 	}
 
-	wdID, err := selectWorkingDirectoryForPosition(orgID, name)
+	wdID, err := selectWorkingDirectoryForPosition(orgID, name, hostID)
 	if err != nil {
 		return "", err
 	}
