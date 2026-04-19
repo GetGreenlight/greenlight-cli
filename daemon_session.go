@@ -210,6 +210,12 @@ func (s *AgentInstance) runRelay() {
 
 // Stop terminates the instance, killing the child process and cleaning up.
 func (s *AgentInstance) Stop() {
+	// The transcript streamer is a detached process (its own session) and
+	// will outlive the daemon unless we reap it explicitly. Do this
+	// synchronously — the relay-exit path also calls killStreamer, but that
+	// goroutine isn't guaranteed to run before the daemon process exits.
+	killStreamer(s.aiAgentInstanceID)
+
 	if s.relay != nil && s.relay.cmd != nil && s.relay.cmd.Process != nil {
 		s.relay.cmd.Process.Signal(syscall.SIGTERM)
 		// Give it a moment, then force kill
