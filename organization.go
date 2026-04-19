@@ -1104,6 +1104,7 @@ func createScratchPositionAndWD(orgID, hostID, shortID string) (string, error) {
 		"organization_id": orgID,
 		"host_id":         hostID,
 		"directory_path":  dirPath,
+		"is_ephemeral":    true,
 	})
 	if err != nil {
 		return "", fmt.Errorf("create_working_directory: %w", err)
@@ -1125,6 +1126,7 @@ func createScratchPositionAndWD(orgID, hostID, shortID string) (string, error) {
 		"organization_id":      orgID,
 		"working_directory_id": wdWrap.WorkingDirectory.ID,
 		"name":                 "scratch-" + shortID,
+		"is_ephemeral":         true,
 	})
 	if err != nil {
 		return "", fmt.Errorf("create_organization_position: %w", err)
