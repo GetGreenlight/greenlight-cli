@@ -59,7 +59,7 @@ func runRegister(args []string) {
 	}
 	hostname, _ := os.Hostname()
 
-	ioDeviceID, err := registerHost(baseURL, userID, hostID, hostname)
+	ioDeviceID, ioDeviceSecret, err := registerHost(baseURL, userID, hostID, hostname)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error registering host: %v\n", err)
 		os.Exit(1)
@@ -69,14 +69,14 @@ func runRegister(args []string) {
 		fmt.Fprintf(os.Stderr, "Error saving host_id: %v\n", err)
 		os.Exit(1)
 	}
-
-	fmt.Fprintf(os.Stderr, "Registered host %s\n", hostID)
-
-	if ioDeviceID != "" {
-		if err := writeConfigValue("io_device_id", ioDeviceID); err != nil {
-			fmt.Fprintf(os.Stderr, "Error saving io_device_id: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Fprintf(os.Stderr, "Registered io_device %s\n", ioDeviceID)
+	if err := writeConfigValue("io_device_id", ioDeviceID); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving io_device_id: %v\n", err)
+		os.Exit(1)
 	}
+	if err := writeConfigValue("io_device_secret", ioDeviceSecret); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving io_device_secret: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stderr, "Registered host %s (io_device %s)\n", hostID, ioDeviceID)
 }

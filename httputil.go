@@ -63,8 +63,10 @@ func registerUser(baseURL, email, name, orgName string) (userID, orgID string, e
 }
 
 // registerHost registers a host (daemon) for a user. Returns the io_device_id
-// the server allocated (or found) for this host's terminal.
-func registerHost(baseURL, userID, hostID, hostname string) (string, error) {
+// and the plaintext secret the server allocated for this host's terminal.
+// A fresh secret is minted on every call — re-running `greenlight register`
+// doubles as credential rotation.
+func registerHost(baseURL, userID, hostID, hostname string) (ioDeviceID, secret string, err error) {
 	payload := map[string]string{
 		"user_id": userID,
 		"host_id": hostID,
@@ -74,29 +76,33 @@ func registerHost(baseURL, userID, hostID, hostname string) (string, error) {
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("failed to encode request: %w", err)
+		return "", "", fmt.Errorf("failed to encode request: %w", err)
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Post(baseURL+"/hosts/register", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("host registration request failed: %w", err)
+		return "", "", fmt.Errorf("host registration request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 404 {
-		return "", fmt.Errorf("unknown user (register first with 'greenlight register <email>')")
+		return "", "", fmt.Errorf("unknown user (register first with 'greenlight register <email>')")
 	}
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("host registration failed (HTTP %d)", resp.StatusCode)
+		return "", "", fmt.Errorf("host registration failed (HTTP %d)", resp.StatusCode)
 	}
 
 	var result struct {
-		IODeviceID string `json:"io_device_id"`
+		IODeviceID     string `json:"io_device_id"`
+		IODeviceSecret string `json:"io_device_secret"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
+		return "", "", fmt.Errorf("failed to decode response: %w", err)
 	}
-	return result.IODeviceID, nil
+	if result.IODeviceID == "" || result.IODeviceSecret == "" {
+		return "", "", fmt.Errorf("server returned empty io_device credentials")
+	}
+	return result.IODeviceID, result.IODeviceSecret, nil
 }
 

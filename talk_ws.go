@@ -28,7 +28,7 @@ type wsDisconnectedMsg struct{ err string }
 type wsReconnectingMsg struct{ after time.Duration }
 type wsMessageMsg struct{ data []byte }
 
-func newTalkWS(userID string) (*talkWS, error) {
+func newTalkWS(ioDeviceID, secret string) (*talkWS, error) {
 	if wsURL == "" {
 		return nil, fmt.Errorf("no relay server URL configured")
 	}
@@ -36,17 +36,14 @@ func newTalkWS(userID string) (*talkWS, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bad relay URL: %w", err)
 	}
-	// Build-time wsURL points at /ws/relay (or /ws/daemon for daemon mode).
-	// The TUI talks to the phone-equivalent /ws endpoint instead.
+	// Build-time wsURL points at /ws/daemon (legacy /ws/relay path is rewritten
+	// by the daemon at dial time). The TUI uses the phone-equivalent /ws
+	// endpoint and authenticates as its host's terminal io_device —
+	// /hosts/register allocates the io_device_id + secret at enrollment.
 	u.Path = "/ws"
 	q := u.Query()
-	q.Set("human_user_id", userID)
-	// CLI-side auth: the server accepts host_id (from /hosts/register) as
-	// an alternative to the iOS Keychain secret. If the host isn't enrolled
-	// yet, `greenlight daemon` will register it on startup.
-	if hostID := readConfigValue("host_id"); hostID != "" {
-		q.Set("host_id", hostID)
-	}
+	q.Set("io_device_id", ioDeviceID)
+	q.Set("secret", secret)
 	u.RawQuery = q.Encode()
 
 	ctx, cancel := context.WithCancel(context.Background())

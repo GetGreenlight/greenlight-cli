@@ -33,8 +33,9 @@ Press ctrl+c or esc to quit.
 	}
 	fs.Parse(args)
 
-	userID := readConfigValue("user_id")
-	if userID == "" {
+	ioDeviceID := readConfigValue("io_device_id")
+	ioDeviceSecret := readConfigValue("io_device_secret")
+	if ioDeviceID == "" || ioDeviceSecret == "" {
 		fmt.Fprintf(os.Stderr, "greenlight: not registered (run 'greenlight register <email>' first)\n")
 		os.Exit(1)
 	}
@@ -43,7 +44,7 @@ Press ctrl+c or esc to quit.
 		os.Exit(1)
 	}
 
-	ws, err := newTalkWS(userID)
+	ws, err := newTalkWS(ioDeviceID, ioDeviceSecret)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 		os.Exit(1)
