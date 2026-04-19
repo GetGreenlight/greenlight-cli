@@ -496,7 +496,11 @@ func (d *Daemon) handleConn(conn net.Conn) {
 		d.handleStatus(conn)
 	case "stop":
 		sendControl(conn, ipcResponse{Type: "ok"})
-		go d.Shutdown()
+		// Run Shutdown synchronously so it completes under d.wg before the
+		// daemon main loop exits. Otherwise Run() can return (listener closed,
+		// done closed, wg empty because handleConn already returned) and the
+		// process dies before Stop → killStreamer runs, orphaning streamers.
+		d.Shutdown()
 	case "update_shutdown":
 		d.handleUpdateShutdown(conn, req)
 	case "ws_request":
