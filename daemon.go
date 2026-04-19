@@ -490,9 +490,21 @@ func (d *Daemon) setHostDesiredStatus(status string) {
 		"host_id":        d.hostID,
 		"desired_status": status,
 	})
-	if _, err := d.daemonWS.SendWSRequest(generateUUID(), "update_host_desired_status", data); err != nil {
+	resp, err := d.daemonWS.SendWSRequest(generateUUID(), "update_host_desired_status", data)
+	if err != nil {
 		log.Printf("daemon: update host desired_status=%s failed: %v", status, err)
+		return
 	}
+	// The server returns {"error": "..."} for anything it rejects (unknown
+	// message type, host scoping failures, etc.). Log so it isn't swallowed.
+	var parsed struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(resp, &parsed) == nil && parsed.Error != "" {
+		log.Printf("daemon: update host desired_status=%s rejected: %s", status, parsed.Error)
+		return
+	}
+	log.Printf("daemon: update host desired_status=%s ok", status)
 }
 
 // handleConn processes a single client connection.
