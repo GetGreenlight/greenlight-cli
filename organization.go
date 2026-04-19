@@ -701,7 +701,7 @@ func runOrganizationPos(args []string) {
 
 func runOrganizationAgent(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight org agent <list|get|create|stop|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight org agent <list|get|create|sleep|wake|retire>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -853,25 +853,36 @@ func runOrganizationAgent(args []string) {
 			// Fallback: if we couldn't parse the id, just dump the response.
 		}
 		printJSON(data)
-	case "stop":
-		fs := flag.NewFlagSet("agent stop", flag.ExitOnError)
+	case "sleep":
+		fs := flag.NewFlagSet("agent sleep", flag.ExitOnError)
 		id := fs.String("id", "", "Agent instance ID")
 		fs.Parse(args[1:])
 		if *id == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
-		// The daemon special-cases update_ai_agent_instance with retired_at:
-		// it kills the tracked PID locally before forwarding the row update.
-		now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
-		data, err := sendWSRequest("update_ai_agent_instance", map[string]interface{}{"id": *id, "status": "retired", "retired_at": now})
+		data, err := sendWSRequest("sleep_ai_agent_instance", map[string]interface{}{"id": *id})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 			os.Exit(1)
 		}
 		printJSON(data)
-	case "delete":
-		fs := flag.NewFlagSet("agent delete", flag.ExitOnError)
+	case "wake":
+		fs := flag.NewFlagSet("agent wake", flag.ExitOnError)
+		id := fs.String("id", "", "Agent instance ID")
+		fs.Parse(args[1:])
+		if *id == "" {
+			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
+			os.Exit(1)
+		}
+		data, err := sendWSRequest("wake_ai_agent_instance", map[string]interface{}{"id": *id})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+			os.Exit(1)
+		}
+		printJSON(data)
+	case "retire":
+		fs := flag.NewFlagSet("agent retire", flag.ExitOnError)
 		id := fs.String("id", "", "Agent instance ID")
 		fs.Parse(args[1:])
 		if *id == "" {
