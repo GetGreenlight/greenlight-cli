@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -18,8 +19,10 @@ import (
 // runTalk launches the interactive TUI for talking to active agent instances
 // over the same /ws endpoint the phone uses.
 func runTalk(args []string) {
-	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Fprintf(os.Stderr, `Usage: greenlight talk
+	fs := flag.NewFlagSet("talk", flag.ExitOnError)
+	focusID := fs.String("focus", "", "ai_agent_instance_id to start focused on (otherwise the first active instance)")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, `Usage: greenlight talk [--focus <ai_agent_instance_id>]
 
 Opens a TUI that connects to your Greenlight account and shows live
 transcripts from any agent instance you have running (spawned via
@@ -27,8 +30,8 @@ transcripts from any agent instance you have running (spawned via
 it to the focused instance. Press Tab to switch focus between instances.
 Press ctrl+c or esc to quit.
 `)
-		os.Exit(0)
 	}
+	fs.Parse(args)
 
 	userID := readConfigValue("user_id")
 	if userID == "" {
@@ -47,6 +50,7 @@ Press ctrl+c or esc to quit.
 	}
 
 	m := newTalkModel(ws)
+	m.initialFocus = *focusID
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	ws.program = p
@@ -87,6 +91,10 @@ type talkModel struct {
 	instances []talkInstance
 	// Currently focused instance's ai_agent_instance_id ("" if none).
 	focused string
+	// initialFocus is set from the --focus CLI flag: if non-empty, the first
+	// applyInstances call that sees this id will jump to it instead of
+	// defaulting to instances[0]. Cleared after consumption.
+	initialFocus string
 	// Per-instance transcript buffers, in-memory only.
 	transcripts map[string][]string
 
@@ -441,6 +449,17 @@ func (m *talkModel) applyInstances(wire []talkInstanceWire) {
 			aiAgentInstanceID: s.ID,
 			project:           s.Name,
 		})
+	}
+	// If the caller passed --focus and the requested instance just appeared,
+	// jump straight to it. One-shot: clear initialFocus after honoring it.
+	if m.initialFocus != "" {
+		for _, s := range m.instances {
+			if s.aiAgentInstanceID == m.initialFocus {
+				m.focused = m.initialFocus
+				m.initialFocus = ""
+				return
+			}
+		}
 	}
 	stillThere := false
 	for _, s := range m.instances {

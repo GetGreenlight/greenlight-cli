@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -742,6 +743,7 @@ func runOrganizationAgent(args []string) {
 		harnessID := fs.Int("harness", 0, "Harness ID")
 		name := fs.String("name", "", "Human-readable name")
 		hostID := fs.String("host-id", "", "Host on which the agent should run (defaults to this host; picker only — new hosts must be enrolled via 'greenlight daemon start' on that machine)")
+		adhoc := fs.Bool("adhoc", false, "Skip all prompts and spawn a disposable agent under $HOME/greenlight_agents/scratch/. Flags still override individual defaults; unset ones fall back to: host=this host, harness=first listed, model=first listed, a fresh scratch position+wd, name='Scratch <id>'. Ephemeral agents auto-rename from their first user message and group separately in the iOS agent list.")
 		fs.Parse(args[1:])
 
 		orgID := workingOrgID()
@@ -751,59 +753,70 @@ func runOrganizationAgent(args []string) {
 		}
 
 		reader := bufio.NewReader(os.Stdin)
-		if *name == "" {
-			*name = promptLine(reader, "Agent Name: ")
-		}
-		if *name == "" {
-			fmt.Fprintf(os.Stderr, "greenlight: name required\n")
-			os.Exit(1)
-		}
 
-		// Host — cursor defaults to this daemon's host_id. No "create new"
-		// entry; a new host has to be enrolled out-of-band by running
-		// 'greenlight daemon start' on the target machine.
-		if *hostID == "" {
-			id, err := selectHost(readConfigValue("host_id"))
-			if err != nil {
+		// Ad-hoc: fill every unset field with a default and skip every prompt.
+		// Explicit flags still win, so `--adhoc --name Foo` gives you a named
+		// ephemeral agent.
+		if *adhoc {
+			if err := fillAdhocDefaults(orgID, reader, name, hostID, harnessID, modelID, posID); err != nil {
 				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 				os.Exit(1)
 			}
-			*hostID = id
-		}
+		} else {
+			if *name == "" {
+				*name = promptLine(reader, "Agent Name: ")
+			}
+			if *name == "" {
+				fmt.Fprintf(os.Stderr, "greenlight: name required\n")
+				os.Exit(1)
+			}
 
-		if *harnessID == 0 {
-			id, err := selectHarness()
-			if err != nil {
+			// Host — cursor defaults to this daemon's host_id. No "create new"
+			// entry; a new host has to be enrolled out-of-band by running
+			// 'greenlight daemon start' on the target machine.
+			if *hostID == "" {
+				id, err := selectHost(readConfigValue("host_id"))
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+					os.Exit(1)
+				}
+				*hostID = id
+			}
+
+			if *harnessID == 0 {
+				id, err := selectHarness()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+					os.Exit(1)
+				}
+				*harnessID = id
+			}
+
+			if *modelID == "" {
+				id, err := selectAIBrainModel(orgID)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+					os.Exit(1)
+				}
+				*modelID = id
+			}
+
+			if *posID == "" {
+				id, err := selectOrganizationPosition(orgID, *hostID)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+					os.Exit(1)
+				}
+				*posID = id
+			}
+
+			// The daemon will spawn the harness with cwd set to the position's
+			// working_directory. Make sure that directory exists on disk first —
+			// prompt the user to create it if it doesn't, and bail otherwise.
+			if err := ensureWorkingDirOnDisk(reader, *posID); err != nil {
 				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 				os.Exit(1)
 			}
-			*harnessID = id
-		}
-
-		if *modelID == "" {
-			id, err := selectAIBrainModel(orgID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-				os.Exit(1)
-			}
-			*modelID = id
-		}
-
-		if *posID == "" {
-			id, err := selectOrganizationPosition(orgID, *hostID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-				os.Exit(1)
-			}
-			*posID = id
-		}
-
-		// The daemon will spawn the harness with cwd set to the position's
-		// working_directory. Make sure that directory exists on disk first —
-		// prompt the user to create it if it doesn't, and bail otherwise.
-		if err := ensureWorkingDirOnDisk(reader, *posID); err != nil {
-			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-			os.Exit(1)
 		}
 
 		payload := map[string]interface{}{
@@ -812,11 +825,29 @@ func runOrganizationAgent(args []string) {
 			"ai_brain_model_id":        *modelID,
 			"harness_id":               *harnessID,
 			"name":                     *name,
+			"is_ephemeral":             *adhoc,
 		}
 		data, err := sendWSRequest("create_ai_agent_instance", payload)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 			os.Exit(1)
+		}
+
+		// For ad-hoc spawns, land the user in `greenlight talk` focused on the
+		// new instance so they can start typing immediately. Regular creates
+		// just print the server response like before.
+		if *adhoc {
+			var wrap struct {
+				AIAgentInstance struct {
+					ID string `json:"id"`
+				} `json:"ai_agent_instance"`
+			}
+			if err := json.Unmarshal(data, &wrap); err == nil && wrap.AIAgentInstance.ID != "" {
+				fmt.Fprintf(os.Stderr, "Spawned ad-hoc agent %s. Opening talk…\n", wrap.AIAgentInstance.ID)
+				runTalk([]string{"--focus", wrap.AIAgentInstance.ID})
+				return
+			}
+			// Fallback: if we couldn't parse the id, just dump the response.
 		}
 		printJSON(data)
 	case "stop":
@@ -969,4 +1000,143 @@ func ensureWorkingDirOnDisk(reader *bufio.Reader, positionID string) error {
 	}
 	fmt.Fprintf(os.Stderr, "Created %s\n", dir)
 	return nil
+}
+
+// =============================================================================
+// Ad-hoc spawn helpers
+// =============================================================================
+
+// fillAdhocDefaults populates every unset agent-create field with a sensible
+// default so the user can spawn a scratch agent with zero prompts. Explicit
+// flags on the command line still win — we only touch pointer values that
+// are still at their zero value.
+func fillAdhocDefaults(orgID string, reader *bufio.Reader, name, hostID *string, harnessID *int, modelID, posID *string) error {
+	shortID := strings.ReplaceAll(generateUUID(), "-", "")[:8]
+
+	if *name == "" {
+		*name = "Scratch " + shortID
+	}
+	if *hostID == "" {
+		h := readConfigValue("host_id")
+		if h == "" {
+			return fmt.Errorf("no local host_id in config — run 'greenlight daemon start' first")
+		}
+		*hostID = h
+	}
+	if *harnessID == 0 {
+		id, err := firstHarnessID()
+		if err != nil {
+			return err
+		}
+		*harnessID = id
+	}
+	if *modelID == "" {
+		id, err := firstModelID(orgID)
+		if err != nil {
+			return err
+		}
+		*modelID = id
+	}
+	if *posID == "" {
+		id, err := createScratchPositionAndWD(orgID, *hostID, shortID)
+		if err != nil {
+			return err
+		}
+		*posID = id
+	}
+	return nil
+}
+
+// firstHarnessID returns the first row from list_harnesses. The server's
+// ordering happens to put claude-code first today, which is the right
+// default for a one-off scratch agent on a dev machine.
+func firstHarnessID() (int, error) {
+	data, err := sendWSRequest("list_harnesses", map[string]interface{}{})
+	if err != nil {
+		return 0, fmt.Errorf("list_harnesses: %w", err)
+	}
+	var resp struct {
+		Harnesses []struct {
+			ID int `json:"id"`
+		} `json:"harnesses"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, fmt.Errorf("list_harnesses parse: %w", err)
+	}
+	if len(resp.Harnesses) == 0 {
+		return 0, fmt.Errorf("no harnesses registered on the server")
+	}
+	return resp.Harnesses[0].ID, nil
+}
+
+// firstModelID returns the first ai_brain_model listed for the org.
+func firstModelID(orgID string) (string, error) {
+	data, err := sendWSRequest("list_ai_brain_models", map[string]interface{}{"organization_id": orgID})
+	if err != nil {
+		return "", fmt.Errorf("list_ai_brain_models: %w", err)
+	}
+	var resp struct {
+		AIBrainModels []struct {
+			ID string `json:"id"`
+		} `json:"ai_brain_models"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", fmt.Errorf("list_ai_brain_models parse: %w", err)
+	}
+	if len(resp.AIBrainModels) == 0 {
+		return "", fmt.Errorf("no ai_brain_models in this org — add one with 'greenlight org model create'")
+	}
+	return resp.AIBrainModels[0].ID, nil
+}
+
+// createScratchPositionAndWD creates a fresh working_directory under
+// $HOME/greenlight_agents/scratch/<shortID>/ and a paired position named
+// scratch-<shortID>. Returns the position ID. The shortID is shared with
+// the caller's agent name so on-disk files, DB rows, and UI labels line up.
+func createScratchPositionAndWD(orgID, hostID, shortID string) (string, error) {
+	home, _ := os.UserHomeDir()
+	dirPath := filepath.Join(home, "greenlight_agents", "scratch", shortID)
+
+	wdResp, err := sendWSRequest("create_working_directory", map[string]interface{}{
+		"organization_id": orgID,
+		"host_id":         hostID,
+		"directory_path":  dirPath,
+	})
+	if err != nil {
+		return "", fmt.Errorf("create_working_directory: %w", err)
+	}
+	var wdWrap struct {
+		WorkingDirectory struct {
+			ID string `json:"id"`
+		} `json:"working_directory"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(wdResp, &wdWrap); err != nil {
+		return "", fmt.Errorf("create_working_directory parse: %w", err)
+	}
+	if wdWrap.Error != "" {
+		return "", fmt.Errorf("create_working_directory: %s", wdWrap.Error)
+	}
+
+	posResp, err := sendWSRequest("create_organization_position", map[string]interface{}{
+		"organization_id":      orgID,
+		"working_directory_id": wdWrap.WorkingDirectory.ID,
+		"name":                 "scratch-" + shortID,
+	})
+	if err != nil {
+		return "", fmt.Errorf("create_organization_position: %w", err)
+	}
+	var posWrap struct {
+		OrganizationPosition struct {
+			ID string `json:"id"`
+		} `json:"organization_position"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(posResp, &posWrap); err != nil {
+		return "", fmt.Errorf("create_organization_position parse: %w", err)
+	}
+	if posWrap.Error != "" {
+		return "", fmt.Errorf("create_organization_position: %s", posWrap.Error)
+	}
+	return posWrap.OrganizationPosition.ID, nil
 }
