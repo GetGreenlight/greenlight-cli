@@ -116,6 +116,9 @@ func (d *Daemon) newAgentInstance(req ipcRequest) (*AgentInstance, error) {
 	}
 
 	installAgentFiles(agent, aiAgentInstanceID)
+	if agent == "claude" {
+		preAcceptClaudeTrust(cwd)
+	}
 
 	s := &AgentInstance{
 		aiAgentInstanceID: aiAgentInstanceID,

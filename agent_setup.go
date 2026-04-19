@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -85,6 +86,58 @@ func buildAgentCommand(agent string) (*AgentSetup, error) {
 		AgentSessionID:    agentSessionID,
 		AIAgentInstanceID: aiAgentInstanceID,
 	}, nil
+}
+
+// preAcceptClaudeTrust ensures claude's "Do you trust the files in this folder?"
+// dialog is pre-accepted for cwd. Without this, on a fresh directory claude
+// silently consumes the first user message as the trust-dialog answer — the
+// message never becomes a conversation turn and no jsonl is written until the
+// second message.
+//
+// Claude stores trust per-project in ~/.claude.json under
+// projects.<abs-cwd>.hasTrustDialogAccepted. We read-modify-write that file,
+// preserving every other field.
+func preAcceptClaudeTrust(cwd string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	path := filepath.Join(home, ".claude.json")
+
+	var root map[string]any
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &root); err != nil {
+			log.Printf("preAcceptClaudeTrust: %s is not valid JSON, leaving alone: %v", path, err)
+			return
+		}
+	}
+	if root == nil {
+		root = map[string]any{}
+	}
+
+	projects, _ := root["projects"].(map[string]any)
+	if projects == nil {
+		projects = map[string]any{}
+		root["projects"] = projects
+	}
+	proj, _ := projects[cwd].(map[string]any)
+	if proj == nil {
+		proj = map[string]any{}
+		projects[cwd] = proj
+	}
+	if proj["hasTrustDialogAccepted"] == true {
+		return // already trusted
+	}
+	proj["hasTrustDialogAccepted"] = true
+
+	data, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		log.Printf("preAcceptClaudeTrust: marshal failed: %v", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		log.Printf("preAcceptClaudeTrust: write %s failed: %v", path, err)
+	}
 }
 
 // installAgentFiles installs agent-specific instruction files for agents that use them.
