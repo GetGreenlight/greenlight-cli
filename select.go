@@ -452,6 +452,56 @@ func selectWorkingDirectoryForPosition(orgID, positionName, hostID string) (stri
 	return id, nil
 }
 
+// findOrCreateWorkingDirectoryByPath prompts for a directory_path and asks
+// the server to either reuse a matching non-abandoned working_directory or
+// create one. Used by the agent-create flow, which deliberately does not
+// surface existing wd entities to the user — they think in paths, not ids.
+func findOrCreateWorkingDirectoryByPath(orgID, hostID, positionName string) (string, error) {
+	if orgID == "" {
+		orgID = workingOrgID()
+	}
+	if orgID == "" {
+		return "", fmt.Errorf("no working organization set (run 'greenlight org org use --id <ID>')")
+	}
+	if hostID == "" {
+		hostID = readConfigValue("host_id")
+	}
+	if hostID == "" {
+		return "", fmt.Errorf("host ID not found — run 'greenlight daemon start' to enroll this host")
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	dir := promptWithDefault(reader, "Directory path", defaultAgentWorkingDirFor(positionName))
+
+	data, err := sendWSRequest("find_or_create_working_directory", map[string]interface{}{
+		"organization_id": orgID,
+		"host_id":         hostID,
+		"directory_path":  dir,
+	})
+	if err != nil {
+		return "", fmt.Errorf("find_or_create_working_directory: %w", err)
+	}
+	var resp struct {
+		WorkingDirectory struct {
+			ID string `json:"id"`
+		} `json:"working_directory"`
+		Created bool   `json:"created"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", fmt.Errorf("parse find_or_create response: %w", err)
+	}
+	if resp.Error != "" {
+		return "", fmt.Errorf("find_or_create_working_directory: %s", resp.Error)
+	}
+	if resp.Created {
+		fmt.Printf("Created working directory %s at %s.\n", resp.WorkingDirectory.ID, dir)
+	} else {
+		fmt.Printf("Reusing existing working directory %s at %s.\n", resp.WorkingDirectory.ID, dir)
+	}
+	return resp.WorkingDirectory.ID, nil
+}
+
 // createWorkingDirectoryInteractive creates a new working_directory row on the
 // given host. If hostID is empty, falls back to the daemon's local host_id from
 // config (for backward-compat callers like 'wd create' that don't yet prompt
@@ -572,7 +622,7 @@ func createOrganizationPositionInteractive(orgID, hostID string) (string, error)
 		fmt.Printf("Position name stored as %q (snake_case).\n", name)
 	}
 
-	wdID, err := selectWorkingDirectoryForPosition(orgID, name, hostID)
+	wdID, err := findOrCreateWorkingDirectoryByPath(orgID, hostID, name)
 	if err != nil {
 		return "", err
 	}
