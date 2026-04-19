@@ -4,10 +4,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"os/exec"
+	"syscall"
 )
 
 // localAgentForHarness translates a server-side harness name (the value in
@@ -212,16 +215,16 @@ func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName, harnessName, cwd
 	d.mu.Unlock()
 
 	// Run the relay PTY in the background. When the child exits, drop the
-	// instance from the registry and run cleanup. status is pure intent
-	// and we don't touch it here — the row stays 'active' until the user
-	// explicitly sleeps or retires it, and the UI computes actual liveness
-	// by joining against the in-memory daemonConns map server-side.
+	// instance from the registry and report actual liveness via pid_status.
+	// We leave status (intent) alone — that's set server-side on explicit
+	// sleep/wake/retire commands.
 	go func() {
-		s.runRelay()
+		waitErr := s.runRelay()
 		d.mu.Lock()
 		delete(d.instances, s.aiAgentInstanceID)
 		d.mu.Unlock()
 		s.Stop()
+		d.reportPIDStatus(s.aiAgentInstanceID, classifyExit(waitErr))
 		log.Printf("daemon: spawned agent instance %s ended", s.aiAgentInstanceID)
 	}()
 
@@ -246,6 +249,42 @@ func (d *Daemon) updateAgentStatus(agentInstanceID, status string) {
 		log.Printf("daemon: failed to update agent %s status to %s: %v", agentInstanceID, status, err)
 	} else {
 		log.Printf("daemon: agent %s status updated to %s", agentInstanceID, status)
+	}
+}
+
+// classifyExit maps a cmd.Wait() error to a pid_status value. A signal
+// exit is 'killed' regardless of who sent the signal — the SoT for
+// "was this user intent?" is the status (intent) column, not pid_status.
+func classifyExit(err error) string {
+	if err == nil {
+		return "exited"
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return "exited"
+	}
+	if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+		if ws.Signaled() {
+			return "killed"
+		}
+	}
+	return "exited"
+}
+
+// reportPIDStatus sends the daemon's actual-liveness update to the
+// server. Best-effort: if the WS isn't connected, we skip — the server
+// will eventually flip pid_status='host_disconnected' when it notices
+// the daemon drop.
+func (d *Daemon) reportPIDStatus(agentInstanceID, pidStatus string) {
+	if d.daemonWS == nil || !d.daemonWS.IsConnected() {
+		return
+	}
+	data, _ := json.Marshal(map[string]string{
+		"id":         agentInstanceID,
+		"pid_status": pidStatus,
+	})
+	if _, err := d.daemonWS.SendWSRequest(generateUUID(), "set_ai_agent_instance_pid_status", data); err != nil {
+		log.Printf("daemon: failed to report pid_status=%s for %s: %v", pidStatus, agentInstanceID, err)
 	}
 }
 

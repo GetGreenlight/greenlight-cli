@@ -196,8 +196,11 @@ func (d *Daemon) newAgentInstance(req ipcRequest) (*AgentInstance, error) {
 	return s, nil
 }
 
-// runRelay runs the PTY child process. When it exits, the instance is done.
-func (s *AgentInstance) runRelay() {
+// runRelay runs the PTY child process. When it exits, the instance is
+// done; the returned error is the result of cmd.Wait() — nil for a clean
+// exit, *exec.ExitError for any nonzero rc or signal. Callers classify
+// this into a pid_status value.
+func (s *AgentInstance) runRelay() error {
 	err := s.relay.RunDaemon()
 
 	s.transcriptCancel()
@@ -209,6 +212,7 @@ func (s *AgentInstance) runRelay() {
 	}
 
 	log.Printf("daemon: agent instance %s relay exited (err=%v)", s.aiAgentInstanceID, err)
+	return err
 }
 
 // Stop terminates the instance, killing the child process and cleaning up.
