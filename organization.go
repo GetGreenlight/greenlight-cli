@@ -889,12 +889,37 @@ func runOrganizationAgent(args []string) {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
+
+		// Resolve the working directory before retiring so we can offer to
+		// delete it locally afterwards. Best-effort — lookup failure just
+		// skips the prompt.
+		wdPath, wdHostID := resolveAgentWorkingDir(*id)
+
 		data, err := sendWSRequest("delete_ai_agent_instance", map[string]interface{}{"id": *id})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 			os.Exit(1)
 		}
 		printJSON(data)
+
+		if wdPath == "" {
+			return
+		}
+		thisHost := readConfigValue("host_id")
+		if wdHostID != "" && thisHost != "" && wdHostID != thisHost {
+			fmt.Fprintf(os.Stderr, "Working directory %s is on host %s; skipping local delete.\n", wdPath, wdHostID)
+			return
+		}
+		reader := bufio.NewReader(os.Stdin)
+		ans := strings.ToLower(strings.TrimSpace(promptLine(reader, fmt.Sprintf("Also delete working directory %s? [y/N]: ", wdPath))))
+		if ans != "y" && ans != "yes" {
+			return
+		}
+		if err := os.RemoveAll(wdPath); err != nil {
+			fmt.Fprintf(os.Stderr, "greenlight: failed to remove %s: %v\n", wdPath, err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Removed %s\n", wdPath)
 	default:
 		fmt.Fprintf(os.Stderr, "greenlight org agent: unknown command %q\n", args[0])
 		os.Exit(1)
@@ -946,6 +971,50 @@ func runOrganizationModel(args []string) {
 		fmt.Fprintf(os.Stderr, "greenlight org ai_model: unknown command %q\n", args[0])
 		os.Exit(1)
 	}
+}
+
+// resolveAgentWorkingDir looks up the working_directory path and host_id
+// for an agent instance. Returns empty strings on any lookup error — callers
+// should treat that as "skip wd-related behavior" rather than fatal.
+func resolveAgentWorkingDir(agentInstanceID string) (string, string) {
+	agentData, err := sendWSRequest("get_ai_agent_instance", map[string]interface{}{"id": agentInstanceID})
+	if err != nil {
+		return "", ""
+	}
+	var agentWrap struct {
+		AIAgentInstance struct {
+			OrganizationPositionID string `json:"organization_position_id"`
+		} `json:"ai_agent_instance"`
+	}
+	if err := json.Unmarshal(agentData, &agentWrap); err != nil || agentWrap.AIAgentInstance.OrganizationPositionID == "" {
+		return "", ""
+	}
+	posData, err := sendWSRequest("get_organization_position", map[string]interface{}{"id": agentWrap.AIAgentInstance.OrganizationPositionID})
+	if err != nil {
+		return "", ""
+	}
+	var posWrap struct {
+		OrganizationPosition struct {
+			WorkingDirectoryID string `json:"working_directory_id"`
+		} `json:"organization_position"`
+	}
+	if err := json.Unmarshal(posData, &posWrap); err != nil || posWrap.OrganizationPosition.WorkingDirectoryID == "" {
+		return "", ""
+	}
+	wdData, err := sendWSRequest("get_working_directory", map[string]interface{}{"id": posWrap.OrganizationPosition.WorkingDirectoryID})
+	if err != nil {
+		return "", ""
+	}
+	var wdWrap struct {
+		WorkingDirectory struct {
+			DirectoryPath string `json:"directory_path"`
+			HostID        string `json:"host_id"`
+		} `json:"working_directory"`
+	}
+	if err := json.Unmarshal(wdData, &wdWrap); err != nil {
+		return "", ""
+	}
+	return wdWrap.WorkingDirectory.DirectoryPath, wdWrap.WorkingDirectory.HostID
 }
 
 // ensureWorkingDirOnDisk resolves the position's working_directory path,
