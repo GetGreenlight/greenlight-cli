@@ -58,6 +58,69 @@ func sendWSRequest(msgType string, data map[string]interface{}) (json.RawMessage
 	return resp.Data, nil
 }
 
+// runArchivalWithCascadePrompt sends a ws_request that may be blocked by
+// live dependents (eliminate/archive/abandon). On a has_live_dependents
+// reply it prints the blocker tree, prompts [y/N], and retries once with
+// cascade=true. Any other error is surfaced verbatim.
+func runArchivalWithCascadePrompt(msgType, entityLabel, id string) {
+	data, err := sendWSRequest(msgType, map[string]interface{}{"id": id})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+		os.Exit(1)
+	}
+	var envelope struct {
+		Error    string          `json:"error"`
+		Blockers json.RawMessage `json:"blockers"`
+	}
+	_ = json.Unmarshal(data, &envelope)
+	if envelope.Error != "has_live_dependents" {
+		printJSON(data)
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "Cannot %s %s %s — live dependents:\n", msgType, entityLabel, id)
+	printBlockerTree(envelope.Blockers)
+	reader := bufio.NewReader(os.Stdin)
+	ans := strings.ToLower(strings.TrimSpace(promptLine(reader, "Retire/eliminate them and continue? [y/N]: ")))
+	if ans != "y" && ans != "yes" {
+		fmt.Fprintln(os.Stderr, "aborted")
+		os.Exit(1)
+	}
+
+	data, err = sendWSRequest(msgType, map[string]interface{}{"id": id, "cascade": true})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+		os.Exit(1)
+	}
+	printJSON(data)
+}
+
+// printBlockerTree renders a blockers payload from the server in a
+// human-readable tree. Accepts either {agents: [...]} (position case) or
+// {positions: [{..., agents: [...]}]} (JD/WD case).
+func printBlockerTree(raw json.RawMessage) {
+	var b struct {
+		Agents    []struct{ ID, Name string } `json:"agents"`
+		Positions []struct {
+			ID, Name string
+			Agents   []struct{ ID, Name string } `json:"agents"`
+		} `json:"positions"`
+	}
+	if err := json.Unmarshal(raw, &b); err != nil {
+		fmt.Fprintf(os.Stderr, "  (unparseable blockers: %s)\n", string(raw))
+		return
+	}
+	for _, a := range b.Agents {
+		fmt.Fprintf(os.Stderr, "  - agent %s (%s)\n", a.Name, a.ID)
+	}
+	for _, p := range b.Positions {
+		fmt.Fprintf(os.Stderr, "  - position %s (%s)\n", p.Name, p.ID)
+		for _, a := range p.Agents {
+			fmt.Fprintf(os.Stderr, "      └─ agent %s (%s)\n", a.Name, a.ID)
+		}
+	}
+}
+
 // printJSON pretty-prints a JSON value to stdout.
 func printJSON(v json.RawMessage) {
 	var m interface{}
@@ -421,12 +484,7 @@ func runOrganizationWD(args []string) {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
-		data, err := sendWSRequest("abandon_working_directory", map[string]interface{}{"id": *id})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-			os.Exit(1)
-		}
-		printJSON(data)
+		runArchivalWithCascadePrompt("abandon_working_directory", "working_directory", *id)
 	case "delete":
 		fs := flag.NewFlagSet("wd delete", flag.ExitOnError)
 		id := fs.String("id", "", "Working directory ID")
@@ -564,12 +622,7 @@ func runOrganizationJob(args []string) {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
-		data, err := sendWSRequest("archive_agent_job_description", map[string]interface{}{"id": *id})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-			os.Exit(1)
-		}
-		printJSON(data)
+		runArchivalWithCascadePrompt("archive_agent_job_description", "job_description", *id)
 	case "delete":
 		fs := flag.NewFlagSet("job delete", flag.ExitOnError)
 		id := fs.String("id", "", "Job description ID")
@@ -711,12 +764,7 @@ func runOrganizationPos(args []string) {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
-		data, err := sendWSRequest("eliminate_organization_position", map[string]interface{}{"id": *id})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-			os.Exit(1)
-		}
-		printJSON(data)
+		runArchivalWithCascadePrompt("eliminate_organization_position", "position", *id)
 	case "delete":
 		fs := flag.NewFlagSet("pos delete", flag.ExitOnError)
 		id := fs.String("id", "", "Position ID")
