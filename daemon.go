@@ -365,6 +365,11 @@ func (d *Daemon) Run() {
 
 // Shutdown gracefully stops the daemon, terminating all instances.
 func (d *Daemon) Shutdown() {
+	// Record the user's intent to be offline before we tear down the WS.
+	// A crash or SIGKILL skips this entirely, leaving desired_status at
+	// 'connected' — which is the whole point.
+	d.setHostDesiredStatus("disconnected")
+
 	close(d.done)
 	d.listener.Close()
 	os.Remove(d.sockPath)
@@ -468,6 +473,26 @@ func (d *Daemon) startDaemonWS() {
 		log.Printf("daemon: WARNING WebSocket not connected after 5s, proceeding anyway")
 	}
 	log.Printf("daemon: WebSocket started (human_user %s, host %s)", d.humanUserID, d.hostID)
+
+	// Record the user's intent to be online. The column is strictly
+	// intent-based: only graceful start/stop mutate it.
+	d.setHostDesiredStatus("connected")
+}
+
+// setHostDesiredStatus sends hosts.desired_status to the server. Best-effort:
+// if the WebSocket isn't connected, we skip rather than buffer. The caller's
+// intent is recorded only when a live connection exists.
+func (d *Daemon) setHostDesiredStatus(status string) {
+	if d.daemonWS == nil || !d.daemonWS.IsConnected() || d.hostID == "" {
+		return
+	}
+	data, _ := json.Marshal(map[string]string{
+		"host_id":        d.hostID,
+		"desired_status": status,
+	})
+	if _, err := d.daemonWS.SendWSRequest(generateUUID(), "update_host_desired_status", data); err != nil {
+		log.Printf("daemon: update host desired_status=%s failed: %v", status, err)
+	}
 }
 
 // handleConn processes a single client connection.
