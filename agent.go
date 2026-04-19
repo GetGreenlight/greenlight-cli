@@ -134,6 +134,25 @@ func deriveTranscriptPath(agent, sessionID, cwd string) string {
 	}
 }
 
+// sanitizeClaudeProjectHash turns an absolute cwd into claude's on-disk
+// project-directory name. Claude replaces every non-alphanumeric-and-non-dash
+// character (/, _, ., etc.) with a dash — not just slashes. Example:
+// /Users/mattbeller/greenlight_agents/scratch/abc123
+//   → -Users-mattbeller-greenlight-agents-scratch-abc123
+func sanitizeClaudeProjectHash(cwd string) string {
+	var b strings.Builder
+	b.Grow(len(cwd))
+	for _, r := range cwd {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
+}
+
 // deriveClaudeTranscriptPathByID returns the transcript path for a known session ID.
 // The file may not exist yet (the caller polls until it appears).
 func deriveClaudeTranscriptPathByID(sessionID, cwd string) string {
@@ -141,7 +160,7 @@ func deriveClaudeTranscriptPathByID(sessionID, cwd string) string {
 	if err != nil {
 		return ""
 	}
-	projHash := strings.ReplaceAll(cwd, "/", "-")
+	projHash := sanitizeClaudeProjectHash(cwd)
 	return filepath.Join(home, ".claude", "projects", projHash, sessionID+".jsonl")
 }
 
@@ -150,7 +169,7 @@ func deriveClaudeTranscriptPath(cwd string) string {
 	if err != nil {
 		return ""
 	}
-	projHash := strings.ReplaceAll(cwd, "/", "-")
+	projHash := sanitizeClaudeProjectHash(cwd)
 	projDir := filepath.Join(home, ".claude", "projects", projHash)
 	entries, err := os.ReadDir(projDir)
 	if err != nil {
