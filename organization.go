@@ -833,12 +833,12 @@ func runOrganizationAgent(args []string) {
 			os.Exit(1)
 		}
 
-		// For ad-hoc spawns, surface the new instance's id so the user can run
-		// `greenlight talk --focus <id>` themselves. Auto-launching talk in-
-		// process turned out to race with the PTY child's startup in a way
-		// we haven't nailed down yet; leaving the terminal handoff manual
-		// until that's debugged. See git history for the earlier auto-launch
-		// attempt if you pick this back up.
+		// For ad-hoc spawns, land the user in `greenlight talk` focused on the
+		// new instance so they can start typing immediately. Note: claude's
+		// own startup (loading plugins, fetching updates) can take a minute
+		// or more. Anything typed during that window sits in the PTY buffer
+		// and is processed once claude is ready. Regular (non-adhoc) creates
+		// still just print the server response.
 		if *adhoc {
 			var wrap struct {
 				AIAgentInstance struct {
@@ -846,8 +846,8 @@ func runOrganizationAgent(args []string) {
 				} `json:"ai_agent_instance"`
 			}
 			if err := json.Unmarshal(data, &wrap); err == nil && wrap.AIAgentInstance.ID != "" {
-				fmt.Fprintf(os.Stderr, "Spawned ad-hoc agent %s.\n", wrap.AIAgentInstance.ID)
-				fmt.Fprintf(os.Stderr, "Open it with: greenlight talk --focus %s\n", wrap.AIAgentInstance.ID)
+				fmt.Fprintf(os.Stderr, "Spawned ad-hoc agent %s. Opening talk (agent may take a moment to warm up)…\n", wrap.AIAgentInstance.ID)
+				runTalk([]string{"--focus", wrap.AIAgentInstance.ID})
 				return
 			}
 			// Fallback: if we couldn't parse the id, just dump the response.
