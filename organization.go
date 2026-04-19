@@ -316,7 +316,7 @@ func runOrganizationUser(args []string) {
 
 func runOrganizationWD(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight org wd <list|get|create|update|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight org wd <list|get|create|update|abandon|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -413,6 +413,20 @@ func runOrganizationWD(args []string) {
 			os.Exit(1)
 		}
 		printJSON(data)
+	case "abandon":
+		fs := flag.NewFlagSet("wd abandon", flag.ExitOnError)
+		id := fs.String("id", "", "Working directory ID")
+		fs.Parse(args[1:])
+		if *id == "" {
+			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
+			os.Exit(1)
+		}
+		data, err := sendWSRequest("abandon_working_directory", map[string]interface{}{"id": *id})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+			os.Exit(1)
+		}
+		printJSON(data)
 	case "delete":
 		fs := flag.NewFlagSet("wd delete", flag.ExitOnError)
 		id := fs.String("id", "", "Working directory ID")
@@ -439,7 +453,7 @@ func runOrganizationWD(args []string) {
 
 func runOrganizationJob(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight org job_description <list|get|create|update|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight org job_description <list|get|create|update|archive|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -542,6 +556,20 @@ func runOrganizationJob(args []string) {
 			os.Exit(1)
 		}
 		printJSON(data)
+	case "archive":
+		fs := flag.NewFlagSet("job archive", flag.ExitOnError)
+		id := fs.String("id", "", "Job description ID")
+		fs.Parse(args[1:])
+		if *id == "" {
+			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
+			os.Exit(1)
+		}
+		data, err := sendWSRequest("archive_agent_job_description", map[string]interface{}{"id": *id})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+			os.Exit(1)
+		}
+		printJSON(data)
 	case "delete":
 		fs := flag.NewFlagSet("job delete", flag.ExitOnError)
 		id := fs.String("id", "", "Job description ID")
@@ -568,7 +596,7 @@ func runOrganizationJob(args []string) {
 
 func runOrganizationPos(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight org position <list|get|create|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight org position <list|get|create|eliminate|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -670,6 +698,20 @@ func runOrganizationPos(args []string) {
 			payload["parent_position_id"] = *parentID
 		}
 		data, err := sendWSRequest("create_organization_position", payload)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+			os.Exit(1)
+		}
+		printJSON(data)
+	case "eliminate":
+		fs := flag.NewFlagSet("pos eliminate", flag.ExitOnError)
+		id := fs.String("id", "", "Position ID")
+		fs.Parse(args[1:])
+		if *id == "" {
+			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
+			os.Exit(1)
+		}
+		data, err := sendWSRequest("eliminate_organization_position", map[string]interface{}{"id": *id})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 			os.Exit(1)
