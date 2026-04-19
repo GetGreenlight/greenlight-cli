@@ -212,22 +212,16 @@ func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName, harnessName, cwd
 	d.mu.Unlock()
 
 	// Run the relay PTY in the background. When the child exits, drop the
-	// instance from the registry and run cleanup. No client is attached, so
-	// the PTY drain inside runRelay discards any output the child writes
-	// directly to its terminal (transcripts still flow via the streamer).
+	// instance from the registry and run cleanup. status is pure intent
+	// and we don't touch it here — the row stays 'active' until the user
+	// explicitly sleeps or retires it, and the UI computes actual liveness
+	// by joining against the in-memory daemonConns map server-side.
 	go func() {
 		s.runRelay()
 		d.mu.Lock()
-		_, wasTracked := d.instances[s.aiAgentInstanceID]
 		delete(d.instances, s.aiAgentInstanceID)
 		d.mu.Unlock()
 		s.Stop()
-		// Only mark inactive if the instance was still tracked — if it was
-		// already removed (e.g., by a retire/stop), the caller set the
-		// status to 'retired' and we shouldn't overwrite it.
-		if wasTracked {
-			d.updateAgentStatus(agentInstanceID, "inactive")
-		}
 		log.Printf("daemon: spawned agent instance %s ended", s.aiAgentInstanceID)
 	}()
 
@@ -252,5 +246,56 @@ func (d *Daemon) updateAgentStatus(agentInstanceID, status string) {
 		log.Printf("daemon: failed to update agent %s status to %s: %v", agentInstanceID, status, err)
 	} else {
 		log.Printf("daemon: agent %s status updated to %s", agentInstanceID, status)
+	}
+}
+
+// handleSleepAgentInstance is called by the daemon WS when the server
+// forwards a sleep command. The status flip is authoritative on the
+// server; our job is just to tear down the local child process. No-op
+// if the instance isn't currently running on this daemon.
+func (d *Daemon) handleSleepAgentInstance(agentInstanceID string) {
+	d.mu.Lock()
+	s := d.instances[agentInstanceID]
+	delete(d.instances, agentInstanceID)
+	d.mu.Unlock()
+	if s == nil {
+		return
+	}
+	s.Stop()
+}
+
+// handleWakeAgentInstance is called by the daemon WS when the server
+// forwards a wake command with spawn context. Spawns a fresh child
+// process for the instance. If one is already running locally we
+// short-circuit — wake is idempotent.
+func (d *Daemon) handleWakeAgentInstance(agentInstanceID string, spawnCtx json.RawMessage) {
+	d.mu.RLock()
+	_, exists := d.instances[agentInstanceID]
+	d.mu.RUnlock()
+	if exists {
+		log.Printf("daemon: wake %s: already running locally, ignoring", agentInstanceID)
+		return
+	}
+
+	var ctx struct {
+		HarnessName   string `json:"harness_name"`
+		HostID        string `json:"host_id"`
+		DirectoryPath string `json:"directory_path"`
+		ModelProvider string `json:"model_provider"`
+		ModelName     string `json:"model_name"`
+		AgentName     string `json:"agent_name"`
+	}
+	if err := json.Unmarshal(spawnCtx, &ctx); err != nil {
+		log.Printf("daemon: wake %s: invalid spawn_context: %v", agentInstanceID, err)
+		return
+	}
+	if ctx.HostID != "" && d.hostID != "" && ctx.HostID != d.hostID {
+		// Shouldn't happen — the server looked up our daemon via hostID
+		// before forwarding — but guard anyway.
+		log.Printf("daemon: wake %s: spawn_context host %s doesn't match this daemon %s", agentInstanceID, ctx.HostID, d.hostID)
+		return
+	}
+	if _, err := d.spawnAgentInstance(agentInstanceID, ctx.AgentName, ctx.HarnessName, ctx.DirectoryPath, ctx.ModelProvider, ctx.ModelName); err != nil {
+		log.Printf("daemon: wake %s: spawn failed: %v", agentInstanceID, err)
 	}
 }

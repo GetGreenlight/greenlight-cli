@@ -31,6 +31,11 @@ type DaemonWS struct {
 
 	mu        sync.RWMutex
 	instances map[string]*agentWS // ai_agent_instance_id → agent instance handle
+
+	// Callbacks wired up by the owning Daemon for server-initiated
+	// intent-change commands. Both are idempotent.
+	sleepFunc func(aiAgentInstanceID string)
+	wakeFunc  func(aiAgentInstanceID string, spawnContext json.RawMessage)
 }
 
 // agentWS is a per-agent-instance handle to the shared daemon WebSocket.
@@ -209,8 +214,9 @@ func (d *DaemonWS) DisconnectAgentInstance(id string) {
 // routeControlFrame handles binary control frames from the server.
 func (d *DaemonWS) routeControlFrame(data []byte) {
 	var msg struct {
-		Type              string `json:"type"`
-		AIAgentInstanceID string `json:"ai_agent_instance_id"`
+		Type              string          `json:"type"`
+		AIAgentInstanceID string          `json:"ai_agent_instance_id"`
+		SpawnContext      json.RawMessage `json:"spawn_context"`
 	}
 	if json.Unmarshal(data, &msg) != nil {
 		return
@@ -231,6 +237,16 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 		delete(d.instances, msg.AIAgentInstanceID)
 		d.mu.Unlock()
 		log.Printf("daemon-ws: deleted agent instance %s", msg.AIAgentInstanceID)
+	case "sleep":
+		if d.sleepFunc != nil {
+			log.Printf("daemon-ws: sleep agent instance %s", msg.AIAgentInstanceID)
+			d.sleepFunc(msg.AIAgentInstanceID)
+		}
+	case "wake":
+		if d.wakeFunc != nil {
+			log.Printf("daemon-ws: wake agent instance %s", msg.AIAgentInstanceID)
+			d.wakeFunc(msg.AIAgentInstanceID, msg.SpawnContext)
+		}
 	default:
 		log.Printf("daemon-ws: unknown control message: %s", msg.Type)
 	}
@@ -252,6 +268,16 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 	}
 	if json.Unmarshal(data, &msg) != nil || msg.AIAgentInstanceID == "" {
 		return false
+	}
+
+	// Intent-change control frames (sleep/wake) may arrive as plain text
+	// frames with a tagged type field. Route them before falling through
+	// to the PTY inject path — wake in particular targets instances that
+	// aren't yet in d.instances.
+	switch msg.Type {
+	case "sleep", "wake":
+		d.routeControlFrame(data)
+		return true
 	}
 
 	d.mu.RLock()

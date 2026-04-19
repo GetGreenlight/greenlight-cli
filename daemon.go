@@ -458,6 +458,8 @@ func (d *Daemon) startDaemonWS() {
 	dialURL.RawQuery = q.Encode()
 
 	d.daemonWS = NewDaemonWS(dialURL.String(), d.humanUserID)
+	d.daemonWS.sleepFunc = d.handleSleepAgentInstance
+	d.daemonWS.wakeFunc = d.handleWakeAgentInstance
 
 	go d.daemonWS.Run()
 
