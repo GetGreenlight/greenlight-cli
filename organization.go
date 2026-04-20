@@ -874,20 +874,16 @@ func runOrganizationPos(args []string) {
 			fmt.Fprintf(os.Stderr, "greenlight: name required\n")
 			os.Exit(1)
 		}
-		// Normalize to snake_case so the on-disk working directory can be
-		// named after the position without any mangling.
-		rawName := *name
-		*name = toSnakeCase(rawName)
-		if *name == "" {
+		// The position name is stored verbatim; only the recommended working
+		// directory path is snake_cased so it can land cleanly on disk.
+		dirSuggestion := toSnakeCase(*name)
+		if dirSuggestion == "" {
 			fmt.Fprintf(os.Stderr, "greenlight: name must contain at least one alphanumeric character\n")
 			os.Exit(1)
 		}
-		if *name != rawName {
-			fmt.Printf("Position name stored as %q (snake_case).\n", *name)
-		}
 
 		if *wdID == "" {
-			id, err := findOrCreateWorkingDirectoryByPath(orgID, *hostID, *name)
+			id, err := findOrCreateWorkingDirectoryByPath(orgID, *hostID, dirSuggestion)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 				os.Exit(1)
