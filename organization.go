@@ -121,9 +121,10 @@ func runCreateOrUpdateWithCollisionPrompt(msgType, entityLabel, removeVerb, name
 	var env struct {
 		Error     string `json:"error"`
 		Collision struct {
-			Kind string `json:"kind"`
-			ID   string `json:"id"`
-			Name string `json:"name"`
+			Kind            string `json:"kind"`
+			ID              string `json:"id"`
+			Name            string `json:"name"`
+			SuggestedRename string `json:"suggested_rename"`
 		} `json:"collision"`
 	}
 	_ = json.Unmarshal(data, &env)
@@ -154,7 +155,13 @@ func runCreateOrUpdateWithCollisionPrompt(msgType, entityLabel, removeVerb, name
 	case "2":
 		payload["remediate_collision"] = "remove_conflicting"
 	case "3":
-		defaultRename := env.Collision.Name + " (old)"
+		// Prefer the server's suggestion — it's computed against the live
+		// namespace so "(old)" / "(old 2)" / … skip any generations already
+		// taken. Fall back to a naive suffix if the server didn't provide one.
+		defaultRename := env.Collision.SuggestedRename
+		if defaultRename == "" {
+			defaultRename = env.Collision.Name + " (old)"
+		}
 		got := strings.TrimSpace(promptLine(reader,
 			fmt.Sprintf("New %s for existing %s [%s]: ", nameField, entityLabel, defaultRename)))
 		if got == "" {
