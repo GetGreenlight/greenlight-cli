@@ -181,6 +181,39 @@ func runCreateOrUpdateWithCollisionPrompt(msgType, entityLabel, removeVerb, name
 		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 		os.Exit(1)
 	}
+
+	// If the user chose "remove the existing row" and the existing row has
+	// live children, the server refuses the cascade silently (no mutation)
+	// and returns has_live_dependents + the blocker tree. Surface that,
+	// prompt once more for a cascade confirmation, and resend with the
+	// cascade flag set so the whole retire-old + eliminate-old + create-new
+	// can land in one tx.
+	var blockedEnv struct {
+		Error    string          `json:"error"`
+		Blockers json.RawMessage `json:"blockers"`
+	}
+	_ = json.Unmarshal(data, &blockedEnv)
+	if blockedEnv.Error == "has_live_dependents" {
+		fmt.Fprintf(os.Stderr, "\n%s the existing %s would affect live children:\n",
+			titleCase(removeVerb), entityLabel)
+		printBlockerTree(blockedEnv.Blockers)
+		ans := strings.ToLower(strings.TrimSpace(
+			promptLine(reader, "Retire/eliminate them and continue? [y/N]: ")))
+		if ans != "y" && ans != "yes" {
+			fmt.Fprintln(os.Stderr, "aborted")
+			os.Exit(1)
+		}
+		payload["remediate_collision"] = map[string]interface{}{
+			"remove_conflicting": true,
+			"cascade_children":   true,
+		}
+		data, err = sendWSRequest(msgType, payload)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	printJSON(data)
 }
 
@@ -838,12 +871,7 @@ func runOrganizationPos(args []string) {
 		if *parentID != "" {
 			payload["parent_position_id"] = *parentID
 		}
-		data, err := sendWSRequest("create_organization_position", payload)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-			os.Exit(1)
-		}
-		printJSON(data)
+		runCreateOrUpdateWithCollisionPrompt("create_organization_position", "position", "eliminate", "name", payload)
 	case "eliminate":
 		fs := flag.NewFlagSet("pos eliminate", flag.ExitOnError)
 		id := fs.String("id", "", "Position ID")
