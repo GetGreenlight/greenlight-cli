@@ -125,6 +125,11 @@ func runCreateOrUpdateWithCollisionPrompt(msgType, entityLabel, removeVerb, name
 			ID              string `json:"id"`
 			Name            string `json:"name"`
 			SuggestedRename string `json:"suggested_rename"`
+			// Zero value means "rename is supported" so old servers (which
+			// always sent rename-enabled envelopes) still get the legacy UX.
+			// New servers can set this to false for entities whose identity
+			// IS the user-visible name (working_directory).
+			RenameSupported *bool `json:"rename_supported,omitempty"`
 		} `json:"collision"`
 	}
 	_ = json.Unmarshal(data, &env)
@@ -133,28 +138,42 @@ func runCreateOrUpdateWithCollisionPrompt(msgType, entityLabel, removeVerb, name
 		return
 	}
 
+	renameSupported := env.Collision.RenameSupported == nil || *env.Collision.RenameSupported
+
 	attempted, _ := payload[nameField].(string)
 	fmt.Fprintf(os.Stderr, "\n%q is already the %s of another %s (id %s).\n\n",
 		attempted, nameField, entityLabel, env.Collision.ID)
 	fmt.Fprintf(os.Stderr, "  1) Use a different %s for the new %s\n", nameField, entityLabel)
 	fmt.Fprintf(os.Stderr, "  2) %s the existing %s and continue\n", titleCase(removeVerb), entityLabel)
-	fmt.Fprintf(os.Stderr, "  3) Rename the existing %s and continue\n", entityLabel)
-	fmt.Fprintf(os.Stderr, "  4) Cancel\n")
+	if renameSupported {
+		fmt.Fprintf(os.Stderr, "  3) Rename the existing %s and continue\n", entityLabel)
+		fmt.Fprintf(os.Stderr, "  4) Cancel\n")
+	} else {
+		fmt.Fprintf(os.Stderr, "  3) Cancel\n")
+	}
 
 	reader := bufio.NewReader(os.Stdin)
-	choice := strings.TrimSpace(promptLine(reader, "Select [1-4]: "))
+	promptRange := "1-4"
+	if !renameSupported {
+		promptRange = "1-3"
+	}
+	choice := strings.TrimSpace(promptLine(reader, fmt.Sprintf("Select [%s]: ", promptRange)))
 
-	switch choice {
-	case "1":
+	cancel := func() {
+		fmt.Fprintln(os.Stderr, "aborted")
+		os.Exit(1)
+	}
+
+	switch {
+	case choice == "1":
 		newName := strings.TrimSpace(promptLine(reader, fmt.Sprintf("New %s: ", nameField)))
 		if newName == "" {
-			fmt.Fprintln(os.Stderr, "aborted")
-			os.Exit(1)
+			cancel()
 		}
 		payload[nameField] = newName
-	case "2":
+	case choice == "2":
 		payload["remediate_collision"] = "remove_conflicting"
-	case "3":
+	case choice == "3" && renameSupported:
 		// Prefer the server's suggestion — it's computed against the live
 		// namespace so "(old)" / "(old 2)" / … skip any generations already
 		// taken. Fall back to a naive suffix if the server didn't provide one.
@@ -168,9 +187,8 @@ func runCreateOrUpdateWithCollisionPrompt(msgType, entityLabel, removeVerb, name
 			got = defaultRename
 		}
 		payload["remediate_collision"] = map[string]interface{}{"rename_conflicting_to": got}
-	case "4", "":
-		fmt.Fprintln(os.Stderr, "aborted")
-		os.Exit(1)
+	case choice == "3" && !renameSupported, choice == "4" && renameSupported, choice == "":
+		cancel()
 	default:
 		fmt.Fprintln(os.Stderr, "aborted: unrecognized selection")
 		os.Exit(1)
@@ -578,12 +596,7 @@ func runOrganizationWD(args []string) {
 			"host_id":         *hostID,
 			"directory_path":  *dir,
 		}
-		data, err := sendWSRequest("create_working_directory", payload)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-			os.Exit(1)
-		}
-		printJSON(data)
+		runCreateOrUpdateWithCollisionPrompt("create_working_directory", "working_directory", "abandon", "directory_path", payload)
 	case "update":
 		fs := flag.NewFlagSet("wd update", flag.ExitOnError)
 		id := fs.String("id", "", "Working directory ID")
@@ -601,12 +614,7 @@ func runOrganizationWD(args []string) {
 		if *dir != "" {
 			payload["directory_path"] = *dir
 		}
-		data, err := sendWSRequest("update_working_directory", payload)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-			os.Exit(1)
-		}
-		printJSON(data)
+		runCreateOrUpdateWithCollisionPrompt("update_working_directory", "working_directory", "abandon", "directory_path", payload)
 	case "abandon":
 		fs := flag.NewFlagSet("wd abandon", flag.ExitOnError)
 		id := fs.String("id", "", "Working directory ID")
