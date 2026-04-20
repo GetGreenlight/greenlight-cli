@@ -95,6 +95,97 @@ func runArchivalWithCascadePrompt(msgType, entityLabel, id string) {
 	printJSON(data)
 }
 
+// runCreateOrUpdateWithCollisionPrompt sends a create/update ws_request that
+// may be rejected by a name-uniqueness constraint. On a name_collision reply
+// it prompts the user with four choices:
+//
+//  1. Use a different name for the new row
+//  2. Soft-delete the colliding row and continue
+//  3. Rename the colliding row and continue
+//  4. Cancel
+//
+// Exactly one retry is sent. Any error that isn't name_collision is printed
+// verbatim; the second-attempt error (if the remediation itself collides) is
+// surfaced without a third prompt.
+//
+// nameField is the payload key carrying the name the user picked (e.g.
+// "title" for job_description). entityLabel is a human-readable noun used in
+// prompts. removeVerb is the verb used for option 2 ("remove", "archive",
+// "abandon", "eliminate", "retire") matching the entity's soft-delete term.
+func runCreateOrUpdateWithCollisionPrompt(msgType, entityLabel, removeVerb, nameField string, payload map[string]interface{}) {
+	data, err := sendWSRequest(msgType, payload)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+		os.Exit(1)
+	}
+	var env struct {
+		Error     string `json:"error"`
+		Collision struct {
+			Kind string `json:"kind"`
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"collision"`
+	}
+	_ = json.Unmarshal(data, &env)
+	if env.Error != "name_collision" {
+		printJSON(data)
+		return
+	}
+
+	attempted, _ := payload[nameField].(string)
+	fmt.Fprintf(os.Stderr, "\n%q is already the %s of another %s (id %s).\n\n",
+		attempted, nameField, entityLabel, env.Collision.ID)
+	fmt.Fprintf(os.Stderr, "  1) Use a different %s for the new %s\n", nameField, entityLabel)
+	fmt.Fprintf(os.Stderr, "  2) %s the existing %s and continue\n", titleCase(removeVerb), entityLabel)
+	fmt.Fprintf(os.Stderr, "  3) Rename the existing %s and continue\n", entityLabel)
+	fmt.Fprintf(os.Stderr, "  4) Cancel\n")
+
+	reader := bufio.NewReader(os.Stdin)
+	choice := strings.TrimSpace(promptLine(reader, "Select [1-4]: "))
+
+	switch choice {
+	case "1":
+		newName := strings.TrimSpace(promptLine(reader, fmt.Sprintf("New %s: ", nameField)))
+		if newName == "" {
+			fmt.Fprintln(os.Stderr, "aborted")
+			os.Exit(1)
+		}
+		payload[nameField] = newName
+	case "2":
+		payload["remediate_collision"] = "remove_conflicting"
+	case "3":
+		defaultRename := env.Collision.Name + " (old)"
+		got := strings.TrimSpace(promptLine(reader,
+			fmt.Sprintf("New %s for existing %s [%s]: ", nameField, entityLabel, defaultRename)))
+		if got == "" {
+			got = defaultRename
+		}
+		payload["remediate_collision"] = map[string]interface{}{"rename_conflicting_to": got}
+	case "4", "":
+		fmt.Fprintln(os.Stderr, "aborted")
+		os.Exit(1)
+	default:
+		fmt.Fprintln(os.Stderr, "aborted: unrecognized selection")
+		os.Exit(1)
+	}
+
+	data, err = sendWSRequest(msgType, payload)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+		os.Exit(1)
+	}
+	printJSON(data)
+}
+
+// titleCase uppercases the first rune of s for menu labels. Keeps us off
+// strings.Title (deprecated) and avoids pulling in golang.org/x/text.
+func titleCase(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
 // printBlockerTree renders a blockers payload from the server in a
 // human-readable tree. Accepts either {agents: [...]} (position case) or
 // {positions: [{..., agents: [...]}]} (JD/WD case).
@@ -580,12 +671,7 @@ func runOrganizationJob(args []string) {
 		if *requiredSkills != "" {
 			payload["required_skills"] = *requiredSkills
 		}
-		data, err := sendWSRequest("create_agent_job_description", payload)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-			os.Exit(1)
-		}
-		printJSON(data)
+		runCreateOrUpdateWithCollisionPrompt("create_agent_job_description", "job_description", "archive", "title", payload)
 	case "update":
 		fs := flag.NewFlagSet("job update", flag.ExitOnError)
 		id := fs.String("id", "", "Job description ID")
@@ -608,12 +694,7 @@ func runOrganizationJob(args []string) {
 		if *priority != 0 {
 			payload["priority"] = *priority
 		}
-		data, err := sendWSRequest("update_agent_job_description", payload)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-			os.Exit(1)
-		}
-		printJSON(data)
+		runCreateOrUpdateWithCollisionPrompt("update_agent_job_description", "job_description", "archive", "title", payload)
 	case "archive":
 		fs := flag.NewFlagSet("job archive", flag.ExitOnError)
 		id := fs.String("id", "", "Job description ID")
