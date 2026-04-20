@@ -1164,8 +1164,8 @@ func ensureWorkingDirOnDisk(reader *bufio.Reader, positionID string) error {
 		return fmt.Errorf("stat %s: %w", dir, err)
 	}
 
-	answer := promptLine(reader, fmt.Sprintf("Directory %q doesn't exist. Create it? (y/N): ", dir))
-	if !strings.HasPrefix(strings.ToLower(answer), "y") {
+	answer := strings.ToLower(strings.TrimSpace(promptLine(reader, fmt.Sprintf("Directory %q doesn't exist. Create it? (Y/n): ", dir))))
+	if answer == "n" || answer == "no" {
 		return fmt.Errorf("aborted: working directory does not exist")
 	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
