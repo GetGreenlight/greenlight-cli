@@ -687,10 +687,10 @@ func runOrganizationPos(args []string) {
 	case "create":
 		fs := flag.NewFlagSet("pos create", flag.ExitOnError)
 		jobID := fs.String("job", "", "Agent job description ID (optional)")
-		wdID := fs.String("wd", "", "Working directory ID")
+		wdID := fs.String("wd", "", "Working directory ID (optional; if unset, you'll be prompted for a directory path)")
 		parentID := fs.String("parent", "", "Parent position ID (optional)")
 		name := fs.String("name", "", "Human-readable name (optional)")
-		hostID := fs.String("host-id", "", "Host for a new wd if the wd picker creates one (defaults to this host)")
+		hostID := fs.String("host-id", "", "Host on which to find-or-create the working directory (defaults to this host)")
 		fs.Parse(args[1:])
 
 		orgID := workingOrgID()
@@ -720,7 +720,7 @@ func runOrganizationPos(args []string) {
 		}
 
 		if *wdID == "" {
-			id, err := selectWorkingDirectoryForPosition(orgID, *name, *hostID)
+			id, err := findOrCreateWorkingDirectoryByPath(orgID, *hostID, *name)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 				os.Exit(1)

@@ -392,66 +392,6 @@ func createAgentJobDescriptionInteractive(orgID string) (string, error) {
 	return resp.AgentJobDescription.ID, nil
 }
 
-// =============================================================================
-// selectWorkingDirectory
-// =============================================================================
-
-func selectWorkingDirectory(orgID string) (string, error) {
-	return selectWorkingDirectoryForPosition(orgID, "", "")
-}
-
-// selectWorkingDirectoryForPosition is like selectWorkingDirectory, but when
-// the user chooses "Create new…" the path prompt defaults to a subdirectory
-// named after the (snake_cased) position — so a position "Head Gardener"
-// defaults its wd to $HOME/greenlight_agents/head_gardener. If hostID is
-// non-empty, new wds are created on that host instead of the daemon's local
-// host_id from config.
-func selectWorkingDirectoryForPosition(orgID, positionName, hostID string) (string, error) {
-	payload := map[string]interface{}{}
-	if orgID != "" {
-		payload["organization_id"] = orgID
-	}
-	data, err := sendWSRequest("list_working_directories", payload)
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch working directories: %w", err)
-	}
-
-	var resp struct {
-		WorkingDirectories []struct {
-			ID            string `json:"id"`
-			Hostname      string `json:"hostname"`
-			DirectoryPath string `json:"directory_path"`
-		} `json:"working_directories"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return "", fmt.Errorf("failed to parse working directories: %w", err)
-	}
-
-	if len(resp.WorkingDirectories) == 0 {
-		fmt.Println("No working directories found. Let's create one.")
-		return createWorkingDirectoryInteractive(orgID, positionName, hostID)
-	}
-
-	items := make([]selectItem[string], len(resp.WorkingDirectories))
-	for i, w := range resp.WorkingDirectories {
-		label := w.Hostname + ":" + w.DirectoryPath
-		if w.Hostname == "" && w.DirectoryPath == "" {
-			label = "(unnamed)"
-		}
-		items[i] = selectItem[string]{Label: label, ID: w.ID}
-	}
-	items = append(items, selectItem[string]{Label: "→ Create new…", ID: sentinelCreateNew})
-
-	id, err := selectFromList("Working directory", items)
-	if err != nil {
-		return "", err
-	}
-	if id == sentinelCreateNew {
-		return createWorkingDirectoryInteractive(orgID, positionName, hostID)
-	}
-	return id, nil
-}
-
 // findOrCreateWorkingDirectoryByPath prompts for a directory_path and asks
 // the server to either reuse a matching non-abandoned working_directory or
 // create one. Used by the agent-create flow, which deliberately does not
@@ -499,54 +439,6 @@ func findOrCreateWorkingDirectoryByPath(orgID, hostID, positionName string) (str
 	} else {
 		fmt.Printf("Reusing existing working directory %s at %s.\n", resp.WorkingDirectory.ID, dir)
 	}
-	return resp.WorkingDirectory.ID, nil
-}
-
-// createWorkingDirectoryInteractive creates a new working_directory row on the
-// given host. If hostID is empty, falls back to the daemon's local host_id from
-// config (for backward-compat callers like 'wd create' that don't yet prompt
-// for host).
-func createWorkingDirectoryInteractive(orgID, positionName, hostID string) (string, error) {
-	if orgID == "" {
-		orgID = workingOrgID()
-	}
-	if orgID == "" {
-		return "", fmt.Errorf("no working organization set (run 'greenlight org org use --id <ID>')")
-	}
-
-	if hostID == "" {
-		hostID = readConfigValue("host_id")
-	}
-	if hostID == "" {
-		return "", fmt.Errorf("host ID not found — run 'greenlight daemon start' to enroll this host")
-	}
-
-	reader := bufio.NewReader(os.Stdin)
-	dir := promptWithDefault(reader, "Directory path", defaultAgentWorkingDirFor(positionName))
-
-	payload := map[string]interface{}{
-		"organization_id": orgID,
-		"host_id":         hostID,
-		"directory_path":  dir,
-	}
-	data, err := sendWSRequest("create_working_directory", payload)
-	if err != nil {
-		return "", fmt.Errorf("failed to create working directory: %w", err)
-	}
-
-	var resp struct {
-		WorkingDirectory struct {
-			ID string `json:"id"`
-		} `json:"working_directory"`
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
-	}
-	if resp.Error != "" {
-		return "", fmt.Errorf("create working directory: %s", resp.Error)
-	}
-	fmt.Printf("Created working directory %s.\n", resp.WorkingDirectory.ID)
 	return resp.WorkingDirectory.ID, nil
 }
 
