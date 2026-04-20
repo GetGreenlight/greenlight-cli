@@ -217,14 +217,22 @@ func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName, harnessName, cwd
 	// Run the relay PTY in the background. When the child exits, drop the
 	// instance from the registry and report actual liveness via pid_status.
 	// We leave status (intent) alone — that's set server-side on explicit
-	// sleep/wake/retire commands.
+	// sleep/wake/retire commands. Tracked in d.agentWg so Shutdown can wait
+	// for pid_status reports to land before closing the daemon WS.
+	d.agentWg.Add(1)
 	go func() {
+		defer d.agentWg.Done()
 		waitErr := s.runRelay()
+		// Report pid_status BEFORE we do anything that might race with a
+		// daemon shutdown closing the WS: the daemon-shutdown path waits
+		// on each instance's Stop() (which waits on s.exited, closed by
+		// runRelay), so by the time we're here Shutdown may already be
+		// waiting to close the WS.
+		d.reportPIDStatus(s.aiAgentInstanceID, classifyExit(waitErr))
 		d.mu.Lock()
 		delete(d.instances, s.aiAgentInstanceID)
 		d.mu.Unlock()
 		s.Stop()
-		d.reportPIDStatus(s.aiAgentInstanceID, classifyExit(waitErr))
 		log.Printf("daemon: spawned agent instance %s ended", s.aiAgentInstanceID)
 	}()
 

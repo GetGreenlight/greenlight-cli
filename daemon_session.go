@@ -10,9 +10,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
+
+// agentStopGrace is how long Stop() waits after SIGTERM for the child
+// to exit on its own before escalating to SIGKILL. See
+// docs/daemon-agent-lifecycle.md for the rationale (claude can be slow
+// to finish a turn).
+const agentStopGrace = 10 * time.Second
 
 // AgentInstance represents a single running agent owned by the daemon.
 // Each AgentInstance corresponds exactly to one ai_agent_instance_id (one
@@ -42,6 +49,13 @@ type AgentInstance struct {
 
 	libPath      string
 	libExtracted bool
+
+	// exited is closed once runRelay() returns (child is fully reaped).
+	// Stop() waits on this to know when the grace window has paid off.
+	exited chan struct{}
+	// stopOnce guards Stop() so the daemon-shutdown path and the
+	// child-exited-naturally path (daemon_agent.go) don't double-clean.
+	stopOnce sync.Once
 }
 
 // newAgentInstance creates and starts a new agent instance. It sets up the
@@ -128,6 +142,7 @@ func (d *Daemon) newAgentInstance(req ipcRequest) (*AgentInstance, error) {
 		deviceID:          devID,
 		startedAt:         time.Now(),
 		daemon:            d,
+		exited:            make(chan struct{}),
 	}
 
 	// Create bridge file
@@ -211,29 +226,69 @@ func (s *AgentInstance) runRelay() error {
 		<-s.bridgeFinished
 	}
 
+	// Signal Stop() (and any other waiter) that the child is fully reaped.
+	// cmd.Wait() above means the OS has released the PID, so Stop() no
+	// longer needs to worry about sending SIGKILL at this point.
+	close(s.exited)
+
 	log.Printf("daemon: agent instance %s relay exited (err=%v)", s.aiAgentInstanceID, err)
 	return err
 }
 
-// Stop terminates the instance, killing the child process and cleaning up.
+// Stop terminates the instance, waits for the child process to exit
+// (SIGTERM, grace window, SIGKILL if still alive), and cleans up.
+//
+// Idempotent: Stop is called from both (a) the runRelay-completion path
+// in daemon_agent.go once the child exits on its own, and (b) the
+// daemon-shutdown path in daemon.go. Only the first caller does the
+// signalling + cleanup; subsequent callers return immediately. In case
+// (a) the child is already dead by the time Stop runs — s.exited is
+// already closed — so the signalling is effectively a no-op and Stop
+// proceeds straight to cleanup.
 func (s *AgentInstance) Stop() {
-	// The transcript streamer is a detached process (its own session) and
-	// will outlive the daemon unless we reap it explicitly. Do this
-	// synchronously — the relay-exit path also calls killStreamer, but that
-	// goroutine isn't guaranteed to run before the daemon process exits.
-	killStreamer(s.aiAgentInstanceID)
+	s.stopOnce.Do(func() {
+		// The transcript streamer is a detached process (its own session) and
+		// will outlive the daemon unless we reap it explicitly. Do this
+		// synchronously — the relay-exit path also calls killStreamer, but that
+		// goroutine isn't guaranteed to run before the daemon process exits.
+		killStreamer(s.aiAgentInstanceID)
 
-	if s.relay != nil && s.relay.cmd != nil && s.relay.cmd.Process != nil {
-		s.relay.cmd.Process.Signal(syscall.SIGTERM)
-		// Give it a moment, then force kill
-		go func() {
-			time.Sleep(3 * time.Second)
-			if s.relay.cmd.Process != nil {
-				s.relay.cmd.Process.Kill()
+		alreadyDead := false
+		if s.exited != nil {
+			select {
+			case <-s.exited:
+				alreadyDead = true
+			default:
 			}
-		}()
-	}
-	s.cleanup()
+		}
+
+		if !alreadyDead && s.relay != nil && s.relay.cmd != nil && s.relay.cmd.Process != nil {
+			// Try a graceful shutdown first. If the child is claude
+			// mid-turn, it may take several seconds to wrap up — hence
+			// the 10s grace (see docs/daemon-agent-lifecycle.md).
+			_ = s.relay.cmd.Process.Signal(syscall.SIGTERM)
+			select {
+			case <-s.exited:
+				// Child exited within the grace window.
+			case <-time.After(agentStopGrace):
+				log.Printf("daemon: agent instance %s didn't exit within %s, sending SIGKILL",
+					s.aiAgentInstanceID, agentStopGrace)
+				// Kill the whole process group — claude forks children
+				// (mcp servers, etc.) that need to go down with it.
+				if s.relay.cmd.Process != nil {
+					s.relay.killed = true
+					_ = syscall.Kill(-s.relay.cmd.Process.Pid, syscall.SIGKILL)
+				}
+				// Wait for runRelay to finish reaping so cleanup
+				// doesn't race with file descriptor teardown.
+				if s.exited != nil {
+					<-s.exited
+				}
+			}
+		}
+
+		s.cleanup()
+	})
 }
 
 // cleanup removes instance-specific files and resources.

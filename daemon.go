@@ -68,12 +68,17 @@ type instanceInfo struct {
 
 // Daemon manages the lifecycle of agent instances and the IPC socket.
 type Daemon struct {
-	listener    net.Listener
-	sockPath    string
-	instances   map[string]*AgentInstance
-	mu          sync.RWMutex
-	done        chan struct{}
-	wg          sync.WaitGroup
+	listener  net.Listener
+	sockPath  string
+	instances map[string]*AgentInstance
+	mu        sync.RWMutex
+	done      chan struct{}
+	wg        sync.WaitGroup
+	// agentWg tracks the per-instance monitoring goroutines spawned in
+	// daemon_agent.go (the ones that block on runRelay and then report
+	// pid_status). Shutdown drains this before closing the daemon WS so
+	// terminal pid_status updates actually land on the server.
+	agentWg     sync.WaitGroup
 	daemonWS    *DaemonWS // multiplexed WebSocket for all instances
 	hostID      string    // daemon's registered host ID
 	humanUserID string    // resolved human_user ID
@@ -364,30 +369,54 @@ func (d *Daemon) Run() {
 	}
 }
 
-// Shutdown gracefully stops the daemon, terminating all instances.
+// Shutdown gracefully stops the daemon: record user intent to be offline,
+// signal each running agent to wind down (SIGTERM → 10s grace → SIGKILL),
+// wait for their pid_status reports to land on the server, then tear down
+// the WebSocket and IPC listener. A crash or SIGKILL skips this entirely,
+// leaving hosts.desired_status='connected' — which is the whole point of
+// that field.
+//
+// Order matters and is load-bearing:
+//   1. write desired_status='disconnected' (WS still open)
+//   2. stop each instance, blocking until its child is reaped
+//   3. wait on agentWg so the per-instance monitoring goroutines finish
+//      their reportPIDStatus calls (WS still open)
+//   4. close the WS
+//   5. close the IPC listener / drop the unix socket
+// Doing (4) before (2) or (3) would silently drop every terminal
+// pid_status update and leave the server believing those agents are still
+// running, pending a later host_disconnected reconciliation.
 func (d *Daemon) Shutdown() {
-	// Record the user's intent to be offline before we tear down the WS.
-	// A crash or SIGKILL skips this entirely, leaving desired_status at
-	// 'connected' — which is the whole point.
 	d.setHostDesiredStatus("disconnected")
 
-	close(d.done)
-	d.listener.Close()
-	os.Remove(d.sockPath)
+	// Snapshot the current instance map so we don't hold the lock while
+	// each Stop() blocks for up to agentStopGrace. The per-instance
+	// monitoring goroutines take the same lock to delete themselves
+	// from d.instances after runRelay returns; if we held it throughout
+	// they'd deadlock behind this loop.
+	d.mu.RLock()
+	snapshot := make([]*AgentInstance, 0, len(d.instances))
+	for _, s := range d.instances {
+		snapshot = append(snapshot, s)
+	}
+	d.mu.RUnlock()
 
-	// Close multiplexed WebSocket
+	for _, s := range snapshot {
+		log.Printf("daemon: stopping agent instance %s", s.aiAgentInstanceID)
+		s.Stop()
+	}
+
+	// Let the monitoring goroutines flush their pid_status reports over
+	// the still-open WS before we close it.
+	d.agentWg.Wait()
+
 	if d.daemonWS != nil {
 		d.daemonWS.Close()
 	}
 
-	// Stop all instances (this includes detached spawn instances from
-	// 'org agent create' since they live in d.instances too).
-	d.mu.Lock()
-	for id, s := range d.instances {
-		log.Printf("daemon: stopping agent instance %s", id)
-		s.Stop()
-	}
-	d.mu.Unlock()
+	close(d.done)
+	d.listener.Close()
+	os.Remove(d.sockPath)
 }
 
 // handleUpdateShutdown handles the update_shutdown IPC request.
@@ -480,6 +509,13 @@ func (d *Daemon) startDaemonWS() {
 	// Record the user's intent to be online. The column is strictly
 	// intent-based: only graceful start/stop mutate it.
 	d.setHostDesiredStatus("connected")
+
+	// Clean up any leftover /tmp markers from a prior daemon life, then
+	// query the server for agents that should be running on this host
+	// (status='active', not retired, position + WD still alive) and
+	// spawn them. See docs/daemon-agent-lifecycle.md for the full contract.
+	// Runs in a goroutine so a slow spawn chain doesn't delay IPC accept.
+	go d.reconcileAndWakeAgents()
 }
 
 // setHostDesiredStatus sends hosts.desired_status to the server. Best-effort:
@@ -627,43 +663,13 @@ func sendControl(conn net.Conn, resp ipcResponse) {
 	conn.Write(data)
 }
 
+// stopDaemon asks the running daemon to shut down. Any currently-spawned
+// agent instances are gracefully terminated as part of the shutdown (see
+// AgentInstance.Stop and docs/daemon-agent-lifecycle.md) — we no longer
+// prompt the user about them. Their intent (status=active) is preserved,
+// so the next `daemon start` will wake them back up.
 func stopDaemon() {
-	// Check for active instances first
 	conn, err := net.DialTimeout("unix", daemonSockPath(), 2*time.Second)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "greenlight: daemon is not running\n")
-		return
-	}
-
-	// Query status to check for active instances
-	statusMsg, _ := json.Marshal(ipcRequest{Type: "status"})
-	statusMsg = append(statusMsg, '\n')
-	conn.Write(statusMsg)
-
-	reader := bufio.NewReader(conn)
-	line, err := reader.ReadBytes('\n')
-	conn.Close()
-
-	if err == nil {
-		var status ipcResponse
-		if json.Unmarshal(line, &status) == nil && len(status.Instances) > 0 {
-			fmt.Fprintf(os.Stderr, "greenlight: %d active instance(s) will be terminated:\n", len(status.Instances))
-			for _, s := range status.Instances {
-				fmt.Fprintf(os.Stderr, "  %-10s %-8s %s\n",
-					s.AIAgentInstanceID[:min(10, len(s.AIAgentInstanceID))], s.Agent, s.Project)
-			}
-			fmt.Fprintf(os.Stderr, "Continue? [y/N] ")
-			var answer string
-			fmt.Scanln(&answer)
-			if answer != "y" && answer != "Y" {
-				fmt.Fprintf(os.Stderr, "greenlight: stop cancelled\n")
-				return
-			}
-		}
-	}
-
-	// Send stop
-	conn, err = net.DialTimeout("unix", daemonSockPath(), 2*time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "greenlight: daemon is not running\n")
 		return
@@ -674,8 +680,8 @@ func stopDaemon() {
 	msg = append(msg, '\n')
 	conn.Write(msg)
 
-	reader = bufio.NewReader(conn)
-	line, err = reader.ReadBytes('\n')
+	reader := bufio.NewReader(conn)
+	line, err := reader.ReadBytes('\n')
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "greenlight: daemon stopped\n")
 		return
