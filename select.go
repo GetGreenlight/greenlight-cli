@@ -502,19 +502,18 @@ func createOrganizationPositionInteractive(orgID, hostID string) (string, error)
 	}
 
 	reader := bufio.NewReader(os.Stdin)
-	rawName := promptLine(reader, "Name: ")
-	if rawName == "" {
+	name := promptLine(reader, "Name: ")
+	if name == "" {
 		return "", fmt.Errorf("name required")
 	}
-	name := toSnakeCase(rawName)
-	if name == "" {
+	// The position name is stored verbatim; only the recommended working
+	// directory path is snake_cased so it can land cleanly on disk.
+	dirSuggestion := toSnakeCase(name)
+	if dirSuggestion == "" {
 		return "", fmt.Errorf("name must contain at least one alphanumeric character")
 	}
-	if name != rawName {
-		fmt.Printf("Position name stored as %q (snake_case).\n", name)
-	}
 
-	wdID, err := findOrCreateWorkingDirectoryByPath(orgID, hostID, name)
+	wdID, err := findOrCreateWorkingDirectoryByPath(orgID, hostID, dirSuggestion)
 	if err != nil {
 		return "", err
 	}
