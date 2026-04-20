@@ -123,72 +123,115 @@ func runCreateOrUpdateWithCollisionPrompt(msgType, entityLabel, removeVerb, name
 // still use the collision prompt without losing control of stdout. Exits
 // the process on transport errors or user cancellation.
 func sendCreateOrUpdateResolvingCollision(msgType, entityLabel, removeVerb, nameField string, payload map[string]interface{}) json.RawMessage {
-	data, err := sendWSRequest(msgType, payload)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-		os.Exit(1)
-	}
-	var env struct {
-		Error     string `json:"error"`
-		Collision struct {
-			Kind            string `json:"kind"`
-			ID              string `json:"id"`
-			Name            string `json:"name"`
-			SuggestedRename string `json:"suggested_rename"`
-			// Zero value means "rename is supported" so old servers (which
-			// always sent rename-enabled envelopes) still get the legacy UX.
-			// New servers can set this to false for entities whose identity
-			// IS the user-visible name (working_directory).
-			RenameSupported *bool `json:"rename_supported,omitempty"`
-		} `json:"collision"`
-	}
-	_ = json.Unmarshal(data, &env)
-	if env.Error != "name_collision" {
-		return data
-	}
+	reader := bufio.NewReader(os.Stdin)
+	// pendingCascadeKey records which payload field most recently received a
+	// "remove_conflicting" directive, so that if the server comes back with
+	// has_live_dependents we know whether to upgrade remediate_collision or
+	// remediate_slot_collision into the cascade-enabled form.
+	pendingCascadeKey := ""
 
-	renameSupported := env.Collision.RenameSupported == nil || *env.Collision.RenameSupported
+	for {
+		data, err := sendWSRequest(msgType, payload)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+			os.Exit(1)
+		}
+		var env struct {
+			Error     string `json:"error"`
+			Collision struct {
+				Kind            string `json:"kind"`
+				ID              string `json:"id"`
+				Name            string `json:"name"`
+				SuggestedRename string `json:"suggested_rename"`
+				// Zero value means "rename is supported" so old servers (which
+				// always sent rename-enabled envelopes) still get the legacy UX.
+				// New servers set this to false for entities whose identity IS
+				// the user-visible name (working_directory).
+				RenameSupported *bool `json:"rename_supported,omitempty"`
+				// Populated for slot_collision responses.
+				SlotKind string `json:"slot_kind"`
+				SlotID   string `json:"slot_id"`
+			} `json:"collision"`
+			Blockers json.RawMessage `json:"blockers"`
+		}
+		_ = json.Unmarshal(data, &env)
+
+		switch env.Error {
+		case "name_collision":
+			pendingCascadeKey = promptNameCollision(reader, env.Collision.ID, env.Collision.Name, env.Collision.SuggestedRename, env.Collision.RenameSupported, payload, entityLabel, removeVerb, nameField)
+		case "slot_collision":
+			promptSlotCollision(reader, env.Collision.ID, env.Collision.Name, env.Collision.SlotKind, payload, entityLabel, removeVerb)
+			pendingCascadeKey = "remediate_slot_collision"
+		case "has_live_dependents":
+			// We only get here right after sending a remove_conflicting
+			// remediation. pendingCascadeKey tells us which one.
+			if pendingCascadeKey == "" {
+				return data // unexpected shape; surface as-is
+			}
+			fmt.Fprintf(os.Stderr, "\n%s the existing %s would affect live children:\n",
+				titleCase(removeVerb), entityLabel)
+			printBlockerTree(env.Blockers)
+			ans := strings.ToLower(strings.TrimSpace(
+				promptLine(reader, "Retire/eliminate them and continue? [y/N]: ")))
+			if ans != "y" && ans != "yes" {
+				fmt.Fprintln(os.Stderr, "aborted")
+				os.Exit(1)
+			}
+			payload[pendingCascadeKey] = map[string]interface{}{
+				"remove_conflicting": true,
+				"cascade_children":   true,
+			}
+			pendingCascadeKey = ""
+		default:
+			return data
+		}
+	}
+}
+
+// promptNameCollision prints the four-option name-collision menu, mutates
+// payload with the user's choice, and returns the payload key that was set
+// to a remove_conflicting directive (for cascade follow-up) — or "" if the
+// choice (new name / rename) won't trigger has_live_dependents. Exits on
+// cancel.
+func promptNameCollision(reader *bufio.Reader, conflictID, conflictName, suggestedRename string, renameSupported *bool, payload map[string]interface{}, entityLabel, removeVerb, nameField string) string {
+	renameOK := renameSupported == nil || *renameSupported
 
 	attempted, _ := payload[nameField].(string)
 	fmt.Fprintf(os.Stderr, "\n%q is already the %s of another %s (id %s).\n\n",
-		attempted, nameField, entityLabel, env.Collision.ID)
+		attempted, nameField, entityLabel, conflictID)
 	fmt.Fprintf(os.Stderr, "  1) Use a different %s for the new %s\n", nameField, entityLabel)
 	fmt.Fprintf(os.Stderr, "  2) %s the existing %s and continue\n", titleCase(removeVerb), entityLabel)
-	if renameSupported {
+	if renameOK {
 		fmt.Fprintf(os.Stderr, "  3) Rename the existing %s and continue\n", entityLabel)
 		fmt.Fprintf(os.Stderr, "  4) Cancel\n")
 	} else {
 		fmt.Fprintf(os.Stderr, "  3) Cancel\n")
 	}
 
-	reader := bufio.NewReader(os.Stdin)
 	promptRange := "1-4"
-	if !renameSupported {
+	if !renameOK {
 		promptRange = "1-3"
 	}
 	choice := strings.TrimSpace(promptLine(reader, fmt.Sprintf("Select [%s]: ", promptRange)))
-
-	cancel := func() {
-		fmt.Fprintln(os.Stderr, "aborted")
-		os.Exit(1)
-	}
 
 	switch {
 	case choice == "1":
 		newName := strings.TrimSpace(promptLine(reader, fmt.Sprintf("New %s: ", nameField)))
 		if newName == "" {
-			cancel()
+			fmt.Fprintln(os.Stderr, "aborted")
+			os.Exit(1)
 		}
 		payload[nameField] = newName
+		// Previously-set remediation may no longer apply; clear it.
+		delete(payload, "remediate_collision")
+		return ""
 	case choice == "2":
 		payload["remediate_collision"] = "remove_conflicting"
-	case choice == "3" && renameSupported:
-		// Prefer the server's suggestion — it's computed against the live
-		// namespace so "(old)" / "(old 2)" / … skip any generations already
-		// taken. Fall back to a naive suffix if the server didn't provide one.
-		defaultRename := env.Collision.SuggestedRename
+		return "remediate_collision"
+	case choice == "3" && renameOK:
+		defaultRename := suggestedRename
 		if defaultRename == "" {
-			defaultRename = env.Collision.Name + " (old)"
+			defaultRename = conflictName + " (old)"
 		}
 		got := strings.TrimSpace(promptLine(reader,
 			fmt.Sprintf("New %s for existing %s [%s]: ", nameField, entityLabel, defaultRename)))
@@ -196,52 +239,38 @@ func sendCreateOrUpdateResolvingCollision(msgType, entityLabel, removeVerb, name
 			got = defaultRename
 		}
 		payload["remediate_collision"] = map[string]interface{}{"rename_conflicting_to": got}
-	case choice == "3" && !renameSupported, choice == "4" && renameSupported, choice == "":
-		cancel()
+		return ""
+	case choice == "3" && !renameOK, choice == "4" && renameOK, choice == "":
+		fmt.Fprintln(os.Stderr, "aborted")
+		os.Exit(1)
+	}
+	fmt.Fprintln(os.Stderr, "aborted: unrecognized selection")
+	os.Exit(1)
+	return ""
+}
+
+// promptSlotCollision prints the two-option slot-collision menu and mutates
+// payload with a remove_conflicting directive on remediate_slot_collision,
+// or exits on cancel. Slot collisions don't support rename or "pick a
+// different slot" in this flow — the slot FK came from the create/update
+// payload itself; if the user wants a different one, they should re-run.
+func promptSlotCollision(reader *bufio.Reader, conflictID, conflictName, slotKind string, payload map[string]interface{}, entityLabel, removeVerb string) {
+	fmt.Fprintf(os.Stderr, "\nThat slot (%s) is already held by %s %q (id %s).\n\n",
+		slotKind, entityLabel, conflictName, conflictID)
+	fmt.Fprintf(os.Stderr, "  1) %s the existing %s and continue\n", titleCase(removeVerb), entityLabel)
+	fmt.Fprintf(os.Stderr, "  2) Cancel\n")
+
+	choice := strings.TrimSpace(promptLine(reader, "Select [1-2]: "))
+	switch choice {
+	case "1":
+		payload["remediate_slot_collision"] = "remove_conflicting"
+	case "2", "":
+		fmt.Fprintln(os.Stderr, "aborted")
+		os.Exit(1)
 	default:
 		fmt.Fprintln(os.Stderr, "aborted: unrecognized selection")
 		os.Exit(1)
 	}
-
-	data, err = sendWSRequest(msgType, payload)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-		os.Exit(1)
-	}
-
-	// If the user chose "remove the existing row" and the existing row has
-	// live children, the server refuses the cascade silently (no mutation)
-	// and returns has_live_dependents + the blocker tree. Surface that,
-	// prompt once more for a cascade confirmation, and resend with the
-	// cascade flag set so the whole retire-old + eliminate-old + create-new
-	// can land in one tx.
-	var blockedEnv struct {
-		Error    string          `json:"error"`
-		Blockers json.RawMessage `json:"blockers"`
-	}
-	_ = json.Unmarshal(data, &blockedEnv)
-	if blockedEnv.Error == "has_live_dependents" {
-		fmt.Fprintf(os.Stderr, "\n%s the existing %s would affect live children:\n",
-			titleCase(removeVerb), entityLabel)
-		printBlockerTree(blockedEnv.Blockers)
-		ans := strings.ToLower(strings.TrimSpace(
-			promptLine(reader, "Retire/eliminate them and continue? [y/N]: ")))
-		if ans != "y" && ans != "yes" {
-			fmt.Fprintln(os.Stderr, "aborted")
-			os.Exit(1)
-		}
-		payload["remediate_collision"] = map[string]interface{}{
-			"remove_conflicting": true,
-			"cascade_children":   true,
-		}
-		data, err = sendWSRequest(msgType, payload)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-			os.Exit(1)
-		}
-	}
-
-	return data
 }
 
 // titleCase uppercases the first rune of s for menu labels. Keeps us off
