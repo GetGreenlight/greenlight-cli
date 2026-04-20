@@ -113,6 +113,16 @@ func runArchivalWithCascadePrompt(msgType, entityLabel, id string) {
 // prompts. removeVerb is the verb used for option 2 ("remove", "archive",
 // "abandon", "eliminate", "retire") matching the entity's soft-delete term.
 func runCreateOrUpdateWithCollisionPrompt(msgType, entityLabel, removeVerb, nameField string, payload map[string]interface{}) {
+	data := sendCreateOrUpdateResolvingCollision(msgType, entityLabel, removeVerb, nameField, payload)
+	printJSON(data)
+}
+
+// sendCreateOrUpdateResolvingCollision is the same flow but returns the final
+// response body instead of printing it, so callers with their own
+// post-processing (e.g. agent create launching `talk` on the new row) can
+// still use the collision prompt without losing control of stdout. Exits
+// the process on transport errors or user cancellation.
+func sendCreateOrUpdateResolvingCollision(msgType, entityLabel, removeVerb, nameField string, payload map[string]interface{}) json.RawMessage {
 	data, err := sendWSRequest(msgType, payload)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
@@ -134,8 +144,7 @@ func runCreateOrUpdateWithCollisionPrompt(msgType, entityLabel, removeVerb, name
 	}
 	_ = json.Unmarshal(data, &env)
 	if env.Error != "name_collision" {
-		printJSON(data)
-		return
+		return data
 	}
 
 	renameSupported := env.Collision.RenameSupported == nil || *env.Collision.RenameSupported
@@ -232,7 +241,7 @@ func runCreateOrUpdateWithCollisionPrompt(msgType, entityLabel, removeVerb, name
 		}
 	}
 
-	printJSON(data)
+	return data
 }
 
 // titleCase uppercases the first rune of s for menu labels. Keeps us off
@@ -1041,11 +1050,7 @@ func runOrganizationAgent(args []string) {
 			"name":                     *name,
 			"is_ephemeral":             *adhoc,
 		}
-		data, err := sendWSRequest("create_ai_agent_instance", payload)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-			os.Exit(1)
-		}
+		data := sendCreateOrUpdateResolvingCollision("create_ai_agent_instance", "agent", "retire", "name", payload)
 
 		// For ad-hoc spawns, land the user in `greenlight talk` focused on the
 		// new instance so they can start typing immediately. Note: claude's
