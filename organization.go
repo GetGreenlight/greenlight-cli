@@ -1119,12 +1119,10 @@ func runOrganizationAgent(args []string) {
 			fmt.Fprintf(os.Stderr, "greenlight: --id required\n")
 			os.Exit(1)
 		}
-		data, err := sendWSRequest("wake_ai_agent_instance", map[string]interface{}{"id": *id})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
-			os.Exit(1)
-		}
-		printJSON(data)
+		// wake can hit a slot_collision if another agent on the same
+		// position is already awake. The shared collision loop handles
+		// it by prompting the user to put the sitting occupant to sleep.
+		runCreateOrUpdateWithCollisionPrompt("wake_ai_agent_instance", "agent", "sleep", "name", map[string]interface{}{"id": *id})
 	case "retire":
 		fs := flag.NewFlagSet("agent retire", flag.ExitOnError)
 		id := fs.String("id", "", "Agent instance ID")
