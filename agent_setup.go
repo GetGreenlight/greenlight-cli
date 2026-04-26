@@ -164,6 +164,14 @@ func buildExportEnvs(devID, relayID, proj, bridgePath, agent string) map[string]
 // Returns the resolved command, args, and interpose state for cleanup.
 func setupInterpose(agent, command string, args []string, relayID string, cwd string, exportEnvs map[string]string) (string, []string, *InterposeSetup, error) {
 	setup := &InterposeSetup{}
+	// Test-only escape hatch: skip library injection entirely. The agent
+	// runs without permission gating. Used by integration tests where the
+	// macOS dyld entitlement re-sign step (which requires codesign) is
+	// unreliable on CI runners.
+	if os.Getenv("GREENLIGHT_DISABLE_INTERPOSE") == "1" {
+		log.Printf("Interpose: disabled via GREENLIGHT_DISABLE_INTERPOSE")
+		return command, args, setup, nil
+	}
 	setup.LibPath, setup.LibExtracted = findInterposeLib()
 	if setup.LibPath == "" {
 		return "", nil, nil, fmt.Errorf("interpose library not found")

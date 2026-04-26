@@ -160,7 +160,9 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	}
 
 	// Set up prompt relay so interpose can show prompts
-	s.interposeRelay.SetRelay(r)
+	if s.interposeRelay != nil {
+		s.interposeRelay.SetRelay(r)
+	}
 
 	// Start transcript streamer
 	startTime := time.Now()
