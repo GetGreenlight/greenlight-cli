@@ -20,6 +20,10 @@ import (
 // startTestDaemon starts a daemon process with a unique socket path so it
 // doesn't conflict with other tests or a real daemon. Returns the socket path,
 // a TMPDIR for the test, and a cleanup function.
+//
+// If a deviceID is provided (via the GREENLIGHT_DEVICE_ID env override in
+// extraEnv), the test should pre-enroll a host with the test server and pass
+// GREENLIGHT_DAEMON_SESSION_ID so the daemon's WebSocket can connect.
 func startTestDaemon(t *testing.T, extraEnv ...string) (sockPath, tmpDir string, cleanup func()) {
 	t.Helper()
 
@@ -121,7 +125,15 @@ func TestIntegration_Daemon_StopNotRunning(t *testing.T) {
 func TestIntegration_Daemon_ConnectFlow(t *testing.T) {
 	testServerURL.clearHandlers()
 
-	sockPath, tmpDir, cleanup := startTestDaemon(t)
+	// Pre-enroll a host so the daemon's WebSocket can connect with a
+	// known device_id / session_id pair.
+	hostID := enrollTestHost(t, "test-dev")
+
+	sockPath, tmpDir, cleanup := startTestDaemon(t,
+		"GREENLIGHT_DEVICE_ID=test-dev",
+		"GREENLIGHT_DAEMON_SESSION_ID="+hostID,
+		"GREENLIGHT_DISABLE_INTERPOSE=1",
+	)
 	defer cleanup()
 
 	workDir := t.TempDir()
@@ -141,17 +153,24 @@ func TestIntegration_Daemon_ConnectFlow(t *testing.T) {
 		"--project", "test-proj",
 	)
 	client.Dir = workDir
+	clientLog := filepath.Join(tmpDir, "client.log")
 	client.Env = []string{
 		"HOME=" + t.TempDir(),
 		"PATH=" + pathWithMock,
 		"TMPDIR=" + tmpDir,
 		"TERM=xterm-256color",
 		"GREENLIGHT_DAEMON_SOCK=" + sockPath,
+		"GREENLIGHT_LOG=" + clientLog,
 	}
 	var clientStderr bytes.Buffer
 	client.Stdin = slave
 	client.Stdout = slave
 	client.Stderr = &clientStderr
+	defer func() {
+		if t.Failed() {
+			t.Logf("client log:\n%s", readFileOrEmpty(clientLog))
+		}
+	}()
 
 	done := make(chan error, 1)
 	if err := client.Start(); err != nil {
@@ -186,7 +205,9 @@ func TestIntegration_Daemon_ConnectFlow(t *testing.T) {
 	output := ptyBuf.String()
 	t.Logf("PTY output: %q", output)
 
-	// Verify enrollment happened
+	// Verify host enrollment happened (test setup pre-enrolls so the daemon
+	// WebSocket can connect). Per-session info travels over the daemon WS,
+	// not via /session/enroll.
 	enrollReqs := testServerURL.getRequests("/session/enroll")
 	if len(enrollReqs) == 0 {
 		t.Fatal("expected enrollment request")
@@ -198,10 +219,6 @@ func TestIntegration_Daemon_ConnectFlow(t *testing.T) {
 	if enrollBody["device_id"] != "test-dev" {
 		t.Errorf("expected device_id=test-dev, got %q", enrollBody["device_id"])
 	}
-	if enrollBody["project"] != "test-proj" {
-		t.Errorf("expected project=test-proj, got %q", enrollBody["project"])
-	}
-
 }
 
 // ---------- daemon connect with input injection ----------
@@ -209,7 +226,13 @@ func TestIntegration_Daemon_ConnectFlow(t *testing.T) {
 func TestIntegration_Daemon_InputInjection(t *testing.T) {
 	testServerURL.clearHandlers()
 
-	sockPath, tmpDir, cleanup := startTestDaemon(t)
+	hostID := enrollTestHost(t, "test-dev")
+
+	sockPath, tmpDir, cleanup := startTestDaemon(t,
+		"GREENLIGHT_DEVICE_ID=test-dev",
+		"GREENLIGHT_DAEMON_SESSION_ID="+hostID,
+		"GREENLIGHT_DISABLE_INTERPOSE=1",
+	)
 	defer cleanup()
 
 	workDir := t.TempDir()
@@ -228,6 +251,7 @@ func TestIntegration_Daemon_InputInjection(t *testing.T) {
 		"--project", "test-proj",
 	)
 	client.Dir = workDir
+	clientLog := filepath.Join(tmpDir, "client.log")
 	client.Env = []string{
 		"HOME=" + t.TempDir(),
 		"PATH=" + pathWithMock,
@@ -235,10 +259,16 @@ func TestIntegration_Daemon_InputInjection(t *testing.T) {
 		"TERM=xterm-256color",
 		"MOCK_CLAUDE_OUTPUT=" + outputFile,
 		"GREENLIGHT_DAEMON_SOCK=" + sockPath,
+		"GREENLIGHT_LOG=" + clientLog,
 	}
 	client.Stdin = slave
 	client.Stdout = slave
 	client.Stderr = slave
+	defer func() {
+		if t.Failed() {
+			t.Logf("client log:\n%s", readFileOrEmpty(clientLog))
+		}
+	}()
 
 	done := make(chan error, 1)
 	if err := client.Start(); err != nil {
@@ -248,7 +278,17 @@ func TestIntegration_Daemon_InputInjection(t *testing.T) {
 	go func() { done <- client.Wait() }()
 
 	// Wait for mock claude to start
-	readPTYUntil(t, master, "MOCK_CLAUDE_STARTED", 10*time.Second)
+	got := readPTYUntil(t, master, "MOCK_CLAUDE_STARTED", 10*time.Second)
+	if !strings.Contains(got, "MOCK_CLAUDE_STARTED") {
+		// Client may have exited early — surface that and bail rather than
+		// write to a closed PTY.
+		select {
+		case err := <-done:
+			t.Fatalf("client exited before mock claude started: err=%v pty=%q", err, got)
+		default:
+			t.Fatalf("mock claude did not start within 10s, pty=%q", got)
+		}
+	}
 
 	// Send input through the PTY master — this goes to the client,
 	// which forwards it to the daemon, which writes to the agent PTY
