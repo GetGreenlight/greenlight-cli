@@ -226,13 +226,12 @@ func applyUpdate(downloadURL, newVersion string, force bool) error {
 		return fmt.Errorf("cannot replace binary: %w", err)
 	}
 
-	// Restart daemon if it was running (ensureDaemon re-enrolls)
+	// Don't restart the daemon here — `greenlight update` is often run via
+	// sudo, and starting the daemon as root would leave a root-owned socket
+	// that subsequent user invocations can't reach. The next user-run
+	// `greenlight` command will start the daemon under the right user.
 	if daemonWasRunning {
-		fmt.Fprintf(os.Stderr, "greenlight: restarting daemon...\n")
-		if err := ensureDaemon(""); err != nil {
-			fmt.Fprintf(os.Stderr, "greenlight: daemon restart failed: %v\n", err)
-			fmt.Fprintf(os.Stderr, "greenlight: run 'greenlight connect' to restart manually\n")
-		}
+		fmt.Fprintf(os.Stderr, "greenlight: daemon stopped; it will restart on next 'greenlight' invocation\n")
 	}
 
 	return nil
