@@ -141,47 +141,134 @@ func deriveTranscriptPath(agent, sessionID, cwd string) string {
 	}
 }
 
+// claudeProjectsDir returns ~/.claude/projects, or "" if the home dir can't be resolved.
+func claudeProjectsDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude", "projects")
+}
+
+// pathsEqual compares two filesystem paths for equality, resolving symlinks
+// when possible so e.g. "/tmp/foo" matches "/private/tmp/foo" on macOS.
+// Falls back to literal equality if a path can't be resolved (e.g. doesn't exist).
+func pathsEqual(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	if errA == nil && errB == nil {
+		return ra == rb
+	}
+	return false
+}
+
+// jsonlCwdMatches reports whether the JSONL transcript at path contains an
+// entry whose "cwd" field matches cwd. Claude Code's project-directory naming
+// scheme isn't fully documented and may transform special characters, so we
+// identify the right transcript by reading the file rather than guessing the
+// encoded directory name.
+func jsonlCwdMatches(path, cwd string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	// cwd typically appears within the first handful of lines (after the
+	// summary/snapshot header). Read a bounded prefix to keep this cheap.
+	for i := 0; i < 20 && scanner.Scan(); i++ {
+		var rec struct {
+			Cwd string `json:"cwd"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+			continue
+		}
+		if rec.Cwd != "" && pathsEqual(rec.Cwd, cwd) {
+			return true
+		}
+	}
+	return false
+}
+
 // deriveClaudeTranscriptPathByID returns the transcript path for a known session ID.
 // The file may not exist yet (the caller polls until it appears).
 func deriveClaudeTranscriptPathByID(sessionID, cwd string) string {
-	home, err := os.UserHomeDir()
+	root := claudeProjectsDir()
+	if root == "" {
+		return ""
+	}
+	dirs, err := os.ReadDir(root)
 	if err != nil {
 		return ""
 	}
-	projHash := strings.ReplaceAll(cwd, "/", "-")
-	return filepath.Join(home, ".claude", "projects", projHash, sessionID+".jsonl")
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		p := filepath.Join(root, d.Name(), sessionID+".jsonl")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
 }
 
+// deriveClaudeTranscriptPath finds the newest .jsonl across all Claude project
+// directories whose contents indicate it belongs to the given cwd.
 func deriveClaudeTranscriptPath(cwd string) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	root := claudeProjectsDir()
+	if root == "" {
 		return ""
 	}
-	projHash := strings.ReplaceAll(cwd, "/", "-")
-	projDir := filepath.Join(home, ".claude", "projects", projHash)
-	entries, err := os.ReadDir(projDir)
+	dirs, err := os.ReadDir(root)
 	if err != nil {
 		return ""
 	}
 	var newest string
 	var newestTime time.Time
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+	for _, d := range dirs {
+		if !d.IsDir() {
 			continue
 		}
-		info, err := e.Info()
+		entries, err := os.ReadDir(filepath.Join(root, d.Name()))
 		if err != nil {
 			continue
 		}
-		if info.ModTime().After(newestTime) {
-			newestTime = info.ModTime()
-			newest = e.Name()
+		// Find the newest .jsonl in this project dir first, then validate cwd.
+		// Avoids reading every transcript on every poll.
+		var candidate string
+		var candidateTime time.Time
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			if info.ModTime().After(candidateTime) {
+				candidateTime = info.ModTime()
+				candidate = e.Name()
+			}
 		}
+		if candidate == "" || !candidateTime.After(newestTime) {
+			continue
+		}
+		path := filepath.Join(root, d.Name(), candidate)
+		if !jsonlCwdMatches(path, cwd) {
+			continue
+		}
+		newest = path
+		newestTime = candidateTime
 	}
-	if newest != "" {
-		return filepath.Join(projDir, newest)
-	}
-	return ""
+	return newest
 }
 
 // deriveCopilotTranscriptPathByID returns the transcript path for a known session ID.
@@ -226,13 +313,42 @@ func deriveCopilotTranscriptPath() string {
 
 // deriveGeminiTranscriptPathByID finds the transcript file whose sessionId
 // JSON field matches the given UUID.
-func deriveGeminiTranscriptPathByID(sessionID, cwd string) string {
+// findGeminiProjectDir scans ~/.gemini/tmp/* for the project dir whose
+// .project_root file contains cwd. Gemini encodes the cwd basename when
+// naming the dir, so we can't reliably reconstruct the name; reading
+// .project_root is authoritative.
+func findGeminiProjectDir(cwd string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	projName := filepath.Base(cwd)
-	chatsDir := filepath.Join(home, ".gemini", "tmp", projName, "chats")
+	root := filepath.Join(home, ".gemini", "tmp")
+	dirs, err := os.ReadDir(root)
+	if err != nil {
+		return ""
+	}
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		p := filepath.Join(root, d.Name())
+		data, err := os.ReadFile(filepath.Join(p, ".project_root"))
+		if err != nil {
+			continue
+		}
+		if pathsEqual(strings.TrimSpace(string(data)), cwd) {
+			return p
+		}
+	}
+	return ""
+}
+
+func deriveGeminiTranscriptPathByID(sessionID, cwd string) string {
+	projDir := findGeminiProjectDir(cwd)
+	if projDir == "" {
+		return ""
+	}
+	chatsDir := filepath.Join(projDir, "chats")
 	entries, err := os.ReadDir(chatsDir)
 	if err != nil {
 		return ""
@@ -250,12 +366,11 @@ func deriveGeminiTranscriptPathByID(sessionID, cwd string) string {
 }
 
 func deriveGeminiTranscriptPath(cwd string) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	projDir := findGeminiProjectDir(cwd)
+	if projDir == "" {
 		return ""
 	}
-	projName := filepath.Base(cwd)
-	chatsDir := filepath.Join(home, ".gemini", "tmp", projName, "chats")
+	chatsDir := filepath.Join(projDir, "chats")
 	entries, err := os.ReadDir(chatsDir)
 	if err != nil {
 		return ""
@@ -296,15 +411,76 @@ func extractGeminiSessionID(path string) string {
 	return obj.SessionID
 }
 
-// deriveCursorTranscriptPathByID returns the transcript path for a known session UUID.
-// Cursor uses two layouts: <uuid>.jsonl (old) or <uuid>/<uuid>.jsonl (new).
-func deriveCursorTranscriptPathByID(sessionID, cwd string) string {
+// cursorProjectsDir returns ~/.cursor/projects, or "" if home is unavailable.
+func cursorProjectsDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	projHash := strings.TrimLeft(strings.ReplaceAll(cwd, "/", "-"), "-")
-	transcriptsDir := filepath.Join(home, ".cursor", "projects", projHash, "agent-transcripts")
+	return filepath.Join(home, ".cursor", "projects")
+}
+
+// cursorProjectMatches reports whether the cursor project dir at projDir
+// belongs to cwd. Cursor's worker.log contains a "workspacePath=<cwd>" line
+// (unencoded), which we use as a more reliable signal than reverse-engineering
+// the directory-name encoding.
+func cursorProjectMatches(projDir, cwd string) bool {
+	f, err := os.Open(filepath.Join(projDir, "worker.log"))
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for i := 0; i < 50 && scanner.Scan(); i++ {
+		line := scanner.Text()
+		idx := strings.Index(line, "workspacePath=")
+		if idx < 0 {
+			continue
+		}
+		path := strings.TrimSpace(line[idx+len("workspacePath="):])
+		// Trim trailing context after the path (e.g. another " key=value" pair).
+		if sp := strings.IndexAny(path, " \t"); sp >= 0 {
+			path = path[:sp]
+		}
+		if pathsEqual(path, cwd) {
+			return true
+		}
+	}
+	return false
+}
+
+// findCursorProjectDir scans ~/.cursor/projects/* for the project dir matching cwd.
+// Returns "" if none match (caller polls until cursor writes worker.log).
+func findCursorProjectDir(cwd string) string {
+	root := cursorProjectsDir()
+	if root == "" {
+		return ""
+	}
+	dirs, err := os.ReadDir(root)
+	if err != nil {
+		return ""
+	}
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		p := filepath.Join(root, d.Name())
+		if cursorProjectMatches(p, cwd) {
+			return p
+		}
+	}
+	return ""
+}
+
+// deriveCursorTranscriptPathByID returns the transcript path for a known session UUID.
+// Cursor uses two layouts: <uuid>.jsonl (old) or <uuid>/<uuid>.jsonl (new).
+func deriveCursorTranscriptPathByID(sessionID, cwd string) string {
+	projDir := findCursorProjectDir(cwd)
+	if projDir == "" {
+		return ""
+	}
+	transcriptsDir := filepath.Join(projDir, "agent-transcripts")
 	// New layout: <uuid>/<uuid>.jsonl
 	nested := filepath.Join(transcriptsDir, sessionID, sessionID+".jsonl")
 	if _, err := os.Stat(nested); err == nil {
@@ -319,14 +495,11 @@ func deriveCursorTranscriptPathByID(sessionID, cwd string) string {
 }
 
 func deriveCursorTranscriptPath(cwd string) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	projDir := findCursorProjectDir(cwd)
+	if projDir == "" {
 		return ""
 	}
-	projHash := strings.ReplaceAll(cwd, "/", "-")
-	// Strip leading "-" (from absolute paths like /Users/...)
-	projHash = strings.TrimLeft(projHash, "-")
-	transcriptsDir := filepath.Join(home, ".cursor", "projects", projHash, "agent-transcripts")
+	transcriptsDir := filepath.Join(projDir, "agent-transcripts")
 	entries, err := os.ReadDir(transcriptsDir)
 	if err != nil {
 		return ""
