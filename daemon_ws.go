@@ -433,13 +433,19 @@ func (d *DaemonWS) handleSessionTranscript(data []byte) {
 
 	convID := lookupConversationID(msg.RelayID)
 
-	// Try live session first (no saved record yet)
+	// Try live session first (no saved record yet). For live sessions, prefer a
+	// fresh cwd-based scan over the cached convID — agents like Gemini may
+	// self-restart and replace their transcript file with one that has a new
+	// session ID, leaving the cached convID stale.
 	d.mu.RLock()
 	sw := d.sessions[msg.RelayID]
 	d.mu.RUnlock()
-	if sw != nil && convID != "" {
+	if sw != nil {
 		agent = sw.agent
-		transcriptPath = deriveTranscriptPath(sw.agent, convID, sw.cwd)
+		transcriptPath = deriveTranscriptPath(sw.agent, "", sw.cwd)
+		if transcriptPath == "" && convID != "" {
+			transcriptPath = deriveTranscriptPath(sw.agent, convID, sw.cwd)
+		}
 	}
 
 	// Fall back to completed session record
@@ -450,7 +456,7 @@ func (d *DaemonWS) handleSessionTranscript(data []byte) {
 		}
 	}
 
-	if convID == "" {
+	if transcriptPath == "" && convID == "" {
 		log.Printf("daemon-ws: session_transcript: no conversation ID for relay %s", msg.RelayID)
 		d.sendTranscriptResponse(msg.RelayID, nil, "no conversation ID found for relay_id")
 		return
@@ -555,28 +561,18 @@ func (d *DaemonWS) sendTranscriptResponseWithAgent(relayID string, entries []jso
 // handleGeminiTranscript reads a Gemini JSON transcript file, transforms each
 // message to Claude-compatible format, and sends the entries as a transcript response.
 func (d *DaemonWS) handleGeminiTranscript(relayID, transcriptPath string) {
-	data, err := os.ReadFile(transcriptPath)
+	sessionID, messages, err := readGeminiTranscript(transcriptPath)
 	if err != nil {
 		log.Printf("daemon-ws: session_transcript: failed to read gemini transcript %s: %v", transcriptPath, err)
 		d.sendTranscriptResponse(relayID, nil, fmt.Sprintf("transcript file not found: %v", err))
 		return
 	}
 
-	var transcript struct {
-		SessionID string            `json:"sessionId"`
-		Messages  []json.RawMessage `json:"messages"`
-	}
-	if err := json.Unmarshal(data, &transcript); err != nil {
-		log.Printf("daemon-ws: session_transcript: failed to parse gemini transcript: %v", err)
-		d.sendTranscriptResponse(relayID, nil, "failed to parse gemini transcript")
-		return
-	}
-
 	const maxBytes = 8 << 20
 	var entries []json.RawMessage
 	var totalBytes int
-	for _, raw := range transcript.Messages {
-		transformed := transformGeminiMessage(raw, transcript.SessionID)
+	for _, raw := range messages {
+		transformed := transformGeminiMessage(raw, sessionID)
 		for _, entry := range transformed {
 			entryBytes, err := json.Marshal(entry)
 			if err != nil {

@@ -354,7 +354,7 @@ func deriveGeminiTranscriptPathByID(sessionID, cwd string) string {
 		return ""
 	}
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		if e.IsDir() || !isGeminiTranscriptFile(e.Name()) {
 			continue
 		}
 		p := filepath.Join(chatsDir, e.Name())
@@ -378,7 +378,7 @@ func deriveGeminiTranscriptPath(cwd string) string {
 	var newest string
 	var newestTime time.Time
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		if e.IsDir() || !isGeminiTranscriptFile(e.Name()) {
 			continue
 		}
 		info, err := e.Info()
@@ -396,19 +396,75 @@ func deriveGeminiTranscriptPath(cwd string) string {
 	return ""
 }
 
-// extractGeminiSessionID reads the sessionId field from a Gemini transcript JSON file.
-func extractGeminiSessionID(path string) string {
+// isGeminiTranscriptFile returns true if name looks like a Gemini transcript.
+// Older Gemini (≤0.38) writes session-*.json; newer (≥0.40) writes session-*.jsonl.
+func isGeminiTranscriptFile(name string) bool {
+	return strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".jsonl")
+}
+
+// readGeminiTranscript parses a Gemini transcript file in either supported layout
+// and returns the sessionId and the message records. The .jsonl format (Gemini
+// ≥0.40) has a metadata line followed by per-message lines and `$set` patch ops
+// (which are filtered out). The .json format is a single object with sessionId
+// and messages array.
+func readGeminiTranscript(path string) (string, []json.RawMessage, error) {
+	if strings.HasSuffix(path, ".jsonl") {
+		f, err := os.Open(path)
+		if err != nil {
+			return "", nil, err
+		}
+		defer f.Close()
+		s := bufio.NewScanner(f)
+		s.Buffer(make([]byte, 1024*1024), 4*1024*1024)
+		var sessionID string
+		var messages []json.RawMessage
+		first := true
+		for s.Scan() {
+			line := append([]byte(nil), s.Bytes()...)
+			if first {
+				first = false
+				var meta struct {
+					SessionID string `json:"sessionId"`
+				}
+				if json.Unmarshal(line, &meta) == nil && meta.SessionID != "" {
+					sessionID = meta.SessionID
+					continue
+				}
+				// Not the metadata line — fall through and treat as a message candidate.
+			}
+			var probe map[string]json.RawMessage
+			if json.Unmarshal(line, &probe) != nil {
+				continue
+			}
+			if _, set := probe["$set"]; set {
+				continue
+			}
+			if _, hasID := probe["id"]; !hasID {
+				continue
+			}
+			messages = append(messages, json.RawMessage(line))
+		}
+		return sessionID, messages, s.Err()
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return "", nil, err
 	}
 	var obj struct {
-		SessionID string `json:"sessionId"`
+		SessionID string            `json:"sessionId"`
+		Messages  []json.RawMessage `json:"messages"`
 	}
 	if err := json.Unmarshal(data, &obj); err != nil {
-		return ""
+		return "", nil, err
 	}
-	return obj.SessionID
+	return obj.SessionID, obj.Messages, nil
+}
+
+// extractGeminiSessionID reads the sessionId field from a Gemini transcript file
+// (either .json or .jsonl format).
+func extractGeminiSessionID(path string) string {
+	id, _, _ := readGeminiTranscript(path)
+	return id
 }
 
 // cursorProjectsDir returns ~/.cursor/projects, or "" if home is unavailable.

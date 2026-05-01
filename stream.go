@@ -190,21 +190,11 @@ func streamGeminiBridge(transcriptPath, bridgePath string) {
 		}
 		lastSize = info.Size()
 
-		// Re-read the full file each time. Gemini transcripts are single
-		// JSON objects (not JSONL) that get rewritten in place, so
-		// incremental parsing is fragile. Files are small enough (<100KB)
-		// that a full re-read is fine.
-		data, err := os.ReadFile(transcriptPath)
+		// Re-read and re-parse the file each time. Older Gemini (.json) rewrites
+		// the entire file on every update; newer Gemini (.jsonl) appends, but a
+		// full re-parse keeps the streaming logic uniform across both formats.
+		fileSessionID, messages, err := readGeminiTranscript(transcriptPath)
 		if err != nil {
-			time.Sleep(200 * time.Millisecond)
-			continue
-		}
-
-		var transcript struct {
-			SessionID string            `json:"sessionId"`
-			Messages  []json.RawMessage `json:"messages"`
-		}
-		if err := json.Unmarshal(data, &transcript); err != nil {
 			// File may be mid-write; reset lastSize so we retry on next poll
 			lastSize = 0
 			time.Sleep(200 * time.Millisecond)
@@ -212,12 +202,12 @@ func streamGeminiBridge(transcriptPath, bridgePath string) {
 		}
 
 		if sessionID == "" {
-			sessionID = transcript.SessionID
+			sessionID = fileSessionID
 		}
 
 		// Emit new messages and re-emit messages whose content changed
 		// (Gemini writes text first, then adds toolCalls later).
-		for i, raw := range transcript.Messages {
+		for i, raw := range messages {
 			snapshot := string(raw)
 			if i < len(msgSnapshots) {
 				if msgSnapshots[i] == snapshot {
