@@ -185,9 +185,47 @@ func isSafeCommand(cmd string) bool {
 		"defaults", "system_profiler", "security", "ioreg",
 		"dpkg", "lsb_release", "lscpu", "lsblk",
 		"date", "cal", "true", "false", "test", "[",
-		"sort", "uniq", "tr", "cut", "less", "more",
-		"greenlight", "greenlight-dev":
+		"sort", "uniq", "tr", "cut", "less", "more":
 		return true
+	case "greenlight", "greenlight-dev":
+		return isSafeGreenlightSubcommand(fields, cmdName)
+	}
+	return false
+}
+
+// isSafeGreenlightSubcommand returns true for read-only / internal-callback
+// greenlight subcommands that should auto-allow without a permission request.
+// Mutating subcommands (run, connect, register, secrets init/get/set/rm,
+// agent <name>) fall through and require approval. Mirrors the C-side check
+// in interpose.c::is_safe_shell_command.
+func isSafeGreenlightSubcommand(fields []string, cmdName string) bool {
+	// Find the subcommand: first non-env-assignment field after cmdName.
+	sub := ""
+	rest := []string{}
+	seenCmd := false
+	for _, f := range fields {
+		if !seenCmd {
+			if strings.Contains(f, "=") && !strings.HasPrefix(f, "-") {
+				continue
+			}
+			seenCmd = true
+			continue
+		}
+		if sub == "" {
+			sub = f
+			continue
+		}
+		rest = append(rest, f)
+	}
+	_ = cmdName
+	switch sub {
+	case "", "version", "--version", "-v", "hook":
+		return true
+	case "agent":
+		// Bare `agent` is a query; with an arg it sets config.
+		return len(rest) == 0
+	case "secrets":
+		return len(rest) > 0 && rest[0] == "list"
 	}
 	return false
 }
