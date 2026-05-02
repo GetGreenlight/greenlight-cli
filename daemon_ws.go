@@ -442,8 +442,17 @@ func (d *DaemonWS) handleSessionTranscript(data []byte) {
 	d.mu.RUnlock()
 	if sw != nil {
 		agent = sw.agent
-		transcriptPath = deriveTranscriptPath(sw.agent, "", sw.cwd)
-		if transcriptPath == "" && convID != "" {
+		// Gemini may self-restart and replace its transcript file with one that
+		// has a new session ID, leaving the cached convID stale — prefer a fresh
+		// cwd-based scan for it. For other agents, the convID maps deterministically
+		// to a single transcript file, so prefer it: a cwd-scan can otherwise return
+		// a previous session's transcript when multiple sessions share a directory.
+		if sw.agent == "gemini" {
+			transcriptPath = deriveTranscriptPath(sw.agent, "", sw.cwd)
+			if transcriptPath == "" && convID != "" {
+				transcriptPath = deriveTranscriptPath(sw.agent, convID, sw.cwd)
+			}
+		} else if convID != "" {
 			transcriptPath = deriveTranscriptPath(sw.agent, convID, sw.cwd)
 		}
 	}
