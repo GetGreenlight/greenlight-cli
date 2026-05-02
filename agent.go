@@ -93,7 +93,13 @@ const greenlightSystemPrompt = `Tool calls are managed by a permission system ca
 	`Do not retry the same action. Try a different approach or ask the user what they'd like instead. ` +
 	`If a command exits with code 127, or a file operation fails with "Operation not permitted", ` +
 	`the user wants you to stop. Do not continue with any further tool calls. ` +
-	`Explain what you were doing and wait for new instructions.`
+	`Explain what you were doing and wait for new instructions.` +
+	"\n\n" +
+	`Encrypted secrets (API tokens, OAuth credentials, etc.) may be available via the greenlight CLI. ` +
+	`Run "greenlight secrets list" to see available keys. ` +
+	`To use one, run "greenlight run -e KEY_NAME -- <command>" — KEY_NAME will be injected as an environment variable for that command only, and the secret value is scrubbed from stdout/stderr before you see it. ` +
+	`Prefer this over asking the user to paste tokens. ` +
+	`OAuth access tokens are stored as ${PROVIDER}_ACCESS_TOKEN (e.g. GITHUB_ACCESS_TOKEN) and refresh automatically when expired.`
 
 // deriveTranscriptPath constructs the transcript file path for the given agent.
 // For Claude it finds the newest .jsonl in the project dir; for Copilot it
