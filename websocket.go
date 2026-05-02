@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -273,24 +274,32 @@ func (c *WSClient) routePermissionResponse(data []byte) bool {
 		return true
 	}
 
-	if msg.Type != "permission_response" {
-		return false
-	}
+	// Route any response with a request_id that matches a pending caller.
+	// Covers permission_response, secrets_*_response, pubkey_put_response,
+	// oauth_providers_response, etc.
 	if msg.RequestID == "" {
-		log.Printf("ws: permission_response with empty request_id: %s", string(data))
+		if msg.Type == "permission_response" {
+			log.Printf("ws: permission_response with empty request_id: %s", string(data))
+		}
+		return false
 	}
 	c.pendingMu.Lock()
 	ch, ok := c.pending[msg.RequestID]
 	if ok {
 		delete(c.pending, msg.RequestID)
 	}
-	pendingCount := len(c.pending)
 	c.pendingMu.Unlock()
-	log.Printf("ws: permission_response for %s (matched=%v, pending=%d)", msg.RequestID, ok, pendingCount)
 	if ok {
 		ch <- data
+		return true
 	}
-	return true
+	// No pending caller for this request_id. If it's clearly a response type,
+	// swallow it; otherwise let other handlers see it.
+	if strings.HasSuffix(msg.Type, "_response") || msg.Type == "permission_response" {
+		log.Printf("ws: %s for unknown request_id %s", msg.Type, msg.RequestID)
+		return true
+	}
+	return false
 }
 
 // IsConnected returns true if the WebSocket connection is currently active.

@@ -120,6 +120,43 @@ func (d *DaemonWS) UnregisterSession(relayID string) {
 	log.Printf("daemon-ws: unregistered session %s", relayID)
 }
 
+// SendRequest wraps `data` in a `{type, relay_id: "", data}` envelope, sends
+// it over the daemon WS, and waits for a matching response by `request_id`.
+// Returns the response payload (raw JSON) or an error on timeout / disconnect.
+//
+// `data` must be a map or struct that the server's request_id field can echo
+// back; the caller is responsible for putting `request_id` inside it.
+func (d *DaemonWS) SendRequest(msgType, requestID string, data interface{}, timeout time.Duration) ([]byte, error) {
+	if !d.ws.IsConnected() {
+		return nil, fmt.Errorf("daemon WebSocket not connected")
+	}
+	dataBytes, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	envelope := map[string]interface{}{
+		"type":     msgType,
+		"relay_id": "",
+		"data":     json.RawMessage(dataBytes),
+	}
+	envBytes, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, err
+	}
+
+	ch := d.ws.RegisterPending(requestID)
+	defer d.ws.RemovePending(requestID)
+
+	d.ws.SendText(envBytes)
+
+	select {
+	case resp := <-ch:
+		return resp, nil
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("%s timed out after %s", msgType, timeout)
+	}
+}
+
 // StartSession sends a session_start message over the daemon WS and waits
 // for the server to acknowledge it. This replaces HTTP enrollment for
 // sessions within an already-enrolled daemon.
