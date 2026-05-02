@@ -54,6 +54,10 @@ func main() {
 		runAgent(os.Args[2:])
 	case "daemon":
 		runDaemon(os.Args[2:])
+	case "secrets":
+		runSecrets(os.Args[2:])
+	case "run":
+		runRun(os.Args[2:])
 	case "update":
 		runUpdate(os.Args[2:])
 	case "version", "--version", "-v":
@@ -96,6 +100,8 @@ Commands:
   register   Register a device ID for the Greenlight app
   agent      Get or set the default agent runtime (claude, codex, copilot, cursor, gemini, pi)
   daemon     Manage the background daemon (start, stop, status)
+  secrets    Manage encrypted secrets (init, list, set, rm)
+  run        Run a command with secrets injected into its environment
   update     Update greenlight to the latest version
   version    Print version and build settings
 
