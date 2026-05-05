@@ -98,6 +98,7 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 	defer func() {
 		stdoutMu.Lock()
 		resetScrollRegionLocked()
+		resetTerminalModesLocked()
 		stdoutMu.Unlock()
 		restoreTerminal(origTermios)
 		if exitConvID != "" && agentSupportsResume(exitAgent) {
@@ -170,11 +171,11 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 
 	// Stdin → daemon (send user keystrokes as frameStdin, or framePromptResp during prompts)
 	//
-	// Terminal query responses (DA1 \033[?1;2c, OSC 10, etc.) arrive on
-	// stdin as escape sequences. We buffer escape sequence bytes and only
-	// forward or absorb when the sequence completes. This prevents partial
-	// sequences from reaching the agent. We also filter prompt keystrokes
-	// from escape sequences to prevent auto-approval.
+	// Escape sequences (including terminal query responses like DA1 and DSR)
+	// are buffered as a unit and forwarded to the agent only once complete.
+	// This avoids partial sequences corrupting the agent's input parser, but
+	// every completed sequence is forwarded — agents like codex 0.128 emit
+	// terminal capability queries at startup and block on the responses.
 	go func() {
 		buf := make([]byte, 1)
 
@@ -183,10 +184,7 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 		inCSI := false
 		inOSC := false
 		prevWasEsc := false
-		csiPrefix := byte(0)  // first byte after \033[ if ?/>/=
-		oscCmd := 0            // OSC command number (10, 11, 12, etc.)
-		oscCmdDone := false    // true once ';' seen (stop accumulating digits)
-		var seqBuf []byte      // buffered bytes for current escape sequence
+		var seqBuf []byte // buffered bytes for current escape sequence
 
 		for {
 			n, err := os.Stdin.Read(buf)
@@ -195,20 +193,14 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 
 				// Track escape sequence state.
 				inSeq := false
-				seqDone := false    // sequence just completed this byte
-				isResponse := false // this sequence is a terminal response
+				seqDone := false // sequence just completed this byte
 
 				if inCSI {
 					inSeq = true
 					if b >= 0x40 && b <= 0x7E { // final byte
 						seqDone = true
-						if b == 'c' && (csiPrefix == '?' || csiPrefix == '>') {
-							isResponse = true
-						}
 						inCSI = false
 						inEscape = false
-					} else if csiPrefix == 0 && (b == '?' || b == '>' || b == '=') {
-						csiPrefix = b
 					}
 				} else if inOSC {
 					inSeq = true
@@ -221,29 +213,16 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 					prevWasEsc = (b == 0x1b)
 					if terminated {
 						seqDone = true
-						if oscCmd == 10 || oscCmd == 11 || oscCmd == 12 {
-							isResponse = true
-						}
 						inOSC = false
 						inEscape = false
-					} else {
-						// Accumulate OSC command number (before ';')
-						if !oscCmdDone && b >= '0' && b <= '9' {
-							oscCmd = oscCmd*10 + int(b-'0')
-						} else if b == ';' {
-							oscCmdDone = true
-						}
 					}
 				} else if inEscape {
 					inSeq = true
 					switch b {
 					case '[':
 						inCSI = true
-						csiPrefix = 0
 					case ']':
 						inOSC = true
-						oscCmd = 0
-						oscCmdDone = false
 					default:
 						// Two-byte escape — sequence done
 						seqDone = true
@@ -257,17 +236,12 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 				}
 
 				if inSeq {
-					// Buffer escape sequence bytes
+					// Buffer escape sequence bytes; forward when complete.
 					seqBuf = append(seqBuf, b)
-
 					if seqDone {
-						if !isResponse {
-							// Not a terminal response — forward buffered sequence
-							connMu.Lock()
-							writeFrame(conn, frameStdin, seqBuf)
-							connMu.Unlock()
-						}
-						// Response sequences are silently dropped
+						connMu.Lock()
+						writeFrame(conn, frameStdin, seqBuf)
+						connMu.Unlock()
 						seqBuf = seqBuf[:0]
 					}
 				} else if promptActive.Load() && b >= '1' && b <= '4' {
@@ -353,6 +327,7 @@ done:
 		// Restore terminal explicitly here since os.Exit skips defers.
 		stdoutMu.Lock()
 		resetScrollRegionLocked()
+		resetTerminalModesLocked()
 		stdoutMu.Unlock()
 		restoreTerminal(origTermios)
 		if exitConvID != "" && agentSupportsResume(exitAgent) {
@@ -442,6 +417,22 @@ func resetScrollRegionLocked() {
 	fmt.Fprintf(os.Stdout, "\033[r")
 	// Re-position cursor after reset (some terminals move cursor on DECSTBM reset).
 	fmt.Fprintf(os.Stdout, "\033[%d;1H", agentRows+1)
+}
+
+// resetTerminalModesLocked clears terminal modes the child agent may have
+// enabled but didn't get to clean up (e.g. when killed remotely). Without
+// this, the user's shell can be left with kitty-keyboard arrows that show up
+// as literal escape sequences, plus stuck bracketed-paste / focus-tracking /
+// alt-screen / hidden-cursor modes. Caller must hold stdoutMu.
+func resetTerminalModesLocked() {
+	// Only reset modes that agents we support actually enable. Avoid
+	// sending \033[?1049l unconditionally — on terminals where alt-screen
+	// was never entered, some emulators clear the main screen in response.
+	fmt.Fprintf(os.Stdout,
+		"\033[<u"+ // pop kitty keyboard flags (codex)
+			"\033[?2004l"+ // disable bracketed paste
+			"\033[?1004l"+ // disable focus tracking
+			"\033[?25h") // show cursor
 }
 
 // setRawTerminal puts os.Stdin into raw mode and returns the original termios

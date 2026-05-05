@@ -1223,15 +1223,10 @@ func transformCodexEvent(line string) string {
 		json.Unmarshal(event.Payload, &msg)
 
 		switch msg.Type {
-		case "user_message":
-			entry = map[string]interface{}{
-				"type":      "user",
-				"timestamp": event.Timestamp,
-				"message": map[string]interface{}{
-					"role":    "user",
-					"content": msg.Message,
-				},
-			}
+		// codex 0.128 records each user/assistant turn twice: once as a
+		// structured response_item (handled above) and once as a flat
+		// event_msg (user_message / agent_message). Drop the flat copies
+		// so each turn appears in the transcript only once.
 		case "agent_reasoning":
 			entry = map[string]interface{}{
 				"type":      "assistant",
@@ -1240,20 +1235,6 @@ func transformCodexEvent(line string) string {
 					"role": "assistant",
 					"content": []map[string]interface{}{
 						{"type": "thinking", "thinking": msg.Text},
-					},
-				},
-			}
-		case "agent_message":
-			if msg.Message == "" {
-				return ""
-			}
-			entry = map[string]interface{}{
-				"type":      "assistant",
-				"timestamp": event.Timestamp,
-				"message": map[string]interface{}{
-					"role": "assistant",
-					"content": []map[string]interface{}{
-						{"type": "text", "text": msg.Message},
 					},
 				},
 			}

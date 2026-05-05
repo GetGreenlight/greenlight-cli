@@ -127,16 +127,14 @@ func deriveTranscriptPath(agent, sessionID, cwd string) string {
 		}
 		return deriveCursorTranscriptPath(cwd)
 	case "codex":
+		// Resume: sessionID is the codex UUID — match by filename.
 		if sessionID != "" {
-			// sessionID may be either the codex UUID (from convID lookup)
-			// or the greenlight relayID (from startTranscriptStreamer).
-			// Try filename match first, then fall back to sentinel search.
-			if p := deriveCodexTranscriptByUUID(sessionID); p != "" {
-				return p
-			}
-			return deriveCodexTranscriptBySentinel(sessionID)
+			return deriveCodexTranscriptByUUID(sessionID)
 		}
-		return deriveCodexTranscriptPath()
+		// Fresh session: codex 0.128+ no longer embeds AGENTS.md content
+		// (and so the greenlight sentinel never appears in the rollout),
+		// so match the rollout's session_meta.cwd against the agent cwd.
+		return deriveCodexTranscriptByCwd(cwd)
 	case "pi":
 		if sessionID != "" {
 			return piSessionPath(sessionID, cwd)
@@ -614,15 +612,19 @@ func deriveCodexTranscriptByUUID(uuid string) string {
 	return match
 }
 
-// deriveCodexTranscriptBySentinel scans recent Codex transcript files for
-// a greenlight-relay sentinel embedded in the AGENTS.md content that Codex
-// serializes into the transcript at session start.
-func deriveCodexTranscriptBySentinel(relayID string) string {
+// deriveCodexTranscriptByCwd finds the newest codex rollout whose
+// session_meta entry records the given working directory. Codex 0.128
+// writes session_meta as the first line of the rollout JSONL with a
+// payload.cwd field. We scan recent rollouts in mtime order and return
+// the first one whose cwd matches. Returns "" if none match — callers
+// must NOT fall back to "newest globally," since that latches onto a
+// previous session in a sibling cwd.
+func deriveCodexTranscriptByCwd(cwd string) string {
 	home, err := os.UserHomeDir()
-	if err != nil {
+	if err != nil || cwd == "" {
 		return ""
 	}
-	sentinel := "greenlight-relay:" + relayID
+	target := strings.TrimRight(cwd, "/")
 	sessionsDir := filepath.Join(home, ".codex", "sessions")
 
 	type candidate struct {
@@ -641,58 +643,43 @@ func deriveCodexTranscriptBySentinel(relayID string) string {
 		return candidates[i].mtime.After(candidates[j].mtime)
 	})
 
-	limit := 5
+	limit := 20
 	if len(candidates) < limit {
 		limit = len(candidates)
 	}
 	for _, c := range candidates[:limit] {
-		f, err := os.Open(c.path)
-		if err != nil {
-			continue
-		}
-		found := false
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 256*1024), 256*1024)
-		for i := 0; i < 20 && scanner.Scan(); i++ {
-			if strings.Contains(scanner.Text(), sentinel) {
-				found = true
-				break
-			}
-		}
-		f.Close()
-		if found {
+		if matchesCodexCwd(c.path, target) {
 			return c.path
 		}
 	}
 	return ""
 }
 
-func deriveCodexTranscriptPath() string {
-	home, err := os.UserHomeDir()
+// matchesCodexCwd parses the first line of a codex rollout JSONL as a
+// session_meta event and returns true if its payload.cwd matches target.
+// session_meta with full base_instructions can exceed bufio's default
+// scan buffer, so we use a generous one.
+func matchesCodexCwd(path, target string) bool {
+	f, err := os.Open(path)
 	if err != nil {
-		return ""
+		return false
 	}
-	// Codex stores sessions in date-nested dirs:
-	// ~/.codex/sessions/YYYY/MM/DD/rollout-YYYY-MM-DDTHH-MM-SS-UUID.jsonl
-	// Walk the tree to find the newest .jsonl file.
-	sessionsDir := filepath.Join(home, ".codex", "sessions")
-	var newest string
-	var newestTime time.Time
-
-	filepath.Walk(sessionsDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		if !strings.HasSuffix(info.Name(), ".jsonl") {
-			return nil
-		}
-		if info.ModTime().After(newestTime) {
-			newestTime = info.ModTime()
-			newest = path
-		}
-		return nil
-	})
-	return newest
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	if !scanner.Scan() {
+		return false
+	}
+	var meta struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Cwd string `json:"cwd"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(scanner.Bytes(), &meta); err != nil {
+		return false
+	}
+	return strings.TrimRight(meta.Payload.Cwd, "/") == target
 }
 
 // extractCodexSessionID extracts the UUID from a codex transcript filename.

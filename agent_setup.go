@@ -94,10 +94,6 @@ func buildAgentCommand(agent, resume string) (*AgentSetup, error) {
 	if relayID == "" {
 		relayID = generateUUID()
 	}
-	// For Codex, use relay ID as the sentinel for transcript matching.
-	if agent == "codex" {
-		agentSessionID = relayID
-	}
 
 	return &AgentSetup{
 		Command:        command,
