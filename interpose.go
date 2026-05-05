@@ -763,7 +763,10 @@ func recvWithAncillary(conn net.Conn) ([]byte, int) {
 		if ok {
 			rawConn, err := unixConn.SyscallConn()
 			if err == nil {
-				var buf [4096]byte
+				// Sized to match the interpose library's GL_MAX_REQ_BYTES
+				// (128 KiB) plus slack for the path/pid framing. Anything
+				// larger is denied by the C side before reaching us.
+				var buf [160 * 1024]byte
 				oob := make([]byte, syscall.CmsgSpace(4))
 				var n, oobn int
 				var recvErr error
