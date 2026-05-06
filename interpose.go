@@ -586,8 +586,9 @@ func unwrapEvalCommand(cmd string) string {
 	}
 	inner := cmd[idx+8:] // skip "&& eval "
 	// Find the command between quotes, handling escaped quotes
+	quote := byte(0)
 	if len(inner) > 0 && (inner[0] == '\'' || inner[0] == '"') {
-		quote := inner[0]
+		quote = inner[0]
 		inner = inner[1:]
 		// Find closing delimiter: \< /dev/null or matching unescaped quote at end
 		// Claude uses: eval 'cmd' \< /dev/null && pwd ...
@@ -599,8 +600,16 @@ func unwrapEvalCommand(cmd string) string {
 			inner = inner[:end]
 		}
 	}
-	// Unescape \" sequences
+	// Unescape \" sequences regardless of outer quote.
 	inner = strings.ReplaceAll(inner, "\\\"", "\"")
+	// When the outer wrapper was single-quoted, claude escapes literal `'`
+	// inside CMD using one of the standard SQ-escape idioms. After we strip
+	// the outer SQ, those sequences must collapse back to a literal `'` or
+	// the resulting string is a parse error for any downstream shell parser.
+	if quote == '\'' {
+		inner = strings.ReplaceAll(inner, `'"'"'`, "'")
+		inner = strings.ReplaceAll(inner, `'\''`, "'")
+	}
 	if inner == "" {
 		return cmd
 	}
