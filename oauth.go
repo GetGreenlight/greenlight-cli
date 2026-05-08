@@ -63,12 +63,12 @@ func fetchProviders() ([]oauthProvider, error) {
 // The key is shaped like ${PROVIDER}_ACCESS_TOKEN and the refresh token is
 // stored under ${PROVIDER}_REFRESH_TOKEN.
 func refreshAccessToken(accessKey string) ([]byte, error) {
-	prefix := strings.TrimSuffix(accessKey, "_ACCESS_TOKEN")
-	if prefix == accessKey {
+	if !strings.Contains(accessKey, "_ACCESS_TOKEN") {
 		return nil, fmt.Errorf("not an access token key")
 	}
+	refreshKey := strings.Replace(accessKey, "_ACCESS_TOKEN", "_REFRESH_TOKEN", 1)
+	prefix := strings.SplitN(accessKey, "_ACCESS_TOKEN", 2)[0]
 	providerID := strings.ToLower(prefix)
-	refreshKey := prefix + "_REFRESH_TOKEN"
 
 	// Get refresh token (encrypted) from server.
 	refreshRaw, err := daemonWSRequest("secrets_get", map[string]interface{}{

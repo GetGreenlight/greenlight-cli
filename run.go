@@ -220,7 +220,7 @@ func fetchAndDecrypt(key string) ([]byte, error) {
 	}
 	if resp.Error == "expired" {
 		// Try OAuth refresh if this looks like an access token.
-		if strings.HasSuffix(key, "_ACCESS_TOKEN") {
+		if strings.Contains(key, "_ACCESS_TOKEN") {
 			if newPlain, refreshErr := refreshAccessToken(key); refreshErr == nil {
 				return newPlain, nil
 			} else {
