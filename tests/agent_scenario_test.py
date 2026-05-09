@@ -7,7 +7,11 @@ For each installed agent the harness:
 
   1. Snapshots the agent's transcript dir + ~/.greenlight/ state so
      anything the test writes can be reverted at teardown.
-  2. Boots greenlight-mockserver + daemon and launches the agent
+  2. Pre-trusts the test workdir in the agent's trust file so the
+     interactive "trust this folder?" prompt doesn't block input
+     (claude/codex/copilot/gemini all gate on this; cursor/pi don't).
+     The trust file is restored byte-for-byte at teardown.
+  3. Boots greenlight-mockserver + daemon and launches the agent
      through `greenlight connect` (real HOME — sandboxed HOMEs trip
      install-integrity checks in claude/cursor/codex).
   3. Once the session registers, sends a prompt over the relay WS that
@@ -27,10 +31,11 @@ works well for some models and tunes for others. Treat the harness as
 a launching pad — adjust the prompts per-agent as vendors change UX.
 
 Known issues at time of writing:
-  - claude shows "Not logged in" in the status bar even with real
-    Keychain auth and the user's real HOME, and silently exits before
-    processing the prompt. Probably a side effect of greenlight's
-    --append-system-prompt + native-install path verification.
+  - cursor needs interactive `agent --login` once before the harness
+    can run it; no folder trust gate.
+  - claude is invoked identically to production but the injected
+    prompt doesn't always engage the agent — likely a TUI keystroke
+    timing issue (paste vs typing detection in the readline layer).
 
 Not a CI test. Real backends, real auth, real cost. Run on demand.
 
@@ -209,6 +214,77 @@ def setup_test_home(tmp: Path, spec: AgentSpec) -> Path:
     removes anything newer afterwards. Daemon state under
     ~/.greenlight/ is cleaned by the per-test cleanup hook below."""
     return Path(os.path.expanduser("~"))
+
+
+# -------- per-agent trust files --------
+#
+# Each interactive agent (codex/gemini/copilot/claude) refuses to run
+# in a fresh workdir until the user accepts an interactive "trust this
+# folder?" prompt. We add the workdir to the agent's trust file before
+# launch and revert at teardown so the user's production trust list is
+# left exactly as we found it.
+#
+# cursor/pi don't have folder-trust prompts (cursor gates via login
+# state, pi has no equivalent) so trust_workdir is a no-op for them.
+
+
+def trust_workdir(spec: AgentSpec, workdir: Path) -> dict:
+    """Pre-trust `workdir` for the given agent. Returns a snapshot the
+    caller passes to restore_trust to revert the change."""
+    home = Path(os.path.expanduser("~"))
+    snap = {"name": spec.name, "files": {}}
+    abs_path = str(workdir.resolve())
+
+    if spec.name == "claude":
+        path = home / ".claude.json"
+        snap["files"][str(path)] = path.read_bytes() if path.exists() else None
+        data = json.loads(path.read_text()) if path.exists() else {}
+        projs = data.setdefault("projects", {})
+        projs[abs_path] = {**projs.get(abs_path, {}), "hasTrustDialogAccepted": True}
+        path.write_text(json.dumps(data, indent=2))
+
+    elif spec.name == "gemini":
+        path = home / ".gemini" / "trustedFolders.json"
+        snap["files"][str(path)] = path.read_bytes() if path.exists() else None
+        data = json.loads(path.read_text()) if path.exists() else {}
+        data[abs_path] = "TRUST_FOLDER"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2))
+
+    elif spec.name == "codex":
+        path = home / ".codex" / "config.toml"
+        snap["files"][str(path)] = path.read_bytes() if path.exists() else None
+        existing = path.read_text() if path.exists() else ""
+        marker = f'[projects."{abs_path}"]'
+        if marker not in existing:
+            block = f'\n{marker}\ntrust_level = "trusted"\n'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(existing + block)
+
+    elif spec.name == "copilot":
+        path = home / ".copilot" / "config.json"
+        snap["files"][str(path)] = path.read_bytes() if path.exists() else None
+        data = json.loads(path.read_text()) if path.exists() else {}
+        trusted = data.setdefault("trustedFolders", [])
+        if abs_path not in trusted:
+            trusted.append(abs_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2))
+
+    return snap
+
+
+def restore_trust(snap: dict):
+    """Revert every trust file the matching trust_workdir call touched
+    to its byte-for-byte pre-test state."""
+    for path_str, original in snap["files"].items():
+        path = Path(path_str)
+        if original is None:
+            try: path.unlink()
+            except OSError: pass
+        else:
+            try: path.write_bytes(original)
+            except OSError: pass
 
 
 def snapshot_greenlight() -> dict:
@@ -397,6 +473,7 @@ def run_scenario(spec: AgentSpec, gl_bin: Path, ms: MockServer, tmp: Path,
     home = setup_test_home(tmp, spec)
     transcript_snapshot = snapshot_transcripts(spec)
     greenlight_snapshot = snapshot_greenlight()
+    trust_snapshot = trust_workdir(spec, workdir)
 
     sock = str(tmp / f"daemon-{spec.name}.sock")
     device_id = f"scenario-{spec.name}"
@@ -501,6 +578,7 @@ def run_scenario(spec: AgentSpec, gl_bin: Path, ms: MockServer, tmp: Path,
         daemon.shutdown()
         cleanup_transcripts(spec, transcript_snapshot)
         restore_greenlight(greenlight_snapshot)
+        restore_trust(trust_snapshot)
         # Surface the daemon log when the test failed so the user can
         # see what tools the agent actually invoked.
         if observed and not all(saw_tool_for([r], str(target)) for r in observed):
