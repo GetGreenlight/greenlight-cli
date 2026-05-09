@@ -4,22 +4,18 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"nhooyr.io/websocket"
+	"greenlight/internal/mockserver"
 )
 
 // Paths set by TestMain
@@ -28,165 +24,8 @@ var (
 	mockClaudeBin string // path to mock claude binary
 )
 
-// ---------- test server ----------
-
-type recordedRequest struct {
-	Method string
-	Path   string
-	Body   []byte
-}
-
-type testServer struct {
-	*httptest.Server
-
-	mu       sync.Mutex
-	requests []recordedRequest
-
-	// per-endpoint response overrides (path → handler)
-	handlers map[string]http.HandlerFunc
-
-	// optional WebSocket handler for /ws/relay
-	wsHandlerFn func(w http.ResponseWriter, r *http.Request)
-}
-
-func newTestServer() *testServer {
-	ts := &testServer{
-		handlers: make(map[string]http.HandlerFunc),
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// WebSocket upgrade for /ws/relay or /ws/daemon
-		if r.URL.Path == "/ws/relay" || r.URL.Path == "/ws/daemon" {
-			ts.mu.Lock()
-			wsh := ts.wsHandlerFn
-			ts.mu.Unlock()
-			if wsh != nil {
-				wsh(w, r)
-				return
-			}
-			// Default: accept the upgrade, ACK any session_start messages
-			// (so newSession in the daemon doesn't time out), and read
-			// until the client closes.
-			conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-				InsecureSkipVerify: true,
-			})
-			if err != nil {
-				return
-			}
-			defer conn.Close(websocket.StatusNormalClosure, "done")
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-			for {
-				msgType, data, err := conn.Read(ctx)
-				if err != nil {
-					return
-				}
-				if msgType != websocket.MessageText {
-					continue
-				}
-				var msg struct {
-					Type    string `json:"type"`
-					RelayID string `json:"relay_id"`
-				}
-				if json.Unmarshal(data, &msg) != nil {
-					continue
-				}
-				if msg.Type == "session_start" {
-					ack, _ := json.Marshal(map[string]interface{}{
-						"type":     "session_started",
-						"relay_id": msg.RelayID,
-					})
-					conn.Write(ctx, websocket.MessageText, ack)
-				}
-			}
-		}
-
-		body, _ := io.ReadAll(r.Body)
-		ts.mu.Lock()
-		ts.requests = append(ts.requests, recordedRequest{
-			Method: r.Method,
-			Path:   r.URL.Path,
-			Body:   body,
-		})
-		ts.mu.Unlock()
-
-		ts.mu.Lock()
-		h, ok := ts.handlers[r.URL.Path]
-		ts.mu.Unlock()
-
-		if ok {
-			// re-create body for handler since we consumed it
-			r.Body = io.NopCloser(bytes.NewReader(body))
-			h(w, r)
-			return
-		}
-
-		// defaults
-		switch r.URL.Path {
-		case "/session/enroll":
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"approved":true}`)
-		case "/activity":
-			w.WriteHeader(200)
-		case "/transcript":
-			w.WriteHeader(200)
-		default:
-			w.WriteHeader(404)
-		}
-	})
-	ts.Server = httptest.NewServer(mux)
-	return ts
-}
-
-func (ts *testServer) setHandler(path string, h http.HandlerFunc) {
-	ts.mu.Lock()
-	ts.handlers[path] = h
-	ts.mu.Unlock()
-}
-
-func (ts *testServer) setWSHandler(h func(w http.ResponseWriter, r *http.Request)) {
-	ts.mu.Lock()
-	ts.wsHandlerFn = h
-	ts.mu.Unlock()
-}
-
-func (ts *testServer) clearHandlers() {
-	ts.mu.Lock()
-	ts.handlers = make(map[string]http.HandlerFunc)
-	ts.wsHandlerFn = nil
-	ts.requests = nil
-	ts.mu.Unlock()
-}
-
-func (ts *testServer) getRequests(path string) []recordedRequest {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	var out []recordedRequest
-	for _, r := range ts.requests {
-		if r.Path == path {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-func (ts *testServer) allRequests() []recordedRequest {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	out := make([]recordedRequest, len(ts.requests))
-	copy(out, ts.requests)
-	return out
-}
-
-// wsURL returns ws://host:port/ws/relay for use in -ldflags
-func (ts *testServer) wsURL() string {
-	return "ws://" + ts.Listener.Addr().String() + "/ws/relay"
-}
-
-// baseURL returns http://host:port
-func (ts *testServer) baseURL() string {
-	return "http://" + ts.Listener.Addr().String()
-}
+// The mock server lives in internal/mockserver so the dev binary can
+// reuse it. Tests get the same API via short aliases below.
 
 // ---------- helpers ----------
 
@@ -262,14 +101,14 @@ func TestMain(m *testing.M) {
 	defer os.RemoveAll(tmpDir)
 
 	// Start test server to get the address for the build
-	ts := newTestServer()
+	ts := mockserver.New()
 	defer ts.Close()
 	testServerURL = ts
 
 	// Build greenlight binary with the test server URL and version
 	greenlightBin = filepath.Join(tmpDir, "greenlight")
 	buildCmd := exec.Command("go", "build",
-		"-ldflags", "-X main.wsURL="+ts.wsURL()+" -X main.version=0.0.0-test",
+		"-ldflags", "-X main.wsURL="+ts.WSURL()+" -X main.version=0.0.0-test",
 		"-o", greenlightBin,
 		".",
 	)
@@ -300,7 +139,7 @@ func TestMain(m *testing.M) {
 }
 
 // testServerURL is shared across tests
-var testServerURL *testServer
+var testServerURL *mockserver.Server
 
 func sourceDir() string {
 	// This test file lives in the repo root
@@ -348,6 +187,175 @@ func TestIntegration_Version(t *testing.T) {
 				t.Errorf("expected 'greenlight 0.0.0-test', got stderr=%q", r.Stderr)
 			}
 		})
+	}
+}
+
+// ---------- register ----------
+
+func TestIntegration_Register_Success(t *testing.T) {
+	home := t.TempDir()
+	id := "deadbeef-1234-5678-9abc-def012345678"
+	r := run(t, []string{"register", id}, []string{"HOME=" + home}, "")
+	if r.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d; stderr=%q", r.ExitCode, r.Stderr)
+	}
+	if !strings.Contains(r.Stderr, "Registered device "+id) {
+		t.Errorf("expected confirmation, got stderr=%q", r.Stderr)
+	}
+	cfg, err := os.ReadFile(filepath.Join(home, ".greenlight", "config"))
+	if err != nil {
+		t.Fatalf("config file: %v", err)
+	}
+	if !strings.Contains(string(cfg), "device_id="+id) {
+		t.Errorf("config missing device_id: %q", string(cfg))
+	}
+}
+
+func TestIntegration_Register_InvalidUUID(t *testing.T) {
+	home := t.TempDir()
+	r := run(t, []string{"register", "not-a-uuid"}, []string{"HOME=" + home}, "")
+	if r.ExitCode == 0 {
+		t.Error("expected non-zero exit for invalid UUID")
+	}
+	if !strings.Contains(r.Stderr, "invalid device ID") {
+		t.Errorf("expected 'invalid device ID', got stderr=%q", r.Stderr)
+	}
+}
+
+func TestIntegration_Register_NoArgs(t *testing.T) {
+	home := t.TempDir()
+	r := run(t, []string{"register"}, []string{"HOME=" + home}, "")
+	if r.ExitCode == 0 {
+		t.Error("expected non-zero exit when no device ID")
+	}
+	if !strings.Contains(r.Stderr, "Usage:") {
+		t.Errorf("expected usage text, got stderr=%q", r.Stderr)
+	}
+}
+
+// ---------- agent ----------
+
+func TestIntegration_Agent_DefaultClaude(t *testing.T) {
+	home := t.TempDir()
+	r := run(t, []string{"agent"}, []string{"HOME=" + home}, "")
+	if r.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d; stderr=%q", r.ExitCode, r.Stderr)
+	}
+	if !strings.Contains(r.Stderr, "claude") {
+		t.Errorf("expected default 'claude', got stderr=%q", r.Stderr)
+	}
+}
+
+func TestIntegration_Agent_Set(t *testing.T) {
+	home := t.TempDir()
+	r := run(t, []string{"agent", "codex"}, []string{"HOME=" + home}, "")
+	if r.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d; stderr=%q", r.ExitCode, r.Stderr)
+	}
+	if !strings.Contains(r.Stderr, "Default agent set to codex") {
+		t.Errorf("expected confirmation, got stderr=%q", r.Stderr)
+	}
+	// Subsequent get should reflect the new default.
+	r2 := run(t, []string{"agent"}, []string{"HOME=" + home}, "")
+	if !strings.Contains(r2.Stderr, "codex") {
+		t.Errorf("expected 'codex' after set, got stderr=%q", r2.Stderr)
+	}
+}
+
+func TestIntegration_Agent_Unknown(t *testing.T) {
+	home := t.TempDir()
+	r := run(t, []string{"agent", "bogus"}, []string{"HOME=" + home}, "")
+	if r.ExitCode == 0 {
+		t.Error("expected non-zero exit for unknown agent")
+	}
+	if !strings.Contains(r.Stderr, "unknown agent") {
+		t.Errorf("expected 'unknown agent', got stderr=%q", r.Stderr)
+	}
+}
+
+// ---------- secrets ----------
+
+func TestIntegration_Secrets_NoArgs(t *testing.T) {
+	r := run(t, []string{"secrets"}, []string{"HOME=" + t.TempDir()}, "")
+	if r.ExitCode == 0 {
+		t.Error("expected non-zero exit when no subcommand")
+	}
+	if !strings.Contains(r.Stderr, "Usage:") {
+		t.Errorf("expected usage text, got stderr=%q", r.Stderr)
+	}
+}
+
+func TestIntegration_Secrets_UnknownSubcommand(t *testing.T) {
+	r := run(t, []string{"secrets", "bogus"}, []string{"HOME=" + t.TempDir()}, "")
+	if r.ExitCode == 0 {
+		t.Error("expected non-zero exit for unknown secrets subcommand")
+	}
+	if !strings.Contains(r.Stderr, "unknown command") {
+		t.Errorf("expected 'unknown command', got stderr=%q", r.Stderr)
+	}
+}
+
+func TestIntegration_Secrets_SetRequiresKey(t *testing.T) {
+	r := run(t, []string{"secrets", "set"}, []string{"HOME=" + t.TempDir()}, "")
+	if r.ExitCode == 0 {
+		t.Error("expected non-zero exit when key is missing")
+	}
+	if !strings.Contains(r.Stderr, "secrets set KEY") {
+		t.Errorf("expected usage hint, got stderr=%q", r.Stderr)
+	}
+}
+
+func TestIntegration_Secrets_RmRequiresKey(t *testing.T) {
+	r := run(t, []string{"secrets", "rm"}, []string{"HOME=" + t.TempDir()}, "")
+	if r.ExitCode == 0 {
+		t.Error("expected non-zero exit when key is missing")
+	}
+	if !strings.Contains(r.Stderr, "secrets rm KEY") {
+		t.Errorf("expected usage hint, got stderr=%q", r.Stderr)
+	}
+}
+
+// TestIntegration_Secrets_Init_RefusesOverwrite verifies the local
+// half of secrets init: a private key is generated and written, then
+// the second invocation without --rotate refuses to clobber it. We
+// don't exercise the server-side pubkey upload here because it goes
+// through the daemon IPC + WS round-trip; the daemon ListSkills test
+// already covers that path.
+func TestIntegration_Secrets_Init_RefusesOverwrite(t *testing.T) {
+	home := t.TempDir()
+	keyPath := filepath.Join(home, ".greenlight", "key")
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-populate a key so init's overwrite check trips before any
+	// daemon round-trip.
+	if err := os.WriteFile(keyPath, []byte("dummy"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := run(t, []string{"secrets", "init"}, []string{
+		"HOME=" + home,
+		// Point at a nonexistent daemon socket so a stray success path
+		// can't reach the user's real daemon.
+		"GREENLIGHT_DAEMON_SOCK=/tmp/gl-test-no-daemon.sock",
+	}, "")
+	if r.ExitCode == 0 {
+		t.Error("expected refusal to overwrite without --rotate")
+	}
+	if !strings.Contains(r.Stderr, "key already exists") {
+		t.Errorf("expected 'key already exists' message, got stderr=%q", r.Stderr)
+	}
+}
+
+// TestIntegration_Secrets_List_NoDaemon verifies the CLI surfaces a
+// helpful error when there's no daemon to talk to.
+func TestIntegration_Secrets_List_NoDaemon(t *testing.T) {
+	r := run(t, []string{"secrets", "list"}, []string{
+		"HOME=" + t.TempDir(),
+		"GREENLIGHT_DAEMON_SOCK=/tmp/gl-test-no-daemon.sock",
+	}, "")
+	if r.ExitCode == 0 {
+		t.Error("expected non-zero exit when daemon unreachable")
 	}
 }
 
@@ -470,7 +478,7 @@ func enrollTestHost(t *testing.T, deviceID string) string {
 		"session_id": hostID,
 		"hostname":   "test-host",
 	})
-	resp, err := http.Post(testServerURL.baseURL()+"/session/enroll", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(testServerURL.BaseURL()+"/session/enroll", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("enroll: %v", err)
 	}

@@ -36,7 +36,6 @@ type WSClient struct {
 	token       string
 	mode        WSMode
 	inject      func([]byte) error
-	killFunc    func()
 	controlFunc    func([]byte) // optional handler for binary control messages
 	textFrameFunc  func([]byte) bool // optional handler for unrouted text frames; returns true if consumed
 	reconnectFunc  func() // called after reconnecting (not on first connect)
@@ -388,22 +387,10 @@ func (c *WSClient) connectAndRead(firstConnect bool) error {
 			continue
 		}
 
-		// Binary frames are control messages
+		// Binary frames are control messages — dispatch to controlFunc.
 		if msgType == websocket.MessageBinary && len(data) > 0 {
-			var msg struct{ Type string `json:"type"` }
-			if json.Unmarshal(data, &msg) == nil {
-				switch msg.Type {
-				case "kill":
-					log.Printf("ws: received kill command")
-					if c.killFunc != nil {
-						c.killFunc()
-					}
-					return nil
-				default:
-					if c.controlFunc != nil {
-						c.controlFunc(data)
-					}
-				}
+			if c.controlFunc != nil {
+				c.controlFunc(data)
 			}
 			continue
 		}

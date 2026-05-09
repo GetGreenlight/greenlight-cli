@@ -14,6 +14,12 @@
 // MOCK_CLAUDE_TRANSCRIPT_INCREMENTAL — Like MOCK_CLAUDE_TRANSCRIPT but
 // writes lines incrementally with delays to simulate a real conversation
 // where transcript entries arrive over time.
+//
+// MOCK_CLAUDE_EXEC — Space-separated command line to execute via
+// exec.Command. The interpose library treats this as a Bash spawn and
+// (for non-safe-list binaries) consults the daemon over the permission
+// socket. The exit status is written to MOCK_CLAUDE_EXEC_RESULT (if set)
+// as "ok" / "err: <message>".
 package main
 
 import (
@@ -21,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -30,6 +37,22 @@ func main() {
 	// Read a file to trigger interpose permission request via DYLD_INSERT_LIBRARIES
 	if path := os.Getenv("MOCK_CLAUDE_READ_FILE"); path != "" {
 		os.ReadFile(path)
+	}
+
+	// Spawn a child process — interpose intercepts at exec.
+	if cmdline := os.Getenv("MOCK_CLAUDE_EXEC"); cmdline != "" {
+		fields := strings.Fields(cmdline)
+		var execErr error
+		if len(fields) > 0 {
+			execErr = exec.Command(fields[0], fields[1:]...).Run()
+		}
+		if rp := os.Getenv("MOCK_CLAUDE_EXEC_RESULT"); rp != "" {
+			result := "ok"
+			if execErr != nil {
+				result = "err: " + execErr.Error()
+			}
+			os.WriteFile(rp, []byte(result), 0644)
+		}
 	}
 
 	if path := os.Getenv("MOCK_CLAUDE_OUTPUT"); path != "" {

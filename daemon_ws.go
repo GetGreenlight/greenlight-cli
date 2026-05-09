@@ -390,6 +390,9 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 // handleSessionHistory loads persisted session records and sends them back to the server.
 func (d *DaemonWS) handleSessionHistory() {
 	records := listSessionRecords()
+	if records == nil {
+		records = []sessionRecord{}
+	}
 	log.Printf("daemon-ws: session_history request, returning %d records", len(records))
 
 	resp := map[string]interface{}{
