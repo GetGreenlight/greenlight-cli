@@ -371,37 +371,20 @@ def cleanup_transcripts(spec: AgentSpec, before: set[str]):
 
 # -------- prompt injection + permission allow loop --------
 
-def inject_input(ms: MockServer, relay_id: str, text: str, *, paced: bool = True):
-    """Send agent input as the relay protocol expects: a text frame
-    whose `data` field is the base64-encoded keystrokes (mirrors what
-    the phone sends when the user types).
-
-    By default the keystrokes are sent one at a time with a small
-    delay between them, defeating bracketed-paste-mode handling that
-    some TUIs (claude, cursor) use to defer submission of pasted
-    blocks. Pass paced=False to dump the whole string at once."""
-    def _send(payload: str):
-        # Best-effort: if the agent has exited the session is gone and
-        # the admin API returns 404; swallow and stop sending.
-        try:
-            ms.send_text(relay_id, {
-                "type": "input",
-                "relay_id": relay_id,
-                "data": base64.b64encode(payload.encode()).decode(),
-            })
-            return True
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                return False
+def inject_input(ms: MockServer, relay_id: str, text: str):
+    """Send agent input as a single relay text frame: the production
+    server sends whole messages this way (not character-by-character).
+    The daemon's handleTextFrame base64-decodes `data` and writes the
+    payload directly to the agent's PTY master."""
+    try:
+        ms.send_text(relay_id, {
+            "type": "input",
+            "relay_id": relay_id,
+            "data": base64.b64encode(text.encode()).decode(),
+        })
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
             raise
-
-    if not paced:
-        _send(text)
-        return
-    for ch in text:
-        if not _send(ch):
-            return
-        time.sleep(0.03)  # ~33 keystrokes/sec — fast typist, not paste
 
 
 def allow_loop(ms: MockServer, relay_id: str, observed: list, stop):
