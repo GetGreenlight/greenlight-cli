@@ -264,7 +264,13 @@ def trust_workdir(spec: AgentSpec, workdir: Path) -> dict:
     elif spec.name == "copilot":
         path = home / ".copilot" / "config.json"
         snap["files"][str(path)] = path.read_bytes() if path.exists() else None
-        data = json.loads(path.read_text()) if path.exists() else {}
+        # copilot writes its config with leading `// ...` comment lines
+        # which standard json.loads chokes on. Strip them before parsing.
+        raw = path.read_text() if path.exists() else "{}"
+        clean = "\n".join(
+            ln for ln in raw.splitlines() if not ln.lstrip().startswith("//")
+        )
+        data = json.loads(clean) if clean.strip() else {}
         trusted = data.setdefault("trustedFolders", [])
         if abs_path not in trusted:
             trusted.append(abs_path)
@@ -467,9 +473,18 @@ def run_scenario(spec: AgentSpec, gl_bin: Path, ms: MockServer, tmp: Path,
         return True, "not installed"
 
     # Per-test workspace; HOME stays the user's real one (see
-    # setup_test_home for why). Snapshot the writeable bits so we can
-    # revert at teardown.
-    workdir = tmp / f"work-{spec.name}"; workdir.mkdir()
+    # setup_test_home for why). The workdir lives under
+    # ~/greenlight-test-workdir/ (NOT /tmp) — the interpose library
+    # auto-allows every write under /tmp without consulting the
+    # daemon, so a /tmp workdir would mean the agent's Write tool
+    # calls never fire a permission_request and the test can't observe
+    # the round-trip. We clean up the per-test subdir explicitly at
+    # the end of run_scenario.
+    real_home = Path(os.path.expanduser("~"))
+    workdir_root = real_home / "greenlight-test-workdir"
+    workdir_root.mkdir(parents=True, exist_ok=True)
+    workdir = workdir_root / f"scenario-{spec.name}-{uuid.uuid4().hex[:8]}"
+    workdir.mkdir(parents=True, exist_ok=True)
     home = setup_test_home(tmp, spec)
     transcript_snapshot = snapshot_transcripts(spec)
     greenlight_snapshot = snapshot_greenlight()
@@ -579,6 +594,13 @@ def run_scenario(spec: AgentSpec, gl_bin: Path, ms: MockServer, tmp: Path,
         cleanup_transcripts(spec, transcript_snapshot)
         restore_greenlight(greenlight_snapshot)
         restore_trust(trust_snapshot)
+        # Workdir lives under the user's HOME (~/greenlight-test-workdir/)
+        # rather than /tmp so the agent's writes get gated. Clean it up
+        # explicitly since shutil.rmtree(tmp) won't reach it.
+        try:
+            shutil.rmtree(workdir, ignore_errors=True)
+        except OSError:
+            pass
         # Surface the daemon log when the test failed so the user can
         # see what tools the agent actually invoked.
         if observed and not all(saw_tool_for([r], str(target)) for r in observed):
