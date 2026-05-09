@@ -476,7 +476,8 @@ def go_build(verbose: bool) -> tuple[Path, Path]:
 
 def run_scenario(spec: AgentSpec, gl_bin: Path, ms: MockServer, tmp: Path,
                  *, verbose: bool, settle: float = 8.0,
-                 step_timeout: float = 60.0) -> tuple[bool, str]:
+                 step_timeout: float = 60.0,
+                 keep_transcripts: bool = False) -> tuple[bool, str]:
     if platform.system().lower() in spec.skip_on:
         return True, f"skipped on {platform.system()}"
     if not find_agent(spec):
@@ -608,7 +609,8 @@ def run_scenario(spec: AgentSpec, gl_bin: Path, ms: MockServer, tmp: Path,
             try: os.close(master)
             except OSError: pass
         daemon.shutdown()
-        cleanup_transcripts(spec, transcript_snapshot)
+        if not keep_transcripts:
+            cleanup_transcripts(spec, transcript_snapshot)
         restore_greenlight(greenlight_snapshot)
         restore_trust(trust_snapshot)
         # Workdir lives under the user's HOME (~/greenlight-test-workdir/)
@@ -659,6 +661,8 @@ def main():
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--keep", action="store_true",
                    help="don't tear down temp dir on exit")
+    p.add_argument("--keep-transcripts", action="store_true",
+                   help="don't restore the agent's transcript dir on teardown — useful for diagnosing why an agent didn't engage with the prompt")
     p.add_argument("--settle", type=float, default=8.0,
                    help="seconds to let each agent boot before prompting")
     p.add_argument("--step-timeout", type=float, default=60.0,
@@ -688,7 +692,8 @@ def main():
                 ok, reason = run_scenario(spec, gl_bin, ms, tmp,
                                           verbose=args.verbose,
                                           settle=args.settle,
-                                          step_timeout=args.step_timeout)
+                                          step_timeout=args.step_timeout,
+                                          keep_transcripts=args.keep_transcripts)
             except Exception as e:
                 ok, reason = False, f"exception: {e}"
             dt = time.time() - t0
