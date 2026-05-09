@@ -166,6 +166,11 @@ class Daemon:
             "GREENLIGHT_DAEMON_SOCK": sock,
             "GREENLIGHT_DEVICE_ID": device_id,
             "GREENLIGHT_DAEMON_SESSION_ID": session_id,
+            # Per-test log path so we don't fight the user's prod
+            # daemon for ~/.greenlight/daemon.log. Greenlight respects
+            # GREENLIGHT_LOG for the daemon process itself.
+            "GREENLIGHT_LOG": str(log_path) if log_path else
+                              str(tmpdir / "greenlight-daemon-internal.log"),
         }
         # Always capture daemon stderr to a file (even when not verbose)
         # so post-mortem diagnosis is possible — agent scenarios fail in
@@ -366,15 +371,37 @@ def cleanup_transcripts(spec: AgentSpec, before: set[str]):
 
 # -------- prompt injection + permission allow loop --------
 
-def inject_input(ms: MockServer, relay_id: str, text: str):
+def inject_input(ms: MockServer, relay_id: str, text: str, *, paced: bool = True):
     """Send agent input as the relay protocol expects: a text frame
     whose `data` field is the base64-encoded keystrokes (mirrors what
-    the phone sends when the user types)."""
-    ms.send_text(relay_id, {
-        "type": "input",
-        "relay_id": relay_id,
-        "data": base64.b64encode(text.encode()).decode(),
-    })
+    the phone sends when the user types).
+
+    By default the keystrokes are sent one at a time with a small
+    delay between them, defeating bracketed-paste-mode handling that
+    some TUIs (claude, cursor) use to defer submission of pasted
+    blocks. Pass paced=False to dump the whole string at once."""
+    def _send(payload: str):
+        # Best-effort: if the agent has exited the session is gone and
+        # the admin API returns 404; swallow and stop sending.
+        try:
+            ms.send_text(relay_id, {
+                "type": "input",
+                "relay_id": relay_id,
+                "data": base64.b64encode(payload.encode()).decode(),
+            })
+            return True
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return False
+            raise
+
+    if not paced:
+        _send(text)
+        return
+    for ch in text:
+        if not _send(ch):
+            return
+        time.sleep(0.03)  # ~33 keystrokes/sec — fast typist, not paste
 
 
 def allow_loop(ms: MockServer, relay_id: str, observed: list, stop):
@@ -494,8 +521,13 @@ def run_scenario(spec: AgentSpec, gl_bin: Path, ms: MockServer, tmp: Path,
     device_id = f"scenario-{spec.name}"
     session_id = f"00000000-0000-0000-0000-00000000{ord(spec.name[0]):04x}"
 
-    # Unique target the prompt will reference; greppable across logs.
-    target = workdir / f"greenlight-test-{uuid.uuid4().hex[:8]}.txt"
+    # Unique target the prompt will reference. Use a relative filename
+    # (no leading /) so claude's TUI doesn't treat it as a slash-command
+    # trigger and divert into autocomplete instead of submitting the
+    # message. The agent runs with cwd=workdir so the relative path
+    # resolves correctly.
+    target_name = f"greenlight-test-{uuid.uuid4().hex[:8]}.txt"
+    target = workdir / target_name
 
     ms.enroll_host(device_id, session_id)
     daemon_log = tmp / f"daemon-{spec.name}.log"
@@ -550,7 +582,9 @@ def run_scenario(spec: AgentSpec, gl_bin: Path, ms: MockServer, tmp: Path,
         # Step 1: ask for a file to be created. Keep prompt short and
         # imperative — chatty/qualified prompts let the agent wander
         # into WebFetch or asking-clarifying-questions territory.
-        prompt1 = f"Create a file at {target} containing the text hi.\r"
+        # Use a relative filename so the leading "/" of an absolute
+        # path doesn't trip claude's slash-command autocomplete.
+        prompt1 = f"Create a file named {target_name} in the current directory containing the text hi.\r"
         inject_input(ms, relay_id, prompt1)
         if not wait_for_predicate(lambda: target.exists(), step_timeout):
             return False, (f"file never created at {target}; "
@@ -562,7 +596,7 @@ def run_scenario(spec: AgentSpec, gl_bin: Path, ms: MockServer, tmp: Path,
         creates = list(observed)
 
         # Step 2: ask for the file to be deleted.
-        prompt2 = f"Delete the file at {target}.\r"
+        prompt2 = f"Delete the file {target_name}.\r"
         inject_input(ms, relay_id, prompt2)
         if not wait_for_predicate(lambda: not target.exists(), step_timeout):
             return False, (f"file never deleted at {target}; "
