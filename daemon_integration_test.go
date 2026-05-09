@@ -28,9 +28,16 @@ import (
 // extraEnv), the test should pre-enroll a host with the test server and pass
 // GREENLIGHT_DAEMON_SESSION_ID so the daemon's WebSocket can connect.
 func startTestDaemon(t *testing.T, extraEnv ...string) (sockPath, tmpDir string, cleanup func()) {
-	t.Helper()
+	sockPath, tmpDir, _, cleanup = startTestDaemonWithHome(t, t.TempDir(), extraEnv...)
+	return
+}
 
-	home := t.TempDir()
+// startTestDaemonWithHome is like startTestDaemon but lets the caller
+// supply the daemon's HOME so it can pre-populate paths the daemon will
+// scan (e.g. ~/.claude/projects/... for transcript tests).
+func startTestDaemonWithHome(t *testing.T, home string, extraEnv ...string) (sockPath, tmpDir, daemonHome string, cleanup func()) {
+	t.Helper()
+	daemonHome = home
 	tmpDir = t.TempDir()
 
 	// Use a short, unique socket path (Unix sockets limited to ~104 bytes)
@@ -84,7 +91,7 @@ func startTestDaemon(t *testing.T, extraEnv ...string) (sockPath, tmpDir string,
 			stderr.String(), readFileOrEmpty(daemonLogPath))
 	}
 
-	return sockPath, tmpDir, cleanup
+	return
 }
 
 // ---------- daemon start/stop/status ----------
@@ -678,6 +685,161 @@ func drainPTY(master *os.File, timeout time.Duration) string {
 	return buf.String()
 }
 
+// TestIntegration_Daemon_SessionTranscript exercises the
+// session_transcript control frame end-to-end:
+//
+//   - Plant a Claude-format JSONL at the path the daemon's transcript
+//     scanner would find (~/.claude/projects/<dir>/<sessionID>.jsonl
+//     under the daemon's HOME, with a matching `cwd` field).
+//   - Wait for startTranscriptStreamer to discover it and persist the
+//     conversation→relay mapping.
+//   - Send session_transcript over /ws/daemon, assert the reply carries
+//     the entries we wrote, in order.
+//
+// Per-agent transcript-format normalization (codex/copilot/cursor/pi
+// transformers) is exercised separately in stream_test.go.
+func TestIntegration_Daemon_SessionTranscript(t *testing.T) {
+	testServerURL.ClearHandlers()
+	cs, cleanup := startConnectSession(t)
+	defer cleanup()
+
+	// Plant a Claude transcript at ~/.claude/projects/<anything>/<convID>.jsonl
+	// in the daemon's HOME. The basename (minus ext) becomes the
+	// conversation ID once startTranscriptStreamer notices the file.
+	projDir := filepath.Join(cs.DaemonHome, ".claude", "projects", "test-proj")
+	if err := os.MkdirAll(projDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	convID := "abcd1234-5678-90ab-cdef-1234567890ab"
+	transcriptPath := filepath.Join(projDir, convID+".jsonl")
+	lines := []string{
+		`{"type":"summary","summary":"Test session","cwd":"` + cs.Workdir + `"}`,
+		`{"type":"user","message":{"role":"user","content":"hello"},"cwd":"` + cs.Workdir + `"}`,
+		`{"type":"assistant","message":{"role":"assistant","content":"hi"},"cwd":"` + cs.Workdir + `"}`,
+	}
+	if err := os.WriteFile(transcriptPath,
+		[]byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Directly seed the conversation_id → relay_id mapping the daemon's
+	// handler reads via lookupConversationID. The transcript streamer
+	// would normally populate this once it discovered the agent's real
+	// transcript, but mock_claude doesn't write one, so we write it
+	// ourselves to get the same effect.
+	seedRelayMapping(t, cs.DaemonHome, convID, cs.Sess.RelayID)
+
+	if err := cs.Sess.SendBinary(map[string]any{
+		"type":     "session_transcript",
+		"relay_id": cs.Sess.RelayID,
+	}); err != nil {
+		t.Fatalf("send session_transcript: %v", err)
+	}
+
+	matched := cs.Sess.WaitForFrame(func(raw json.RawMessage) bool {
+		var hdr struct {
+			Type string `json:"type"`
+		}
+		return json.Unmarshal(raw, &hdr) == nil && hdr.Type == "session_transcript_response"
+	}, 5*time.Second)
+	if matched == nil {
+		t.Fatal("did not receive session_transcript_response within 5s")
+	}
+
+	var reply struct {
+		Type    string            `json:"type"`
+		RelayID string            `json:"relay_id"`
+		Agent   string            `json:"agent"`
+		Message string            `json:"message"`
+		Entries []json.RawMessage `json:"entries"`
+	}
+	if err := json.Unmarshal(matched, &reply); err != nil {
+		t.Fatalf("parse session_transcript_response: %v", err)
+	}
+	if reply.Message != "" {
+		t.Fatalf("unexpected error message: %q", reply.Message)
+	}
+	if reply.Agent != "claude-code" {
+		t.Errorf("agent mismatch: got %q want claude-code", reply.Agent)
+	}
+	if len(reply.Entries) != 3 {
+		t.Errorf("entries count: got %d want 3 (raw=%s)", len(reply.Entries), string(matched))
+	}
+	if len(reply.Entries) >= 2 {
+		var entry struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(reply.Entries[1], &entry); err != nil || entry.Type != "user" {
+			t.Errorf("entry[1] parse: type=%q err=%v", entry.Type, err)
+		}
+	}
+
+	cs.Wait(10 * time.Second)
+}
+
+// seedRelayMapping writes a conversation_id → relay_id entry into the
+// daemon's sessions.json (the file that lookupConversationID reads).
+// Used by transcript tests to skip the live transcript-discovery path
+// and get straight to the handler under test.
+func seedRelayMapping(t *testing.T, daemonHome, convID, relayID string) {
+	t.Helper()
+	dir := filepath.Join(daemonHome, ".greenlight")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "sessions.json")
+	m := map[string]string{convID: relayID}
+	if existing, err := os.ReadFile(path); err == nil {
+		json.Unmarshal(existing, &m)
+		m[convID] = relayID
+	}
+	data, _ := json.Marshal(m)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestIntegration_Daemon_SessionTranscript_NoFile verifies the
+// graceful-error path when the daemon can't find a transcript for the
+// requested relay_id. Reply should carry a non-empty message and zero
+// entries (rather than crashing or omitting the response).
+func TestIntegration_Daemon_SessionTranscript_NoFile(t *testing.T) {
+	testServerURL.ClearHandlers()
+	cs, cleanup := startConnectSession(t)
+	defer cleanup()
+
+	// No transcript file planted — daemon's scan should return empty.
+	if err := cs.Sess.SendBinary(map[string]any{
+		"type":     "session_transcript",
+		"relay_id": cs.Sess.RelayID,
+	}); err != nil {
+		t.Fatalf("send session_transcript: %v", err)
+	}
+
+	matched := cs.Sess.WaitForFrame(func(raw json.RawMessage) bool {
+		var hdr struct {
+			Type string `json:"type"`
+		}
+		return json.Unmarshal(raw, &hdr) == nil && hdr.Type == "session_transcript_response"
+	}, 5*time.Second)
+	if matched == nil {
+		t.Fatal("expected session_transcript_response (with error) within 5s")
+	}
+
+	var reply struct {
+		Message string            `json:"message"`
+		Entries []json.RawMessage `json:"entries"`
+	}
+	if err := json.Unmarshal(matched, &reply); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if reply.Message == "" {
+		t.Error("expected error message, got empty")
+	}
+
+	cs.Wait(10 * time.Second)
+}
+
 // TestIntegration_Daemon_HistoryEntry_Roundtrip pushes a history_entry
 // control frame to record a permission outcome, then queries via
 // project_history and asserts the entry comes back.
@@ -933,14 +1095,16 @@ func awaitSkillsListed(t *testing.T, sess *mockserver.Session, timeout time.Dura
 
 // connectSession is the live state needed to drive a `greenlight connect`
 // session in a test: the running client process, the PTY master used to
-// inject input, the agent workdir, and the registered mock-server
-// session.
+// inject input, the agent workdir, the daemon's home dir (for tests
+// that need to pre-populate scanned paths like ~/.claude/projects), and
+// the registered mock-server session.
 type connectSession struct {
-	Client  *exec.Cmd
-	Master  *os.File
-	Workdir string
-	Sess    *mockserver.Session
-	done    chan error
+	Client     *exec.Cmd
+	Master     *os.File
+	Workdir    string
+	DaemonHome string
+	Sess       *mockserver.Session
+	done       chan error
 }
 
 // Wait sends "done\n" to mock_claude (which exits on stdin input) and
@@ -1008,7 +1172,7 @@ func startConnectSession(t *testing.T, opts ...connectOpts) (*connectSession, fu
 	if !opt.EnableInterpose {
 		daemonEnv = append(daemonEnv, "GREENLIGHT_DISABLE_INTERPOSE=1")
 	}
-	sockPath, tmpDir, daemonCleanup := startTestDaemon(t, daemonEnv...)
+	sockPath, tmpDir, daemonHome, daemonCleanup := startTestDaemonWithHome(t, t.TempDir(), daemonEnv...)
 
 	workDir := t.TempDir()
 	pathWithMock := filepath.Dir(mockClaudeBin) + ":" + os.Getenv("PATH")
@@ -1082,11 +1246,12 @@ func startConnectSession(t *testing.T, opts ...connectOpts) (*connectSession, fu
 	sess := waitForOneSession(t, testServerURL, 5*time.Second)
 
 	return &connectSession{
-		Client:  client,
-		Master:  master,
-		Workdir: workDir,
-		Sess:    sess,
-		done:    done,
+		Client:     client,
+		Master:     master,
+		Workdir:    workDir,
+		DaemonHome: daemonHome,
+		Sess:       sess,
+		done:       done,
 	}, cleanup
 }
 
