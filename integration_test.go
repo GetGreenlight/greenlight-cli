@@ -123,12 +123,13 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	// Build mock claude binary
+	// Build mock claude binary. Default CGO_ENABLED (typically 1) is
+	// required on Linux: the seccomp permission test relies on the
+	// interpose .so loading via LD_PRELOAD, which only works for
+	// dynamically-linked binaries.
 	mockClaudeBin = filepath.Join(tmpDir, "claude")
 	mockCmd := exec.Command("go", "build", "-o", mockClaudeBin, "./testdata/mock_claude.go")
-	mockCmd.Env = append(os.Environ(),
-		"CGO_ENABLED=0",
-	)
+	mockCmd.Env = os.Environ()
 	mockCmd.Dir = sourceDir()
 	if out, err := mockCmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to build mock claude:\n%s\n%v\n", out, err)

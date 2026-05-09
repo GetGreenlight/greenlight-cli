@@ -637,6 +637,117 @@ func runPermissionTest(t *testing.T, decision string) {
 	}
 }
 
+// TestIntegration_Daemon_Seccomp_Allow exercises the Linux seccomp
+// supervisor permission round-trip with an "allow" decision. mock_claude
+// (built with CGO so the interpose .so loads via LD_PRELOAD) opens a
+// file for writing under the user's real $HOME — outside the
+// supervisor's auto-allow zones (tmp, system, dotfile, agent-internal).
+// The kernel triggers SECCOMP_RET_USER_NOTIF; the supervisor reads the
+// path from /proc/<pid>/mem, classifies it as a Write tool call, and
+// long-polls the daemon WS. The mock server auto-allows; the supervisor
+// continues the syscall; mock_claude reports "ok".
+//
+// Linux-only: the seccomp USER_NOTIF mechanism requires kernel 5.9+.
+// macOS uses the dyld interpose path tested by Permission_Allow/Deny.
+func TestIntegration_Daemon_Seccomp_Allow(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("seccomp supervisor is Linux-only")
+	}
+	runSeccompTest(t, "allow")
+}
+
+// TestIntegration_Daemon_Seccomp_Deny is the deny counterpart. The mock
+// server denies; the supervisor returns ENOSYS for the openat; mock_claude
+// reports an error.
+func TestIntegration_Daemon_Seccomp_Deny(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("seccomp supervisor is Linux-only")
+	}
+	runSeccompTest(t, "deny")
+}
+
+// runSeccompTest is the shared body for the allow/deny variants.
+func runSeccompTest(t *testing.T, decision string) {
+	t.Helper()
+	testServerURL.ClearHandlers()
+
+	// The write target must live outside /tmp (which the seccomp
+	// supervisor auto-allows). Create a fresh dir under the real user
+	// HOME — the test's HOME override is itself under /tmp, which won't
+	// trip the filter.
+	realHome, err := os.UserHomeDir()
+	if err != nil || realHome == "" {
+		t.Skip("cannot determine real user HOME for seccomp write target")
+	}
+	writeDir, err := os.MkdirTemp(realHome, "greenlight-test-seccomp-*")
+	if err != nil {
+		t.Fatalf("mkdir under HOME: %v", err)
+	}
+	defer os.RemoveAll(writeDir)
+	writeFile := filepath.Join(writeDir, "out.txt")
+	// Result file lives under /tmp so it bypasses the seccomp filter —
+	// otherwise a "deny" decision would also block the result write,
+	// leaving us unable to observe the outcome.
+	resultFile := filepath.Join(t.TempDir(), "result.txt")
+
+	cs, cleanup := startConnectSession(t, connectOpts{
+		EnableInterpose:      true,
+		SkipMockClaudeOutput: true,
+		AgentEnv: []string{
+			"MOCK_CLAUDE_WRITE_FILE=" + writeFile,
+			"MOCK_CLAUDE_WRITE_RESULT=" + resultFile,
+		},
+	})
+	defer cleanup()
+
+	stop := startPermissionAutoResponder(t, cs.Sess, func(pr permissionRequest) string {
+		return decision
+	})
+
+	// Drain the PTY in the background so the buffer doesn't fill.
+	go drainPTY(cs.Master, 15*time.Second)
+
+	if err := cs.WaitDone(15 * time.Second); err != nil {
+		t.Fatalf("client did not exit: %v", err)
+	}
+	seen := stop()
+
+	// Look for a Write request targeting our file.
+	if !sawWriteOf(writeFile, seen) {
+		t.Errorf("expected a Write permission_request for %s, got %v",
+			writeFile, summarizeRequests(seen))
+	}
+
+	result := readFileOrEmpty(resultFile)
+	switch decision {
+	case "allow":
+		if !strings.HasPrefix(result, "ok") {
+			t.Errorf("expected write ok, got %q", result)
+		}
+		if _, err := os.Stat(writeFile); err != nil {
+			t.Errorf("expected target file written: %v", err)
+		}
+	case "deny":
+		if !strings.HasPrefix(result, "err") {
+			t.Errorf("expected write err (rejected by seccomp), got %q", result)
+		}
+	}
+}
+
+// sawWriteOf returns true if any observed permission request was a
+// Write/Edit on the given file path.
+func sawWriteOf(path string, reqs []permissionRequest) bool {
+	for _, r := range reqs {
+		if r.Data.Tool != "Write" && r.Data.Tool != "Edit" {
+			continue
+		}
+		if fp, _ := r.Data.Input["file_path"].(string); fp == path {
+			return true
+		}
+	}
+	return false
+}
+
 // sawSpawnOf returns true if any observed permission request was a Bash
 // invocation whose command contains the given binary name.
 func sawSpawnOf(name string, reqs []permissionRequest) bool {

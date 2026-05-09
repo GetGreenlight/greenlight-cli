@@ -20,7 +20,18 @@
 // (for non-safe-list binaries) consults the daemon over the permission
 // socket. The exit status is written to MOCK_CLAUDE_EXEC_RESULT (if set)
 // as "ok" / "err: <message>".
+//
+// MOCK_CLAUDE_WRITE_FILE — Open this path for writing. On Linux this
+// triggers the seccomp supervisor for paths outside the auto-allow
+// zones (tmp, system, dotfile, agent-internal). The result is written
+// to MOCK_CLAUDE_WRITE_RESULT (if set) as "ok" / "err: <message>".
+// Imports "C" with no actual C code, purely to force dynamic linking.
+// The seccomp permission test on Linux relies on libgreenlight.so being
+// loaded via LD_PRELOAD, which only works for dynamic ELFs.
+
 package main
+
+import "C"
 
 import (
 	"bufio"
@@ -37,6 +48,26 @@ func main() {
 	// Read a file to trigger interpose permission request via DYLD_INSERT_LIBRARIES
 	if path := os.Getenv("MOCK_CLAUDE_READ_FILE"); path != "" {
 		os.ReadFile(path)
+	}
+
+	// Open a file for writing — interpose (Linux: seccomp supervisor)
+	// intercepts on the openat syscall.
+	if path := os.Getenv("MOCK_CLAUDE_WRITE_FILE"); path != "" {
+		var writeErr error
+		f, err := os.Create(path)
+		if err != nil {
+			writeErr = err
+		} else {
+			_, writeErr = f.Write([]byte("mock_claude write\n"))
+			f.Close()
+		}
+		if rp := os.Getenv("MOCK_CLAUDE_WRITE_RESULT"); rp != "" {
+			result := "ok"
+			if writeErr != nil {
+				result = "err: " + writeErr.Error()
+			}
+			os.WriteFile(rp, []byte(result), 0644)
+		}
 	}
 
 	// Spawn a child process — interpose intercepts at exec.
