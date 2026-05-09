@@ -274,6 +274,206 @@ func TestIntegration_Agent_Unknown(t *testing.T) {
 	}
 }
 
+// ---------- run ----------
+
+func TestIntegration_Run_NoArgs(t *testing.T) {
+	r := run(t, []string{"run"}, []string{"HOME=" + t.TempDir()}, "")
+	if r.ExitCode == 0 {
+		t.Error("expected non-zero exit when no command")
+	}
+	if !strings.Contains(r.Stderr, "Usage:") {
+		t.Errorf("expected usage text, got stderr=%q", r.Stderr)
+	}
+}
+
+func TestIntegration_Run_UnknownFlag(t *testing.T) {
+	r := run(t, []string{"run", "--bogus", "echo"}, []string{"HOME=" + t.TempDir()}, "")
+	if r.ExitCode == 0 {
+		t.Error("expected non-zero exit for unknown flag")
+	}
+	if !strings.Contains(r.Stderr, "unknown flag") {
+		t.Errorf("expected 'unknown flag', got stderr=%q", r.Stderr)
+	}
+}
+
+func TestIntegration_Run_MissingEArg(t *testing.T) {
+	r := run(t, []string{"run", "-e"}, []string{"HOME=" + t.TempDir()}, "")
+	if r.ExitCode == 0 {
+		t.Error("expected non-zero exit when -e has no value")
+	}
+	if !strings.Contains(r.Stderr, "-e requires an argument") {
+		t.Errorf("expected '-e requires an argument', got stderr=%q", r.Stderr)
+	}
+}
+
+func TestIntegration_Run_MissingCommand(t *testing.T) {
+	r := run(t, []string{"run", "--"}, []string{"HOME=" + t.TempDir()}, "")
+	if r.ExitCode == 0 {
+		t.Error("expected non-zero exit when no command after --")
+	}
+	if !strings.Contains(r.Stderr, "missing command") {
+		t.Errorf("expected 'missing command', got stderr=%q", r.Stderr)
+	}
+}
+
+func TestIntegration_Run_RefusesPATHInjection(t *testing.T) {
+	r := run(t, []string{"run", "-e", "PATH=SOMEKEY", "--", "echo"}, []string{
+		"HOME=" + t.TempDir(),
+		"GREENLIGHT_DAEMON_SOCK=/tmp/gl-test-no-daemon.sock",
+	}, "")
+	if r.ExitCode == 0 {
+		t.Error("expected non-zero exit when injecting PATH")
+	}
+	if !strings.Contains(r.Stderr, "PATH") {
+		t.Errorf("expected refusal mentioning PATH, got stderr=%q", r.Stderr)
+	}
+}
+
+// ---------- update ----------
+
+func TestIntegration_Update_UnexpectedArg(t *testing.T) {
+	r := run(t, []string{"update", "extra"}, []string{"HOME=" + t.TempDir()}, "")
+	if r.ExitCode == 0 {
+		t.Error("expected non-zero exit for unexpected positional arg")
+	}
+	if !strings.Contains(r.Stderr, "unexpected argument") {
+		t.Errorf("expected 'unexpected argument', got stderr=%q", r.Stderr)
+	}
+}
+
+// ---------- daemon IPC: device_info ----------
+
+func TestIntegration_Daemon_DeviceInfo(t *testing.T) {
+	sockPath, _, cleanup := startTestDaemon(t,
+		"GREENLIGHT_DEVICE_ID=device-info-probe",
+	)
+	defer cleanup()
+
+	resp := daemonIPC(t, sockPath, ipcRequest{Type: "device_info"})
+	if resp.Type != "device_info_response" {
+		t.Errorf("expected device_info_response, got %q (msg=%s)", resp.Type, resp.Message)
+	}
+	if resp.DeviceID != "device-info-probe" {
+		t.Errorf("expected device id 'device-info-probe', got %q", resp.DeviceID)
+	}
+}
+
+// ---------- daemon IPC: ws_request error paths ----------
+
+func TestIntegration_Daemon_WSRequest_MissingFields(t *testing.T) {
+	testServerURL.ClearHandlers()
+	hostID := enrollTestHost(t, "ws-request-probe")
+	sockPath, _, cleanup := startTestDaemon(t,
+		"GREENLIGHT_DEVICE_ID=ws-request-probe",
+		"GREENLIGHT_DAEMON_SESSION_ID="+hostID,
+	)
+	defer cleanup()
+
+	// ws_type and ws_request_id are both required. With a connected WS
+	// and neither field set, the validation error fires.
+	resp := daemonIPC(t, sockPath, ipcRequest{Type: "ws_request"})
+	if resp.Type != "error" {
+		t.Errorf("expected error response, got %q", resp.Type)
+	}
+	if !strings.Contains(resp.Message, "ws_type") {
+		t.Errorf("expected error mentioning ws_type, got %q", resp.Message)
+	}
+}
+
+func TestIntegration_Daemon_WSRequest_NoWebSocket(t *testing.T) {
+	// With no enrolled session, the daemon's WS is disabled — ws_request
+	// should surface the connectivity error rather than try to send.
+	sockPath, _, cleanup := startTestDaemon(t)
+	defer cleanup()
+
+	resp := daemonIPC(t, sockPath, ipcRequest{
+		Type:    "ws_request",
+		WSType:  "probe",
+		WSReqID: "rid",
+	})
+	if resp.Type != "error" {
+		t.Errorf("expected error, got %q", resp.Type)
+	}
+	if !strings.Contains(resp.Message, "WebSocket") {
+		t.Errorf("expected WebSocket error, got %q", resp.Message)
+	}
+}
+
+// ---------- daemon IPC: ws_request happy path ----------
+
+func TestIntegration_Daemon_WSRequest_RoundTrip(t *testing.T) {
+	testServerURL.ClearHandlers()
+
+	// Server-side responder: the daemon's SendRequest wraps the payload
+	// in {"type":<wsType>,"relay_id":"","data":<payload>} where the
+	// caller's request_id lives inside `data`. Pull it out and echo a
+	// response keyed by that request_id at the top level so the
+	// daemon's routePermissionResponse can dispatch it.
+	respondedFor := make(chan string, 1)
+	testServerURL.SetFrameHook(func(s *mockserver.Session, frame json.RawMessage) {
+		var msg struct {
+			Type string `json:"type"`
+			Data struct {
+				RequestID string `json:"request_id"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(frame, &msg) != nil || msg.Type != "probe" {
+			return
+		}
+		if msg.Data.RequestID == "" {
+			return
+		}
+		s.Send(map[string]any{
+			"type":       "probe_response",
+			"request_id": msg.Data.RequestID,
+			"echo":       "hello-back",
+		})
+		select {
+		case respondedFor <- msg.Data.RequestID:
+		default:
+		}
+	})
+
+	hostID := enrollTestHost(t, "ws-rt-dev")
+	sockPath, _, cleanup := startTestDaemon(t,
+		"GREENLIGHT_DEVICE_ID=ws-rt-dev",
+		"GREENLIGHT_DAEMON_SESSION_ID="+hostID,
+	)
+	defer cleanup()
+
+	reqID := "test-req-" + fmt.Sprint(time.Now().UnixNano())
+	body, _ := json.Marshal(map[string]any{"request_id": reqID, "any": "payload"})
+	resp := daemonIPC(t, sockPath, ipcRequest{
+		Type:      "ws_request",
+		WSType:    "probe",
+		WSReqID:   reqID,
+		WSData:    body,
+		TimeoutMS: 5000,
+	})
+	if resp.Type != "ws_response" {
+		t.Fatalf("expected ws_response, got %q (msg=%s)", resp.Type, resp.Message)
+	}
+	var payload struct {
+		Type string `json:"type"`
+		Echo string `json:"echo"`
+	}
+	if err := json.Unmarshal(resp.WSResponse, &payload); err != nil {
+		t.Fatalf("parse ws response: %v (raw=%s)", err, string(resp.WSResponse))
+	}
+	if payload.Type != "probe_response" || payload.Echo != "hello-back" {
+		t.Errorf("unexpected payload: %+v", payload)
+	}
+
+	select {
+	case got := <-respondedFor:
+		if got != reqID {
+			t.Errorf("server saw request_id %q, want %q", got, reqID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("server-side hook never fired — daemon didn't relay the message")
+	}
+}
+
 // ---------- secrets ----------
 
 func TestIntegration_Secrets_NoArgs(t *testing.T) {
