@@ -231,6 +231,9 @@ func cleanupAgentFiles(agent, cwd string) {
 	case "codex":
 		removeGreenlightInstructions(filepath.Join(cwd, "AGENTS.md"))
 	}
+	// Skills are installed under each agent's own root, namespaced under
+	// _greenlight/. Idempotent — safe to call even if nothing was installed.
+	removeSkills(agent, cwd)
 }
 
 // hasOtherSessions checks if any other greenlight connect processes are alive

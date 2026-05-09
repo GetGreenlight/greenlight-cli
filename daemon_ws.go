@@ -41,7 +41,8 @@ type sessionWS struct {
 	daemon     *DaemonWS
 	relayID    string
 	project    string
-	agent      string
+	agent      string // server-side agent name (e.g. "claude-code")
+	localAgent string // local agent name (e.g. "claude") — used for skill discovery paths
 	cwd        string
 	version    string
 	injectFunc func([]byte) error
@@ -160,7 +161,7 @@ func (d *DaemonWS) SendRequest(msgType, requestID string, data interface{}, time
 // StartSession sends a session_start message over the daemon WS and waits
 // for the server to acknowledge it. This replaces HTTP enrollment for
 // sessions within an already-enrolled daemon.
-func (d *DaemonWS) StartSession(relayID, project, agent, cwd, version string) error {
+func (d *DaemonWS) StartSession(relayID, project, agent, cwd, version string) ([]Skill, error) {
 	// Store metadata on the session handle so we can re-register on reconnect
 	d.mu.RLock()
 	sw := d.sessions[relayID]
@@ -175,8 +176,9 @@ func (d *DaemonWS) StartSession(relayID, project, agent, cwd, version string) er
 	return d.sendSessionStart(relayID, project, agent, cwd, version)
 }
 
-// sendSessionStart sends a session_start message and waits for ack.
-func (d *DaemonWS) sendSessionStart(relayID, project, agent, cwd, version string) error {
+// sendSessionStart sends a session_start message and waits for ack. Returns
+// the skill bundle the server delivered for this session (may be empty).
+func (d *DaemonWS) sendSessionStart(relayID, project, agent, cwd, version string) ([]Skill, error) {
 	hostname, _ := os.Hostname()
 	data := map[string]string{
 		"project": project,
@@ -194,7 +196,7 @@ func (d *DaemonWS) sendSessionStart(relayID, project, agent, cwd, version string
 	}
 	msgBytes, err := json.Marshal(msg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Register a pending response keyed by relay_id so we can wait for the ack
@@ -206,16 +208,17 @@ func (d *DaemonWS) sendSessionStart(relayID, project, agent, cwd, version string
 	select {
 	case resp := <-ch:
 		var ack struct {
-			Type    string `json:"type"`
-			Project string `json:"project"`
-			Error   string `json:"error,omitempty"`
+			Type    string  `json:"type"`
+			Project string  `json:"project"`
+			Error   string  `json:"error,omitempty"`
+			Skills  []Skill `json:"skills,omitempty"`
 		}
-		if json.Unmarshal(resp, &ack) == nil && ack.Error != "" {
-			return fmt.Errorf("session_start failed: %s", ack.Error)
+		if err := json.Unmarshal(resp, &ack); err == nil && ack.Error != "" {
+			return nil, fmt.Errorf("session_start failed: %s", ack.Error)
 		}
-		return nil
+		return ack.Skills, nil
 	case <-time.After(10 * time.Second):
-		return fmt.Errorf("session_start timed out")
+		return nil, fmt.Errorf("session_start timed out")
 	}
 }
 
@@ -234,7 +237,9 @@ func (d *DaemonWS) reregisterSessions() {
 
 	log.Printf("daemon-ws: reconnected, re-registering %d session(s)", len(sessions))
 	for _, sw := range sessions {
-		if err := d.sendSessionStart(sw.relayID, sw.project, sw.agent, sw.cwd, sw.version); err != nil {
+		// Reconnect re-registers existing sessions; skills are installed once
+		// at original session start, so the returned list is discarded here.
+		if _, err := d.sendSessionStart(sw.relayID, sw.project, sw.agent, sw.cwd, sw.version); err != nil {
 			log.Printf("daemon-ws: failed to re-register session %s: %v", sw.relayID, err)
 		} else {
 			log.Printf("daemon-ws: re-registered session %s", sw.relayID)
@@ -285,6 +290,8 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 		d.handleHistoryEntry(data)
 	case "project_history":
 		d.handleProjectHistory(data)
+	case "list_skills":
+		d.handleListSkills(data)
 	default:
 		log.Printf("daemon-ws: unknown control message: %s", msg.Type)
 	}
@@ -341,7 +348,7 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 		var ctrl struct{ Type string `json:"type"` }
 		if json.Unmarshal(decoded, &ctrl) == nil {
 			switch ctrl.Type {
-			case "kill", "wake", "session_history", "session_transcript", "delete_session":
+			case "kill", "wake", "session_history", "session_transcript", "delete_session", "list_skills":
 				var full map[string]interface{}
 				if json.Unmarshal(decoded, &full) == nil {
 					if _, ok := full["relay_id"]; !ok {
@@ -425,6 +432,42 @@ func (d *DaemonWS) handleHistoryEntry(data []byte) {
 		return
 	}
 	appendHistoryEntry(msg.Project, msg.Entry)
+}
+
+// handleListSkills replies with the names of skills currently installed under
+// the session's _greenlight namespace dir. The list is derived by scanning the
+// filesystem (not by remembering what was installed), so it reflects the
+// current state — including any skills the user manually removed.
+func (d *DaemonWS) handleListSkills(data []byte) {
+	var msg struct {
+		RelayID string `json:"relay_id"`
+	}
+	if json.Unmarshal(data, &msg) != nil || msg.RelayID == "" {
+		log.Printf("daemon-ws: list_skills missing relay_id")
+		return
+	}
+	d.mu.RLock()
+	sw := d.sessions[msg.RelayID]
+	d.mu.RUnlock()
+	if sw == nil {
+		log.Printf("daemon-ws: list_skills for unknown session %s", msg.RelayID)
+		return
+	}
+	names := listSkills(sw.localAgent, sw.cwd)
+	if names == nil {
+		names = []string{} // emit [] not null on the wire
+	}
+	resp := map[string]interface{}{
+		"type":     "skills_listed",
+		"relay_id": msg.RelayID,
+		"skills":   names,
+	}
+	out, err := json.Marshal(resp)
+	if err != nil {
+		log.Printf("daemon-ws: marshal skills_listed: %v", err)
+		return
+	}
+	d.ws.SendText(out)
 }
 
 // handleProjectHistory returns stored history entries for a project.

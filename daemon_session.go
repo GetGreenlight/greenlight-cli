@@ -91,11 +91,13 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	if d.daemonWS == nil {
 		return nil, fmt.Errorf("daemon WebSocket not connected")
 	}
-	if err := d.daemonWS.StartSession(relayID, proj, agentServerName(agent), cwd, version); err != nil {
+	skills, err := d.daemonWS.StartSession(relayID, proj, agentServerName(agent), cwd, version)
+	if err != nil {
 		return nil, fmt.Errorf("session start failed: %w", err)
 	}
 
 	installAgentFiles(agent, relayID, cwd)
+	installSkills(agent, cwd, skills)
 
 	s := &Session{
 		relayID:   relayID,
@@ -146,6 +148,7 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		sw := d.daemonWS.RegisterSession(relayID, r.Inject, killFunc)
 		sw.project = proj
 		sw.agent = agentServerName(agent)
+		sw.localAgent = agent
 		sw.cwd = cwd
 		sw.version = version
 		r.wsConn = sw

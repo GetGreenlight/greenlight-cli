@@ -75,6 +75,29 @@ func agentServerName(agent string) string {
 	}
 }
 
+// skillsRoot returns the path under cwd where the given agent discovers skills,
+// per each agent's documented search paths. All six supported agents conform to
+// the open SKILL.md standard (agentskills.io); only the discovery root differs.
+// Returns "" if skills aren't supported for the agent.
+func skillsRoot(agent string) string {
+	switch agent {
+	case "claude":
+		return filepath.Join(".claude", "skills")
+	case "codex":
+		return filepath.Join(".agents", "skills")
+	case "gemini":
+		return filepath.Join(".gemini", "skills")
+	case "cursor":
+		return filepath.Join(".cursor", "skills")
+	case "copilot":
+		return filepath.Join(".github", "skills")
+	case "pi":
+		return filepath.Join(".pi", "skills")
+	default:
+		return ""
+	}
+}
+
 // agentSupportsResume returns whether the agent supports --resume with a session ID.
 func agentSupportsResume(agent string) bool {
 	switch agent {
