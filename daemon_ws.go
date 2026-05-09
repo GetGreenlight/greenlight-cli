@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -371,6 +372,11 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 	text := bytes.TrimRight(input, "\r")
 	needsSubmit := len(text) < len(input) || len(text) > 0
 
+	log.Printf("daemon-ws: inject %d bytes to %s%s: %q",
+		len(text), msg.RelayID,
+		map[bool]string{true: " +<CR>", false: ""}[needsSubmit],
+		previewBytes(text, 60))
+
 	if len(text) > 0 {
 		if err := sw.injectFunc(text); err != nil {
 			log.Printf("daemon-ws: inject error for %s: %v", msg.RelayID, err)
@@ -385,6 +391,16 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 	}
 
 	return true
+}
+
+// previewBytes returns a short, log-friendly preview of `b` for
+// diagnostic logging — capped at `max` runes and with control bytes
+// rendered as Go escapes (\r, \n, \t, \xNN).
+func previewBytes(b []byte, max int) string {
+	if len(b) > max {
+		b = b[:max]
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(fmt.Sprintf("%q", string(b)), `"`), `"`)
 }
 
 // handleSessionHistory loads persisted session records and sends them back to the server.
