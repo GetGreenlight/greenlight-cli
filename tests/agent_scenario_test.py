@@ -33,14 +33,15 @@ a launching pad — adjust the prompts per-agent as vendors change UX.
 Known issues at time of writing:
   - cursor needs interactive `agent --login` once before the harness
     can run it; no folder trust gate.
-  - claude refuses to authenticate when launched from inside another
-    claude session (auth_failed in 13ms with a synthetic "Not logged
-    in" reply). Confirmed by running the same harness from a fresh
-    terminal (works) vs from inside a claude session (fails).
-    Stripping env doesn't help — claude inherits macOS audit-session
-    attributes from the outer claude via process ancestry, not env.
-    The harness auto-skips claude when CLAUDECODE=1 is set; run from
-    a fresh terminal to test claude.
+  - claude on macOS refuses to authenticate when launched from inside
+    another claude session (auth_failed in 13ms, synthetic "Not logged
+    in" reply). Confirmed: same harness from a fresh terminal works;
+    from inside a claude session over SSH to a Linux box also works.
+    Inheritance is via macOS audit-session attributes carried through
+    process ancestry, not env. The harness auto-skips claude on macOS
+    when CLAUDECODE=1; on Linux it always runs. Two ways to test
+    claude under any context: (a) fresh Terminal on macOS, (b) a
+    Linux machine.
 
 Not a CI test. Real backends, real auth, real cost. Run on demand.
 
@@ -487,14 +488,17 @@ def run_scenario(spec: AgentSpec, gl_bin: Path, ms: MockServer, tmp: Path,
         return True, f"skipped on {platform.system()}"
     if not find_agent(spec):
         return True, "not installed"
-    # claude refuses to authenticate when launched from inside another
-    # claude session — it inherits macOS audit-session attributes from
+    # claude on macOS refuses to authenticate when launched from inside
+    # another claude session — it inherits audit-session attributes from
     # the outer claude that fail its self-auth check, returning a
-    # synthetic "Not logged in" message. Detect via CLAUDECODE which the
-    # outer claude exports. Stripping env doesn't help (process-ancestry
-    # check, not env). Run the scenario from a fresh terminal instead.
-    if spec.name == "claude" and os.environ.get("CLAUDECODE") == "1":
-        return True, "skipped: cannot run inside another claude session — open a fresh terminal"
+    # synthetic "Not logged in" message. Confirmed Linux is unaffected
+    # (audit sessions are macOS-only), so we only skip on darwin. Run
+    # this script from a fresh Terminal window on macOS, or use any
+    # Linux box, to test claude under either scenario.
+    if (spec.name == "claude" and platform.system() == "Darwin"
+            and os.environ.get("CLAUDECODE") == "1"):
+        return True, ("skipped: cannot run inside another claude session on "
+                      "macOS — open a fresh terminal, or run on Linux")
 
     # Per-test workspace; HOME stays the user's real one (see
     # setup_test_home for why). The workdir lives under
