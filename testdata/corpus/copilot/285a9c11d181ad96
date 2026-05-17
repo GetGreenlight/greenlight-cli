@@ -1,0 +1,1 @@
+{"type":"tool.execution_start","data":{"toolCallId":"call_DNiLGT4xgQsDSXxophXuDv5c","toolName":"web_fetch","arguments":{"url":"https://example.com","raw":true,"max_length":20000}},"id":"8391d5e6-b69e-490e-90bb-baa03c043382","timestamp":"2026-03-20T11:39:09.986Z","parentId":"05e1996d-a0e4-46de-bb44-88a1af963958"}

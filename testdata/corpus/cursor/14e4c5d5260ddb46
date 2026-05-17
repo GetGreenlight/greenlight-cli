@@ -1,0 +1,1 @@
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"curl -L https://example.com","description":"Fetch example.com HTML"}}]}}

@@ -1,0 +1,1 @@
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"cd /home/user/greenlight-cli && rm permission-hook-test.txt","description":"Remove the temporary permission hook test file"}}]}}

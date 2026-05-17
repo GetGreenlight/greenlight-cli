@@ -1,0 +1,1 @@
+{"timestamp":"2026-05-05T11:35:49.679Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"greenlight run -- rg --files .\",\"workdir\":\"/home/user/greenlight-cli\",\"login\":true,\"tty\":false,\"yield_time_ms\":1000,\"max_output_tokens\":4000}","call_id":"call_4AirTnIFFJhGZU9jMbESpAPV"}}

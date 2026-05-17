@@ -1,0 +1,1 @@
+{"type":"tool.execution_start","data":{"toolCallId":"call_fRTCmp7IQrsVy9c5nHdyyIK1","toolName":"bash","arguments":{"command":"echo greenlight_builtin_test","description":"Run requested echo command","mode":"sync","initial_wait":30}},"id":"46a4e828-d8b1-4410-878c-e83c6308f761","timestamp":"2026-03-20T13:18:06.963Z","parentId":"60e4746b-d3a9-4de5-b563-0ea2f612a6cf"}

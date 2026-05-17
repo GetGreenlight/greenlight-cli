@@ -1,0 +1,1 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nRun this exact shell command: echo greenlight_builtin_test > ./gl-test-z2zw0bnl.txt\n</user_query>"}]}}

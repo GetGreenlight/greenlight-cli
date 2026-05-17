@@ -1,0 +1,1 @@
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"ApplyPatch","input":"*** Begin Patch\n*** Add File: /home/user/greenlight-test-workdir/gl-test-3hjdob40.txt\n+hello\n*** End Patch"}]}}

@@ -1,0 +1,1 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nhi help me test my permission hook by creating a txt file in this dir, and then deleting it\n</user_query>"}]}}

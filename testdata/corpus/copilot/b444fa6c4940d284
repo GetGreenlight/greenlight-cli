@@ -1,0 +1,1 @@
+{"type":"tool.execution_start","data":{"toolCallId":"tooluse_jj3xR0Q0TIXBD1zCIAHb0p","toolName":"bash","arguments":{"command":"touch /home/user/greenlight-cli/test-permission.txt","description":"Create a test txt file"}},"id":"e72e7d80-c0e3-4366-855b-225f3509e0f0","timestamp":"2026-03-29T15:57:20.964Z","parentId":"f74f05a1-ce7e-42ab-94cd-c2c431ed207f"}

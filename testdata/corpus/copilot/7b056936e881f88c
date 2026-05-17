@@ -1,0 +1,1 @@
+{"type":"session.warning","data":{"warningType":"mcp","message":"Failed to connect to MCP server 'github-mcp-server'. Execute '/mcp show github-mcp-server' to inspect or check the logs."},"id":"b4e74dc3-5b12-4f6d-9b00-9c483d7f1d45","timestamp":"2026-04-15T11:33:35.046Z","parentId":"bbf631b1-f50e-4e91-aae5-a26abeb00482"}

@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -230,6 +231,20 @@ func isSafeGreenlightSubcommand(fields []string, cmdName string) bool {
 	return false
 }
 
+// captureCorpus writes a raw interpose request line to the directory named by
+// GREENLIGHT_CORPUS_DIR, when that env var is set. It exists solely to gather
+// real agent input for the fuzz corpus (see tests/gather_fuzz_corpus.py) and
+// is a no-op in normal operation. The filename is a content hash so identical
+// requests dedup across runs. Best-effort: any error is silently dropped.
+func captureCorpus(line []byte) {
+	dir := os.Getenv("GREENLIGHT_CORPUS_DIR")
+	if dir == "" {
+		return
+	}
+	sum := sha256.Sum256(line)
+	_ = os.WriteFile(filepath.Join(dir, fmt.Sprintf("%x.json", sum[:8])), line, 0644)
+}
+
 func handleInterposeConn(conn net.Conn, agent string, ir *interposeRelay) {
 	defer conn.Close()
 
@@ -253,6 +268,8 @@ func handleInterposeConn(conn net.Conn, agent string, ir *interposeRelay) {
 		go runSeccompSupervisor(seccompFd, agent, ir)
 		return
 	}
+
+	captureCorpus(line)
 
 	log.Printf("Interpose: %s %s", req.Type, interposeRequestSummary(req))
 
@@ -700,8 +717,15 @@ func computeRenameEdit(targetPath, sourcePath string) (string, string) {
 	if err != nil {
 		return "", ""
 	}
-	oldContent := string(oldBytes)
-	newContent := string(newBytes)
+	return diffToEdit(string(oldBytes), string(newBytes))
+}
+
+// diffToEdit is the pure core of computeRenameEdit: it reduces two file
+// contents to their minimal differing line range and returns it as
+// old_string/new_string in Claude's Edit format. Returns ("","") if the
+// contents are identical. Long ranges are truncated to 2048 bytes. Split out
+// from the file I/O so it can be fuzzed directly.
+func diffToEdit(oldContent, newContent string) (string, string) {
 	if oldContent == newContent {
 		return "", ""
 	}

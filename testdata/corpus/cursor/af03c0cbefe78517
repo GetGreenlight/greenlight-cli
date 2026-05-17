@@ -1,0 +1,1 @@
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"cd /home/user/greenlight-test-workdir && echo greenlight_builtin_test > ./gl-test-z2zw0bnl.txt","description":"run requested echo command in repo directory"}}]}}

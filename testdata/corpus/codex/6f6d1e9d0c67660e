@@ -1,0 +1,1 @@
+{"timestamp":"2026-04-13T11:39:25.021Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cd /home/user/greenlight-test-workdir && rm testfile.txt\"}","call_id":"call_IrX0caR71YvSA43mPt3SgmcA"}}

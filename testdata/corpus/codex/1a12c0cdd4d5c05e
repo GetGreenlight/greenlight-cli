@@ -1,0 +1,1 @@
+{"timestamp":"2026-03-17T14:20:03.433Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"- Created `permission-hook-test.txt` with a short note so you can exercise the permission hook from this directory. File contents start at `permission-hook-test.txt#L1`.\n- Tests not run (not requested)."}]}}

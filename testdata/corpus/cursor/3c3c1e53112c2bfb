@@ -1,0 +1,1 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nCan you read tools-test.md and run through the tool calls listed in the doc to help me test my permission hook? \n</user_query>"}]}}

@@ -1,0 +1,1 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nCreate the file ./gl-test-3hjdob40.txt containing the single word hello.\n</user_query>"}]}}

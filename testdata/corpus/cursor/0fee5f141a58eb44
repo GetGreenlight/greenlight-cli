@@ -1,0 +1,1 @@
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"uname -a","description":"Show system information"}}]}}

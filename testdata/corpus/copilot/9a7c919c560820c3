@@ -1,0 +1,1 @@
+{"type":"tool.execution_start","data":{"toolCallId":"call_b6xk0w2ig5ZMwuIQU16kzNT1","toolName":"bash","arguments":{"command":"uname -a","description":"Run uname -a","initial_wait":30}},"id":"f32291f6-bfbd-462f-9354-7b131b62705c","timestamp":"2026-03-20T12:49:02.566Z","parentId":"fe32f67f-e6e7-48ba-bf68-ce233b8f9781"}

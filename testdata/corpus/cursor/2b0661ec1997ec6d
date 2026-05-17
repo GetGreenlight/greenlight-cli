@@ -1,0 +1,1 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nFetch the URL https://example.com and show me the HTML.\n</user_query>"}]}}

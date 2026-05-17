@@ -1,0 +1,1 @@
+{"timestamp":"2026-03-19T11:25:38.838Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call_TL5gac8dI04SkepWngKjWb3Q","name":"apply_patch","input":"*** Begin Patch\n*** Add File: gl-test-cvi9sg90.txt\n+hello\n*** End Patch"}}

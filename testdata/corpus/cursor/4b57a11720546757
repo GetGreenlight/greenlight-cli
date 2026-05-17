@@ -1,0 +1,1 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nRun this exact shell command: uname -a\n</user_query>"}]}}

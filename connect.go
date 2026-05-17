@@ -474,6 +474,41 @@ func ensureDyldEntitlement(command string) error {
 	return nil
 }
 
+// parseShebang is the pure core of the script-resolution logic. Given the
+// leading bytes of a file, it returns the interpreter and its args if the
+// file is a "#!" script. A "#!/usr/bin/env [-flags] interp [args]" line is
+// unwrapped to the real interpreter. ok=false means the bytes are not a
+// shebang, name no interpreter, or carry an empty line — callers should treat
+// the file as a native binary. Split out from the file I/O so it can be fuzzed.
+func parseShebang(header []byte) (interp string, interpArgs []string, ok bool) {
+	if len(header) < 2 || header[0] != '#' || header[1] != '!' {
+		return "", nil, false
+	}
+	line := string(header[2:])
+	if idx := strings.IndexByte(line, '\n'); idx >= 0 {
+		line = line[:idx]
+	}
+	line = strings.TrimSpace(line)
+
+	parts := strings.Fields(line)
+	if len(parts) == 0 {
+		return "", nil, false
+	}
+	interp = parts[0]
+	interpArgs = parts[1:]
+	if filepath.Base(interp) == "env" {
+		// Skip "env" and its flags (like -S); the first non-flag is the
+		// real interpreter, and anything after it is interpreter args.
+		for i, p := range parts[1:] {
+			if !strings.HasPrefix(p, "-") {
+				return p, parts[i+2:], true
+			}
+		}
+		return "", nil, false // env with no interpreter
+	}
+	return interp, interpArgs, true
+}
+
 // resolveScriptCommand checks if command is a script. If so, it rewrites the
 // command and args to invoke the interpreter directly (e.g. "node /path/to/gemini ...").
 // This avoids /usr/bin/env (which lacks the dyld entitlement) stripping
@@ -490,38 +525,11 @@ func resolveScriptCommand(command string, args []string) (string, []string) {
 	}
 	defer f.Close()
 
-	header := make([]byte, 2)
-	if _, err := f.Read(header); err != nil || string(header) != "#!" {
-		return command, args // not a script
-	}
-
-	buf := make([]byte, 256)
-	n, _ := f.Read(buf)
-	line := string(buf[:n])
-	if idx := strings.IndexByte(line, '\n'); idx >= 0 {
-		line = line[:idx]
-	}
-	line = strings.TrimSpace(line)
-
-	// Parse shebang: extract interpreter and its flags
-	parts := strings.Fields(line)
-	if len(parts) == 0 {
-		return command, args
-	}
-
-	var interpArgs []string
-	interp := parts[0]
-	if filepath.Base(interp) == "env" {
-		// Skip "env" and its flags (like -S), find the actual interpreter
-		for i, p := range parts[1:] {
-			if !strings.HasPrefix(p, "-") {
-				interp = p
-				interpArgs = parts[i+2:] // remaining flags after interpreter name
-				break
-			}
-		}
-	} else {
-		interpArgs = parts[1:]
+	header := make([]byte, 258) // "#!" + up to 256 bytes of shebang line
+	n, _ := f.Read(header)
+	interp, interpArgs, ok := parseShebang(header[:n])
+	if !ok {
+		return command, args // not a resolvable script
 	}
 
 	// Resolve interpreter to absolute path
@@ -550,35 +558,11 @@ func resolveInterpreter(binPath string) (string, error) {
 	}
 	defer f.Close()
 
-	// Read the first two bytes to check for shebang
-	header := make([]byte, 2)
-	if _, err := f.Read(header); err != nil || string(header) != "#!" {
-		return binPath, nil // not a script
-	}
-
-	// Read the shebang line
-	buf := make([]byte, 256)
-	n, _ := f.Read(buf)
-	line := string(buf[:n])
-	if idx := strings.IndexByte(line, '\n'); idx >= 0 {
-		line = line[:idx]
-	}
-	line = strings.TrimSpace(line)
-
-	// Handle "/usr/bin/env [-S] interpreter [args...]"
-	parts := strings.Fields(line)
-	if len(parts) == 0 {
-		return binPath, nil
-	}
-	interp := parts[0]
-	if filepath.Base(interp) == "env" && len(parts) > 1 {
-		// Skip env flags like -S
-		for _, p := range parts[1:] {
-			if !strings.HasPrefix(p, "-") {
-				interp = p
-				break
-			}
-		}
+	header := make([]byte, 258) // "#!" + up to 256 bytes of shebang line
+	n, _ := f.Read(header)
+	interp, _, ok := parseShebang(header[:n])
+	if !ok {
+		return binPath, nil // not a resolvable script
 	}
 
 	// Resolve the interpreter to an absolute path

@@ -1,0 +1,1 @@
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"cd /home/user/greenlight-cli && touch permission-hook-test.txt","description":"Create a temporary permission hook test file"}}]}}

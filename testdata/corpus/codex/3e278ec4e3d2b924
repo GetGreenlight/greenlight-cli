@@ -1,0 +1,1 @@
+{"timestamp":"2026-04-12T11:02:46.915Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"- Created `test-permission-hook-file.txt` in `/home/user/greenlight-test-workdir`.  \n- Removed `test-permission-hook-file.txt` afterward so directory is back to its original state."}]}}

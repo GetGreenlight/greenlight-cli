@@ -1,0 +1,1 @@
+{"type":"session.start","data":{"sessionId":"83aed14b-18c7-4778-99ba-d8659709fe46","version":1,"producer":"copilot-agent","copilotVersion":"1.0.9","startTime":"2026-03-20T11:38:46.969Z","context":{"cwd":"/home/user/greenlight-test-workdir"},"alreadyInUse":false},"id":"83b5f460-b74f-4c7e-a17b-fac6f3e10724","timestamp":"2026-03-20T11:38:46.971Z","parentId":null}

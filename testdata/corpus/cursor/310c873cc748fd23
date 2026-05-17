@@ -1,0 +1,1 @@
+{"role":"assistant","message":{"content":[{"type":"text","text":"Created `permission-test.txt` in `/home/user/greenlight-test-workdir` and removed it so you can verify how the permission hook behaves."}]}}

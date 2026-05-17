@@ -1,0 +1,1 @@
+{"type":"message","id":"54dd9ee0","parentId":"1a14977f","timestamp":"2026-03-19T09:36:56.251Z","message":{"role":"user","content":[{"type":"text","text":"Fetch the URL https://example.com and show me the HTML."}],"timestamp":1773913016250}}

@@ -1,0 +1,1 @@
+{"type":"message","id":"a3e50a82","parentId":"190c74c8","timestamp":"2026-03-19T09:37:08.079Z","message":{"role":"toolResult","toolCallId":"call_OgO3KlOEYeH4nqLPz8NUkh5A|fc_02a163140364d9470169bbc3c3d62481969a4d9073182990fe","toolName":"bash","content":[{"type":"text","text":"/home/user/greenlight-test-workdir\n"}],"isError":false,"timestamp":1773913028079}}

@@ -1,0 +1,1 @@
+{"timestamp":"2026-03-17T14:19:56.963Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cat <<'EOF' > permission-hook-test.txt\\nPermission hook test file created by Codex on 2026-03-17.\\nEOF\"}","call_id":"call_u2Xbnl37hcU8of97XAGsBlGa"}}

@@ -1,0 +1,1 @@
+{"type":"message","id":"5df5c526","parentId":"e5faae45","timestamp":"2026-03-20T13:33:04.889Z","message":{"role":"toolResult","toolCallId":"call_ay7kBMnLxbilLWCrW8cA9JzG|fc_0f3105ace6ff90990169bd4c9081c48195b28f70282e7b8570","toolName":"bash","content":[{"type":"text","text":"greenlight_builtin_test\n"}],"isError":false,"timestamp":1774013584888}}

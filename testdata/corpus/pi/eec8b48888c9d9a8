@@ -1,0 +1,1 @@
+{"type":"message","id":"51b08d0a","parentId":"e8d1b234","timestamp":"2026-03-20T14:12:11.070Z","message":{"role":"toolResult","toolCallId":"call_IThgC2AUvqru6kAWLgg1e6db|fc_08afa8d2c00d33da0169bd55bac8f48197bb3bad60b0e54d55","toolName":"read","content":[{"type":"text","text":"test content for reading\n"}],"isError":false,"timestamp":1774015931070}}

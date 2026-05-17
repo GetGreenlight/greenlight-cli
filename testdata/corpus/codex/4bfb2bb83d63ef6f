@@ -1,0 +1,1 @@
+{"timestamp":"2026-03-19T11:31:09.183Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"bash -lc 'pwd'\",\"login\":false}","call_id":"call_xOTXOHxbAPl3TzeaQSJQxV3r"}}

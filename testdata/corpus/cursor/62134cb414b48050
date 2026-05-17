@@ -1,0 +1,1 @@
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"cd /home/user/greenlight-test-workdir && touch permission-test.txt","description":"Create a temporary text file for the permission hook test"}}]}}

@@ -1,0 +1,1 @@
+{"type":"message","id":"ada49890","parentId":"3f755889","timestamp":"2026-03-11T21:24:08.292Z","message":{"role":"toolResult","toolCallId":"call_BxmSbX7iRAhtfuf8ycmkHaL4|fc_0e25f2b296c6a4760169b1dd7526588194a1ec216b112ed2b3","toolName":"bash","content":[{"type":"text","text":"./tool-test.md:1:# Permission Hook Test Suite\n"}],"isError":false,"timestamp":1773264245394}}

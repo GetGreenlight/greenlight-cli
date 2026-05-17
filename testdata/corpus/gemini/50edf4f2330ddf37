@@ -1,0 +1,1 @@
+{"id":"1d3b5d6c-0da2-40d7-b426-9a15b0a8356c","timestamp":"2026-04-14T11:52:48.500Z","type":"gemini","content":"I've created `permission-test.txt` in the current directory. You can now use it to test your permission hook.","thoughts":[],"tokens":{"input":6912,"output":27,"cached":5744,"thoughts":0,"tool":0,"total":6939},"model":"gemini-3-flash-preview"}

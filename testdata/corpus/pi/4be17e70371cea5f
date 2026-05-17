@@ -1,0 +1,1 @@
+{"type":"message","id":"8def971c","parentId":"2d6a527e","timestamp":"2026-04-14T11:26:02.478Z","message":{"role":"toolResult","toolCallId":"call_hW4BAh4G2OHiANCpHTcR2Qh5|fc_027a06b2d32adba00169de24477700819686eb03c3dc2d5b96","toolName":"write","content":[{"type":"text","text":"Successfully wrote 92 bytes to permission-hook-test.txt"}],"isError":false,"timestamp":1776165962478}}

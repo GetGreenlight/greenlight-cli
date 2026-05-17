@@ -1,0 +1,1 @@
+{"type":"tool.execution_start","data":{"toolCallId":"call_zR9O3rJulkC1JtJaRdzWnb9T","toolName":"bash","arguments":{"command":"echo greenlight_redir_test > ./gl-test-9evvm0ia.txt","description":"Run requested echo redirect","initial_wait":30}},"id":"fdb4bea5-cea9-4650-82bb-8db9aa910054","timestamp":"2026-03-20T11:39:17.443Z","parentId":"54544108-c492-4ee7-b654-bb4e8c67a57a"}

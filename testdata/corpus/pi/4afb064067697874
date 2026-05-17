@@ -1,0 +1,1 @@
+{"type":"message","id":"a23de4ab","parentId":"42e76e30","timestamp":"2026-03-11T21:23:24.732Z","message":{"role":"user","content":[{"type":"text","text":"Hi can you help me test my permission hook by running through the tool calls in tool-test.md?"}],"timestamp":1773264204729}}

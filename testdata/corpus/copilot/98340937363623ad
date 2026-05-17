@@ -1,0 +1,1 @@
+{"type":"tool.execution_start","data":{"toolCallId":"call_HivtAprw5KeaHvKpa366DIPk","toolName":"bash","arguments":{"command":"printf 'hello' > ./gl-test-5zlub6dv.txt","description":"Write hello to target file","initial_wait":30}},"id":"54d38000-7f5d-4e07-8ace-b6a6d32bcb38","timestamp":"2026-03-20T12:42:56.526Z","parentId":"026e6508-5f56-4f5a-8737-ac303011925a"}

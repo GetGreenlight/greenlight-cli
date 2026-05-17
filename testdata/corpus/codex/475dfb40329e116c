@@ -1,0 +1,1 @@
+{"timestamp":"2026-04-12T10:54:38.140Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"- Created `testfile.txt` in `/home/user/greenlight-test-workdir` and confirmed it appeared in the directory listing.\n- Removed `testfile.txt` afterward, leaving the directory clean again."}]}}

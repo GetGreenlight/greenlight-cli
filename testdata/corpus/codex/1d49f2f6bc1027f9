@@ -1,0 +1,1 @@
+{"timestamp":"2026-03-17T14:20:23.099Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"rm permission-hook-test.txt\"}","call_id":"call_u3NvxRu3ABcSng0XSMBwdO6u"}}

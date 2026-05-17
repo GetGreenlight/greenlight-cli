@@ -1,0 +1,1 @@
+{"type":"message","id":"8a1eba97","parentId":"d0bf528c","timestamp":"2026-03-19T09:37:29.292Z","message":{"role":"toolResult","toolCallId":"call_xmD0vZBpGfBZYXjuAKwLL7PL|fc_02a163140364d9470169bbc3d8ee348196b8e96d7ddf140006","toolName":"bash","content":[{"type":"text","text":"(no output)\n\nCommand exited with code 126"}],"details":{},"isError":true,"timestamp":1773913049292}}

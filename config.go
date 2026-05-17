@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,8 +33,15 @@ func readConfigValue(key string) string {
 		return ""
 	}
 	defer f.Close()
+	return parseConfigValue(f, key)
+}
 
-	scanner := bufio.NewScanner(f)
+// parseConfigValue is the pure parsing core of readConfigValue: it scans
+// key=value lines from r and returns the value for key, or "" if absent.
+// Blank lines and #-comments are skipped. Separated out so it can be fuzzed
+// without touching the filesystem.
+func parseConfigValue(r io.Reader, key string) string {
+	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {

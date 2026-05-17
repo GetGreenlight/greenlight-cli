@@ -1,0 +1,1 @@
+{"type":"message","id":"005564b0","parentId":"94c7d4a3","timestamp":"2026-03-20T14:12:16.560Z","message":{"role":"toolResult","toolCallId":"call_toXQEEf46IkRTBgWx7Gruf6m|fc_0ffda5016c58f2fe0169bd55c043c08190a52b86fc4eb2ef6d","toolName":"write","content":[{"type":"text","text":"Successfully wrote 6 bytes to ./gl-test-xq87n8vx.txt"}],"isError":false,"timestamp":1774015936560}}

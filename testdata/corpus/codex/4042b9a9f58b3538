@@ -1,0 +1,1 @@
+{"timestamp":"2026-03-20T13:58:47.664Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"curl -s https://example.com\"}","call_id":"call_qMQxBgqg4hdV1DZ7txQ6mYaB"}}

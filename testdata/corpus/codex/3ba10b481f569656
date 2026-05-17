@@ -1,0 +1,1 @@
+{"timestamp":"2026-04-13T11:20:19.401Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"019d8692-03f3-7d80-b7e1-ce6e6cdcec8a","last_agent_message":"- Created `permission-hook-test.txt` in `/home/user/greenlight-test-workdir` and then removed it to exercise your permission hook."}}

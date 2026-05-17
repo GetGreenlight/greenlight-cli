@@ -1,0 +1,1 @@
+{"type":"message","id":"a7d50c28","parentId":"98745b90","timestamp":"2026-04-14T11:15:18.705Z","message":{"role":"toolResult","toolCallId":"call_BTF0VgBoEx2oT6g2ADouTLBq|fc_0f4c1994b55c3bcf0169de21c4aa04819083153716fb66643b","toolName":"write","content":[{"type":"text","text":"Successfully wrote 74 bytes to test-permission.txt"}],"isError":false,"timestamp":1776165318705}}
