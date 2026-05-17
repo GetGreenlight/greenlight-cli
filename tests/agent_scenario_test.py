@@ -59,6 +59,7 @@ import json
 import os
 import platform
 import pty
+import re
 import shutil
 import signal
 import socket
@@ -648,9 +649,44 @@ def run_scenario(spec: AgentSpec, gl_bin: Path, ms: MockServer, tmp: Path,
                 print(log_text[-4000:])  # tail
 
 
+# Terminal capability queries an agent TUI emits at boot. A real terminal
+# answers these; our drain thread must too, or query-blocking agents (the
+# JS/Bun TUIs — copilot, cursor, gemini, pi, claude) hang at startup waiting
+# for a reply and never become interactive. codex's Rust TUI doesn't block,
+# which is why it alone passed before this was added.
+_QUERY_RE = re.compile(
+    rb'\x1b\[6n'                          # DSR — cursor position report
+    rb'|\x1b\[0?c'                        # DA1 — primary device attributes
+    rb'|\x1b\[>0?[cq]'                    # DA2 / XTVERSION
+    rb'|\x1b\[\?u'                        # kitty keyboard — flags query
+    rb'|\x1b\]1[0-2];\?(?:\x07|\x1b\\)'   # OSC 10/11/12 — fg/bg/cursor colour
+    rb'|\x1b\]4;[0-9]+;\?(?:\x07|\x1b\\)' # OSC 4 — palette colour
+)
+
+
+def _query_response(q: bytes) -> bytes:
+    """Canned reply for one terminal capability query."""
+    if q == b'\x1b[6n':
+        return b'\x1b[1;1R'
+    if q in (b'\x1b[c', b'\x1b[0c'):
+        return b'\x1b[?1;2c'
+    if q.startswith(b'\x1b[>'):
+        return b'\x1bP>|harness\x1b\\' if q.endswith(b'q') else b'\x1b[>0;10;0c'
+    if q == b'\x1b[?u':
+        return b'\x1b[?0u'
+    if q.startswith(b'\x1b]1'):           # OSC 10/11/12
+        n = q[2:4]
+        colour = b'0000/0000/0000' if n == b'11' else b'ffff/ffff/ffff'
+        return b'\x1b]' + n + b';rgb:' + colour + b'\x1b\\'
+    if q.startswith(b'\x1b]4;'):          # OSC 4;n;?
+        return b'\x1b]4;' + q.split(b';')[1] + b';rgb:8080/8080/8080\x1b\\'
+    return b''
+
+
 def _drain_pty(master: int, total_timeout: float, sink_path: Path | None = None):
     import select
     sink = open(sink_path, "wb") if sink_path else None
+    carry = b""  # tail of the last read, in case a query is split across reads
     try:
         deadline = time.time() + total_timeout
         while time.time() < deadline:
@@ -665,6 +701,19 @@ def _drain_pty(master: int, total_timeout: float, sink_path: Path | None = None)
                 return
             if sink:
                 sink.write(chunk); sink.flush()
+            # Answer any terminal capability queries so the agent's TUI
+            # doesn't block waiting for a reply that a real terminal gives.
+            buf = carry + chunk
+            last = 0
+            for m in _QUERY_RE.finditer(buf):
+                resp = _query_response(m.group())
+                if resp:
+                    try:
+                        os.write(master, resp)
+                    except OSError:
+                        pass
+                last = m.end()
+            carry = buf[max(last, len(buf) - 48):]
     finally:
         if sink:
             sink.close()
