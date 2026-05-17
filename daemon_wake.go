@@ -147,7 +147,7 @@ func removeSessionRecord(conversationID string) {
 // The connect command loads the session record itself, so we only need to
 // pass --resume. It will auto-fill agent, device-id, project, and cd to
 // the original working directory.
-func wakeSession(rec *sessionRecord) error {
+func wakeSession(rec *sessionRecord, deviceID string) error {
 	exePath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("cannot resolve executable: %w", err)
@@ -156,9 +156,21 @@ func wakeSession(rec *sessionRecord) error {
 		exePath = resolved
 	}
 
-	connectCmd := fmt.Sprintf("cd %s && %s connect --resume %s",
+	// Clear any inherited greenlight env vars before launching connect. The
+	// wake terminal descends from whichever daemon first launched Terminal.app
+	// (or the terminal emulator on Linux), so it can carry a stale snapshot of
+	// GREENLIGHT_DEVICE_ID / GREENLIGHT_DAEMON_SESSION_ID from an earlier daemon
+	// that has since been restarted with a different device ID. Pin the device
+	// ID explicitly via --device-id so the resumed session always matches the
+	// daemon that woke it, regardless of what the inherited env says.
+	deviceFlag := ""
+	if deviceID != "" {
+		deviceFlag = "--device-id " + shellQuote(deviceID) + " "
+	}
+	connectCmd := fmt.Sprintf("unset GREENLIGHT_DEVICE_ID GREENLIGHT_DAEMON_SESSION_ID; cd %s && %s connect %s--resume %s",
 		shellQuote(rec.Cwd),
 		shellQuote(exePath),
+		deviceFlag,
 		shellQuote(rec.ConversationID),
 	)
 
@@ -331,7 +343,7 @@ func (d *Daemon) handleWakeMessage(data []byte) {
 		return
 	}
 
-	if err := wakeSession(rec); err != nil {
+	if err := wakeSession(rec, d.deviceID); err != nil {
 		log.Printf("daemon: wake: failed to open terminal: %v", err)
 		d.sendWakeResult(msg.RelayID, false, err.Error())
 		return

@@ -64,8 +64,11 @@ def go_build(verbose: bool) -> tuple[Path, Path, Path]:
          cwd=REPO_ROOT, env=env, verbose=verbose, label="build greenlight")
     _run(["go", "build", "-o", str(ms_bin), "./cmd/mockserver/"],
          cwd=REPO_ROOT, env=env, verbose=verbose, label="build mockserver")
+    # mock_claude.go does `import "C"` to force dynamic linking (needed by the
+    # Linux seccomp integration tests), so it must be built with cgo enabled.
+    claude_env = {**env, "CGO_ENABLED": "1"}
     _run(["go", "build", "-o", str(claude_bin), "./testdata/mock_claude.go"],
-         cwd=REPO_ROOT, env=env, verbose=verbose, label="build mock_claude")
+         cwd=REPO_ROOT, env=claude_env, verbose=verbose, label="build mock_claude")
     return gl_bin, ms_bin, claude_bin
 
 
