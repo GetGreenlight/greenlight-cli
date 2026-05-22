@@ -87,11 +87,19 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	cmdArgs := setup.Args
 	relayID := setup.RelayID
 
+	// On resume, carry the session's name forward from its saved record.
+	var sessionName string
+	if req.Resume != "" {
+		if rec, err := loadSessionRecord(req.Resume); err == nil {
+			sessionName = rec.Name
+		}
+	}
+
 	// Register session with the server via daemon WS (no phone approval needed)
 	if d.daemonWS == nil {
 		return nil, fmt.Errorf("daemon WebSocket not connected")
 	}
-	skills, err := d.daemonWS.StartSession(relayID, proj, agentServerName(agent), cwd, version)
+	skills, err := d.daemonWS.StartSession(relayID, proj, agentServerName(agent), cwd, version, sessionName)
 	if err != nil {
 		return nil, fmt.Errorf("session start failed: %w", err)
 	}
@@ -151,6 +159,10 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		sw.localAgent = agent
 		sw.cwd = cwd
 		sw.version = version
+		if sessionName != "" {
+			sw.name = sessionName
+			sw.nameSet = true
+		}
 		r.wsConn = sw
 
 		// Start bridge tailer using the session's WS handle

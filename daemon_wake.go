@@ -25,6 +25,7 @@ type sessionRecord struct {
 	Hostname       string `json:"hostname"`
 	StartedAt      string `json:"started_at"`
 	EndedAt        string `json:"ended_at"`
+	Name           string `json:"name,omitempty"` // human-readable session title
 }
 
 // sessionStorePath returns ~/.greenlight/completed/
@@ -51,6 +52,10 @@ func saveSessionRecord(s *Session) {
 	}
 
 	hostname, _ := os.Hostname()
+	var name string
+	if s.daemon != nil && s.daemon.daemonWS != nil {
+		name = s.daemon.daemonWS.sessionName(s.relayID)
+	}
 	rec := sessionRecord{
 		ConversationID: convID,
 		RelayID:        s.relayID,
@@ -60,6 +65,7 @@ func saveSessionRecord(s *Session) {
 		Hostname:       hostname,
 		StartedAt:      s.startedAt.Format(time.RFC3339),
 		EndedAt:        time.Now().Format(time.RFC3339),
+		Name:           name,
 	}
 
 	data, err := json.MarshalIndent(rec, "", "  ")
@@ -140,6 +146,31 @@ func removeSessionRecord(conversationID string) {
 		return
 	}
 	os.Remove(filepath.Join(dir, conversationID+".json"))
+}
+
+// updateSessionRecordName rewrites the on-disk record for a session, setting
+// its name. Returns true if a record was found and updated. It is a no-op for
+// live sessions, which have no record until they end.
+func updateSessionRecordName(relayID, name string) bool {
+	rec, err := loadSessionRecordByRelayID(relayID)
+	if err != nil {
+		return false
+	}
+	dir := sessionStorePath()
+	if dir == "" {
+		return false
+	}
+	rec.Name = name
+	data, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return false
+	}
+	path := filepath.Join(dir, rec.ConversationID+".json")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		log.Printf("daemon: failed to update session record name: %v", err)
+		return false
+	}
+	return true
 }
 
 // wakeSession resumes a dormant session by opening a new terminal window
