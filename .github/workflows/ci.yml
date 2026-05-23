@@ -27,9 +27,6 @@ jobs:
       - name: Smoke test
         run: ./greenlight-test version
 
-      - name: Replay fuzz seed corpus
-        run: go test -run '^Fuzz' -timeout 120s .
-
       - name: Run integration tests
         run: go test -tags integration -v -timeout 120s
 
@@ -42,9 +39,11 @@ jobs:
         with:
           distribution: Ubuntu-22.04
 
-      - name: Install Go
+      - name: Install Go and build tools
         shell: wsl-bash {0}
         run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
           curl -fsSL https://go.dev/dl/go1.24.2.linux-amd64.tar.gz -o /tmp/go.tar.gz
           sudo tar -C /usr/local -xzf /tmp/go.tar.gz
 
