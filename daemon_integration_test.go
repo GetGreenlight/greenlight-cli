@@ -5,9 +5,12 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1192,6 +1195,183 @@ func TestIntegration_Daemon_NewSession_Validation(t *testing.T) {
 	cs.Wait(10 * time.Second)
 }
 
+// TestIntegration_Daemon_ListTickets_HappyPath drives the full
+// list_tickets round-trip end to end against a fake GitHub server: the
+// daemon resolves the repo from the session's cwd via `git remote
+// get-url origin`, fetches the encrypted GITHUB_ACCESS_TOKEN through
+// the mock server's WS, decrypts it locally, hits the fake GitHub API,
+// filters out the PR, and replies with a tickets_listed frame
+// containing only the real issue.
+func TestIntegration_Daemon_ListTickets_HappyPath(t *testing.T) {
+	testServerURL.ClearHandlers()
+
+	// 1. Pre-init an X25519 keypair under the daemon's HOME so
+	// loadPrivateKey() succeeds when the daemon decrypts the token.
+	// Encrypt the test token with the same pubkey so the mock server
+	// can hand back a ciphertext the daemon can actually open.
+	daemonHome := t.TempDir()
+	priv, err := generateKeypair()
+	if err != nil {
+		t.Fatalf("generateKeypair: %v", err)
+	}
+	keyDir := filepath.Join(daemonHome, ".greenlight")
+	if err := os.MkdirAll(keyDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(keyDir, "key"),
+		[]byte(base64.StdEncoding.EncodeToString(priv.Bytes())), 0600); err != nil {
+		t.Fatal(err)
+	}
+	const fakeToken = "ghp_fake_token_for_test"
+	tokenCT, err := encryptSecret(priv.PublicKey(), []byte(fakeToken))
+	if err != nil {
+		t.Fatalf("encryptSecret: %v", err)
+	}
+	tokenCTB64 := base64.StdEncoding.EncodeToString(tokenCT)
+
+	// 2. Workdir is a real git repo with an origin pointing at github.com.
+	// The daemon will parse owner/repo from this URL; the actual HTTP call
+	// goes to the fake server, not github.com (overridden via env).
+	workDir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"-c", "protocol.file.allow=always", "remote", "add", "origin", "https://github.com/foo/bar.git"},
+	} {
+		c := exec.Command("git", args...)
+		c.Dir = workDir
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+
+	// 3. Fake GitHub API. Returns one real issue and one PR (the PR
+	// must be filtered out by the daemon).
+	var ghHits int
+	var ghPath string
+	var ghAuth string
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ghHits++
+		ghPath = r.URL.Path + "?" + r.URL.RawQuery
+		ghAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `[
+		  {"number":1,"title":"real issue","state":"open",
+		   "html_url":"https://github.com/foo/bar/issues/1",
+		   "updated_at":"2026-05-01T00:00:00Z",
+		   "labels":[{"name":"bug"}]},
+		  {"number":2,"title":"a PR","state":"open",
+		   "html_url":"https://github.com/foo/bar/pull/2",
+		   "updated_at":"2026-05-02T00:00:00Z",
+		   "labels":[],
+		   "pull_request":{"url":"x"}}
+		]`)
+	}))
+	defer gh.Close()
+
+	// 4. Mock-server hook: serve secrets_get for GITHUB_ACCESS_TOKEN.
+	testServerURL.SetFrameHook(func(s *mockserver.Session, frame json.RawMessage) {
+		var msg struct {
+			Type string          `json:"type"`
+			Data json.RawMessage `json:"data"`
+		}
+		if json.Unmarshal(frame, &msg) != nil || msg.Type != "secrets_get" {
+			return
+		}
+		var data map[string]interface{}
+		json.Unmarshal(msg.Data, &data)
+		reqID, _ := data["request_id"].(string)
+		key, _ := data["key"].(string)
+		if key != "GITHUB_ACCESS_TOKEN" {
+			s.Send(map[string]any{
+				"type": "secrets_get_response", "request_id": reqID,
+				"error": "not_found",
+			})
+			return
+		}
+		s.Send(map[string]any{
+			"type":       "secrets_get_response",
+			"request_id": reqID,
+			"ciphertext": tokenCTB64,
+		})
+	})
+
+	// 5. Start the session with the pre-prepared workdir + daemon home +
+	// the GitHub base URL pointed at our fake server.
+	cs, cleanup := startConnectSession(t, connectOpts{
+		WorkDir:    workDir,
+		DaemonHome: daemonHome,
+		DaemonEnv:  []string{"GREENLIGHT_GITHUB_API_BASE=" + gh.URL},
+	})
+	defer cleanup()
+
+	if err := cs.Sess.SendBinary(map[string]any{
+		"type":     "list_tickets",
+		"relay_id": cs.Sess.RelayID,
+	}); err != nil {
+		t.Fatalf("send list_tickets: %v", err)
+	}
+
+	matched := cs.Sess.WaitForFrame(func(raw json.RawMessage) bool {
+		var m struct {
+			Type    string `json:"type"`
+			RelayID string `json:"relay_id"`
+		}
+		return json.Unmarshal(raw, &m) == nil &&
+			m.Type == "tickets_listed" && m.RelayID == cs.Sess.RelayID
+	}, 5*time.Second)
+	if matched == nil {
+		t.Fatal("no tickets_listed reply")
+	}
+
+	var reply struct {
+		Owner   string `json:"owner"`
+		Repo    string `json:"repo"`
+		Error   string `json:"error"`
+		Tickets []struct {
+			Number    int      `json:"number"`
+			Title     string   `json:"title"`
+			State     string   `json:"state"`
+			Labels    []string `json:"labels"`
+			HTMLURL   string   `json:"html_url"`
+			UpdatedAt string   `json:"updated_at"`
+		} `json:"tickets"`
+	}
+	if err := json.Unmarshal(matched, &reply); err != nil {
+		t.Fatalf("unmarshal reply: %v (raw=%s)", err, string(matched))
+	}
+	if reply.Error != "" {
+		t.Fatalf("unexpected error in reply: %q", reply.Error)
+	}
+	if reply.Owner != "foo" || reply.Repo != "bar" {
+		t.Errorf("owner/repo = %q/%q, want foo/bar", reply.Owner, reply.Repo)
+	}
+	if len(reply.Tickets) != 1 {
+		t.Fatalf("got %d tickets, want 1 (PR should be filtered); reply=%s",
+			len(reply.Tickets), string(matched))
+	}
+	tk := reply.Tickets[0]
+	if tk.Number != 1 || tk.Title != "real issue" || tk.State != "open" {
+		t.Errorf("ticket mismatch: %+v", tk)
+	}
+	if len(tk.Labels) != 1 || tk.Labels[0] != "bug" {
+		t.Errorf("labels = %v, want [bug]", tk.Labels)
+	}
+
+	// Verify the daemon actually hit the fake server with the decrypted
+	// token in the Authorization header — the proxy path end-to-end.
+	if ghHits != 1 {
+		t.Errorf("github hits = %d, want 1", ghHits)
+	}
+	if !strings.Contains(ghPath, "/repos/foo/bar/issues") {
+		t.Errorf("github path = %q, want /repos/foo/bar/issues...", ghPath)
+	}
+	if ghAuth != "Bearer "+fakeToken {
+		t.Errorf("authorization header = %q, want %q", ghAuth, "Bearer "+fakeToken)
+	}
+
+	cs.Wait(10 * time.Second)
+}
+
 // TestIntegration_Daemon_ListTickets_NotARepo exercises the list_tickets
 // error path: the session's cwd is a fresh tmpdir (not a git repo), so
 // `git remote get-url origin` fails and the daemon must reply with
@@ -1401,6 +1581,18 @@ type connectOpts struct {
 	// SkipMockClaudeOutput omits MOCK_CLAUDE_OUTPUT, letting mock_claude
 	// run to completion instead of blocking on stdin.
 	SkipMockClaudeOutput bool
+	// WorkDir, if non-empty, is used as the connect client's working
+	// directory instead of a fresh t.TempDir. Useful for tests that need
+	// to pre-init the workdir (git repo, etc.).
+	WorkDir string
+	// DaemonHome, if non-empty, is used as the daemon's HOME instead of a
+	// fresh t.TempDir. Useful for tests that need to pre-populate
+	// ~/.greenlight (e.g. an X25519 keypair the daemon will use to decrypt
+	// secrets fetched from the mock server).
+	DaemonHome string
+	// DaemonEnv is appended to the daemon's env. Use this for test-only
+	// overrides like GREENLIGHT_GITHUB_API_BASE.
+	DaemonEnv []string
 }
 
 // startConnectSession boots a daemon (with a fresh enrolled host),
@@ -1426,9 +1618,17 @@ func startConnectSession(t *testing.T, opts ...connectOpts) (*connectSession, fu
 	if !opt.EnableInterpose {
 		daemonEnv = append(daemonEnv, "GREENLIGHT_DISABLE_INTERPOSE=1")
 	}
-	sockPath, tmpDir, daemonHome, daemonCleanup := startTestDaemonWithHome(t, t.TempDir(), daemonEnv...)
+	daemonEnv = append(daemonEnv, opt.DaemonEnv...)
+	dHome := opt.DaemonHome
+	if dHome == "" {
+		dHome = t.TempDir()
+	}
+	sockPath, tmpDir, daemonHome, daemonCleanup := startTestDaemonWithHome(t, dHome, daemonEnv...)
 
-	workDir := t.TempDir()
+	workDir := opt.WorkDir
+	if workDir == "" {
+		workDir = t.TempDir()
+	}
 	pathWithMock := filepath.Dir(mockClaudeBin) + ":" + os.Getenv("PATH")
 
 	master, slave, err := openPTY()
