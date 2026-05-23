@@ -366,6 +366,8 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 		d.handleProjectHistory(data)
 	case "list_skills":
 		d.handleListSkills(data)
+	case "list_tickets":
+		d.handleListTickets(data)
 	case "set_session_name":
 		d.handleSetSessionName(data)
 	default:
