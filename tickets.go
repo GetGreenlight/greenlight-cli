@@ -10,10 +10,21 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
 )
+
+// githubAPIBase is the GitHub REST API root. Overridable via the
+// GREENLIGHT_GITHUB_API_BASE env var so integration tests can point at a
+// local httptest.Server. Production never sets this.
+func githubAPIBase() string {
+	if v := os.Getenv("GREENLIGHT_GITHUB_API_BASE"); v != "" {
+		return v
+	}
+	return "https://api.github.com"
+}
 
 type ticket struct {
 	Number    int      `json:"number"`
@@ -27,6 +38,11 @@ type ticket struct {
 // handleListTickets resolves the session's repo from its cwd, fetches open
 // issues from GitHub (filtering out pull requests), and replies with a
 // `tickets_listed` frame. State defaults to "open".
+//
+// The actual work runs in a goroutine because fetchGitHubToken issues a
+// SendRequest that waits for a server response over the same WS this
+// handler is dispatched from — running synchronously would deadlock the
+// read loop.
 func (d *DaemonWS) handleListTickets(data []byte) {
 	var msg struct {
 		RelayID string `json:"relay_id"`
@@ -40,33 +56,36 @@ func (d *DaemonWS) handleListTickets(data []byte) {
 	if state == "" {
 		state = "open"
 	}
+	go d.serveListTickets(msg.RelayID, state)
+}
 
+func (d *DaemonWS) serveListTickets(relayID, state string) {
 	d.mu.RLock()
-	sw := d.sessions[msg.RelayID]
+	sw := d.sessions[relayID]
 	d.mu.RUnlock()
 	if sw == nil {
-		d.sendTicketsListed(msg.RelayID, "", "", nil, "unknown session")
+		d.sendTicketsListed(relayID, "", "", nil, "unknown session")
 		return
 	}
 
 	owner, repo, err := repoFromCwd(sw.cwd)
 	if err != nil {
-		d.sendTicketsListed(msg.RelayID, "", "", nil, err.Error())
+		d.sendTicketsListed(relayID, "", "", nil, err.Error())
 		return
 	}
 
 	token, err := d.fetchGitHubToken()
 	if err != nil {
-		d.sendTicketsListed(msg.RelayID, owner, repo, nil, fmt.Sprintf("token: %v", err))
+		d.sendTicketsListed(relayID, owner, repo, nil, fmt.Sprintf("token: %v", err))
 		return
 	}
 
 	items, err := fetchGitHubIssues(string(token), owner, repo, state)
 	if err != nil {
-		d.sendTicketsListed(msg.RelayID, owner, repo, nil, err.Error())
+		d.sendTicketsListed(relayID, owner, repo, nil, err.Error())
 		return
 	}
-	d.sendTicketsListed(msg.RelayID, owner, repo, items, "")
+	d.sendTicketsListed(relayID, owner, repo, items, "")
 }
 
 func (d *DaemonWS) sendTicketsListed(relayID, owner, repo string, items []ticket, errMsg string) {
@@ -186,7 +205,8 @@ func splitOwnerRepo(path string) (string, string, bool) {
 // fetchGitHubIssues calls GET /repos/<owner>/<repo>/issues and filters out
 // pull requests (which share the issue endpoint and number space).
 func fetchGitHubIssues(token, owner, repo, state string) ([]ticket, error) {
-	u := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues?state=%s&per_page=100",
+	u := fmt.Sprintf("%s/repos/%s/%s/issues?state=%s&per_page=100",
+		strings.TrimRight(githubAPIBase(), "/"),
 		url.PathEscape(owner), url.PathEscape(repo), url.QueryEscape(state))
 	req, err := http.NewRequest("GET", u, nil)
 	if err != nil {
