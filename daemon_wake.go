@@ -365,6 +365,104 @@ func (d *Daemon) handleWakeMessage(data []byte) {
 	d.sendWakeResult(msg.RelayID, true, "")
 }
 
+// handleNewSessionMessage processes a new_session message from the server. It
+// spawns a new terminal window running `greenlight connect` with the requested
+// agent and cwd. Unlike wake, there's no existing relay_id — the spawned
+// session will register itself when it enrolls.
+func (d *Daemon) handleNewSessionMessage(data []byte) {
+	var msg struct {
+		RequestID string `json:"request_id"`
+		Cwd       string `json:"cwd"`
+		Agent     string `json:"agent"`
+	}
+	if err := json.Unmarshal(data, &msg); err != nil {
+		log.Printf("daemon: invalid new_session message: %v", err)
+		d.sendNewSessionResult("", false, "invalid new_session message")
+		return
+	}
+	if msg.Cwd == "" {
+		d.sendNewSessionResult(msg.RequestID, false, "missing cwd")
+		return
+	}
+	if info, err := os.Stat(msg.Cwd); err != nil || !info.IsDir() {
+		d.sendNewSessionResult(msg.RequestID, false, fmt.Sprintf("cwd not a directory: %s", msg.Cwd))
+		return
+	}
+	if msg.Agent != "" && !knownAgents[msg.Agent] {
+		d.sendNewSessionResult(msg.RequestID, false, fmt.Sprintf("unknown agent: %s", msg.Agent))
+		return
+	}
+
+	if err := newSession(msg.Cwd, msg.Agent, d.deviceID); err != nil {
+		log.Printf("daemon: new_session: failed to open terminal: %v", err)
+		d.sendNewSessionResult(msg.RequestID, false, err.Error())
+		return
+	}
+
+	log.Printf("daemon: spawned new session in %s (agent %q)", msg.Cwd, msg.Agent)
+	d.sendNewSessionResult(msg.RequestID, true, "")
+}
+
+// newSession spawns a new terminal window running `greenlight connect` with
+// the given agent and cwd. If agent is empty, connect's normal resolution
+// (env > config > default) applies.
+func newSession(cwd, agent, deviceID string) error {
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("cannot resolve executable: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(exePath); err == nil {
+		exePath = resolved
+	}
+
+	deviceFlag := ""
+	if deviceID != "" {
+		deviceFlag = "--device-id " + shellQuote(deviceID) + " "
+	}
+	agentFlag := ""
+	if agent != "" {
+		agentFlag = "--agent " + shellQuote(agent) + " "
+	}
+	connectCmd := fmt.Sprintf("unset GREENLIGHT_DEVICE_ID GREENLIGHT_DAEMON_SESSION_ID; cd %s && %s connect %s%s",
+		shellQuote(cwd),
+		shellQuote(exePath),
+		deviceFlag,
+		agentFlag,
+	)
+	connectCmd = strings.TrimRight(connectCmd, " ")
+
+	log.Printf("daemon: spawning new session: %s", connectCmd)
+
+	switch runtime.GOOS {
+	case "darwin":
+		return openTerminalDarwin(connectCmd)
+	case "linux":
+		return openTerminalLinux(connectCmd)
+	default:
+		return fmt.Errorf("unsupported OS: %s", runtime.GOOS)
+	}
+}
+
+// sendNewSessionResult sends a new_session_result message back to the server.
+func (d *Daemon) sendNewSessionResult(requestID string, success bool, errMsg string) {
+	if d.daemonWS == nil {
+		return
+	}
+	resp := map[string]interface{}{
+		"type":       "new_session_result",
+		"request_id": requestID,
+		"success":    success,
+	}
+	if errMsg != "" {
+		resp["error"] = errMsg
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return
+	}
+	d.daemonWS.ws.SendText(data)
+}
+
 // sendWakeResult sends a wake_result message back to the server.
 func (d *Daemon) sendWakeResult(relayID string, success bool, errMsg string) {
 	if d.daemonWS == nil {

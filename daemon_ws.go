@@ -30,8 +30,9 @@ type WSConn interface {
 // relay_id so the server can route them. Incoming messages are dispatched
 // to the correct session by relay_id.
 type DaemonWS struct {
-	ws          *WSClient
-	wakeHandler func([]byte)
+	ws                *WSClient
+	wakeHandler       func([]byte)
+	newSessionHandler func([]byte)
 
 	mu       sync.RWMutex
 	sessions map[string]*sessionWS // relay_id → session handle
@@ -97,6 +98,11 @@ func (d *DaemonWS) IsConnected() bool {
 // SetWakeHandler sets the handler for wake control messages.
 func (d *DaemonWS) SetWakeHandler(fn func([]byte)) {
 	d.wakeHandler = fn
+}
+
+// SetNewSessionHandler sets the handler for new_session control messages.
+func (d *DaemonWS) SetNewSessionHandler(fn func([]byte)) {
+	d.newSessionHandler = fn
 }
 
 // RegisterSession creates a per-session handle for the given relay ID.
@@ -280,6 +286,10 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 	case "wake":
 		if d.wakeHandler != nil {
 			d.wakeHandler(data)
+		}
+	case "new_session":
+		if d.newSessionHandler != nil {
+			d.newSessionHandler(data)
 		}
 	case "session_history":
 		d.handleSessionHistory()
