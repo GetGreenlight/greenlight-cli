@@ -188,11 +188,23 @@ func wakeSession(rec *sessionRecord, deviceID string) error {
 
 // openTerminalDarwin opens a new Terminal.app window and runs the command.
 func openTerminalDarwin(cmd string) error {
-	// Use osascript to tell Terminal.app to open a new window and run the command
+	// If Terminal.app isn't already running, `activate` launches it and opens
+	// a default window; a subsequent unqualified `do script` then opens a
+	// second window. Detect that case and target the auto-opened window
+	// explicitly so only one window appears.
+	escaped := strings.ReplaceAll(cmd, `"`, `\"`)
 	script := fmt.Sprintf(`tell application "Terminal"
+	set wasRunning to running
 	activate
-	do script "%s"
-end tell`, strings.ReplaceAll(cmd, `"`, `\"`))
+	if wasRunning then
+		do script "%s"
+	else
+		repeat while (count of windows) is 0
+			delay 0.05
+		end repeat
+		do script "%s" in window 1
+	end if
+end tell`, escaped, escaped)
 
 	return exec.Command("osascript", "-e", script).Run()
 }
