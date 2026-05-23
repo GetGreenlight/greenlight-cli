@@ -23,6 +23,7 @@ type Session struct {
 	relayID   string
 	agent     string
 	project   string
+	ticket    string
 	cwd       string
 	deviceID  string
 	startedAt time.Time
@@ -87,11 +88,16 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	cmdArgs := setup.Args
 	relayID := setup.RelayID
 
-	// On resume, carry the session's name forward from its saved record.
+	// On resume, carry the session's name (and ticket, if not overridden by
+	// an explicit flag) forward from its saved record.
 	var sessionName string
+	ticket := req.Ticket
 	if req.Resume != "" {
 		if rec, err := loadSessionRecord(req.Resume); err == nil {
 			sessionName = rec.Name
+			if ticket == "" {
+				ticket = rec.Ticket
+			}
 		}
 	}
 
@@ -111,6 +117,7 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		relayID:   relayID,
 		agent:     agent,
 		project:   proj,
+		ticket:    ticket,
 		cwd:       cwd,
 		deviceID:  devID,
 		startedAt: time.Now(),
@@ -128,6 +135,9 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	}
 
 	exportEnvs := buildExportEnvs(devID, relayID, proj, s.bridgePath, agent)
+	if ticket != "" {
+		exportEnvs["GREENLIGHT_TICKET"] = ticket
+	}
 	command, cmdArgs, interpose, err := setupInterpose(agent, command, cmdArgs, relayID, cwd, exportEnvs)
 	if err != nil {
 		s.cleanup()
