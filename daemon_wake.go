@@ -21,6 +21,7 @@ type sessionRecord struct {
 	RelayID        string `json:"relay_id"`
 	Agent          string `json:"agent"`
 	Project        string `json:"project"`
+	Ticket         string `json:"ticket,omitempty"`
 	Cwd            string `json:"cwd"`
 	Hostname       string `json:"hostname"`
 	StartedAt      string `json:"started_at"`
@@ -61,6 +62,7 @@ func saveSessionRecord(s *Session) {
 		RelayID:        s.relayID,
 		Agent:          s.agent,
 		Project:        s.project,
+		Ticket:         s.ticket,
 		Cwd:            s.cwd,
 		Hostname:       hostname,
 		StartedAt:      s.startedAt.Format(time.RFC3339),
@@ -405,6 +407,7 @@ func (d *Daemon) handleNewSessionMessage(data []byte) {
 		RequestID string `json:"request_id"`
 		Cwd       string `json:"cwd"`
 		Agent     string `json:"agent"`
+		Ticket    string `json:"ticket"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		log.Printf("daemon: invalid new_session message: %v", err)
@@ -424,7 +427,7 @@ func (d *Daemon) handleNewSessionMessage(data []byte) {
 		return
 	}
 
-	if err := newSession(msg.Cwd, msg.Agent, d.deviceID); err != nil {
+	if err := newSession(msg.Cwd, msg.Agent, msg.Ticket, d.deviceID); err != nil {
 		log.Printf("daemon: new_session: failed to open terminal: %v", err)
 		d.sendNewSessionResult(msg.RequestID, false, err.Error())
 		return
@@ -437,7 +440,7 @@ func (d *Daemon) handleNewSessionMessage(data []byte) {
 // newSession spawns a new terminal window running `greenlight connect` with
 // the given agent and cwd. If agent is empty, connect's normal resolution
 // (env > config > default) applies.
-func newSession(cwd, agent, deviceID string) error {
+func newSession(cwd, agent, ticket, deviceID string) error {
 	exePath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("cannot resolve executable: %w", err)
@@ -454,11 +457,16 @@ func newSession(cwd, agent, deviceID string) error {
 	if agent != "" {
 		agentFlag = "--agent " + shellQuote(agent) + " "
 	}
-	connectCmd := fmt.Sprintf("unset GREENLIGHT_DEVICE_ID GREENLIGHT_DAEMON_SESSION_ID; cd %s && %s connect %s%s",
+	ticketFlag := ""
+	if ticket != "" {
+		ticketFlag = "--ticket " + shellQuote(ticket) + " "
+	}
+	connectCmd := fmt.Sprintf("unset GREENLIGHT_DEVICE_ID GREENLIGHT_DAEMON_SESSION_ID; cd %s && %s connect %s%s%s",
 		shellQuote(cwd),
 		shellQuote(exePath),
 		deviceFlag,
 		agentFlag,
+		ticketFlag,
 	)
 	connectCmd = strings.TrimRight(connectCmd, " ")
 

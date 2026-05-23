@@ -1098,6 +1098,100 @@ func TestIntegration_Daemon_DeleteSession_Unknown(t *testing.T) {
 	cs.Wait(10 * time.Second)
 }
 
+// TestIntegration_Daemon_NewSession_Validation drives the new_session
+// control frame through its error paths (missing cwd, non-directory cwd,
+// unknown agent) and verifies the daemon replies with
+// new_session_result {success:false, error:…} for each rather than crashing
+// or hanging. The happy path is not exercised here — it spawns a real
+// terminal window which we can't drive in CI.
+func TestIntegration_Daemon_NewSession_Validation(t *testing.T) {
+	testServerURL.ClearHandlers()
+	cs, cleanup := startConnectSession(t)
+	defer cleanup()
+
+	cases := []struct {
+		name      string
+		payload   map[string]any
+		wantErrIn string
+	}{
+		{
+			name: "missing_cwd",
+			payload: map[string]any{
+				"type":       "new_session",
+				"request_id": "missing-cwd",
+				"agent":      "claude",
+			},
+			wantErrIn: "cwd",
+		},
+		{
+			name: "cwd_not_directory",
+			payload: map[string]any{
+				"type":       "new_session",
+				"request_id": "bad-cwd",
+				"cwd":        "/definitely/does/not/exist/greenlight-test",
+				"agent":      "claude",
+			},
+			wantErrIn: "not a directory",
+		},
+		{
+			name: "unknown_agent",
+			payload: map[string]any{
+				"type":       "new_session",
+				"request_id": "bad-agent",
+				"cwd":        cs.Workdir,
+				"agent":      "not-a-real-agent",
+			},
+			wantErrIn: "unknown agent",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reqID, _ := tc.payload["request_id"].(string)
+			if err := cs.Sess.SendBinary(tc.payload); err != nil {
+				t.Fatalf("send new_session: %v", err)
+			}
+			matched := cs.Sess.WaitForFrame(func(raw json.RawMessage) bool {
+				var m struct {
+					Type      string `json:"type"`
+					RequestID string `json:"request_id"`
+				}
+				if err := json.Unmarshal(raw, &m); err != nil {
+					return false
+				}
+				return m.Type == "new_session_result" && m.RequestID == reqID
+			}, 5*time.Second)
+			if matched == nil {
+				t.Fatalf("no new_session_result for request_id=%q", reqID)
+			}
+			var reply struct {
+				Success bool   `json:"success"`
+				Error   string `json:"error"`
+			}
+			if err := json.Unmarshal(matched, &reply); err != nil {
+				t.Fatalf("unmarshal reply: %v", err)
+			}
+			if reply.Success {
+				t.Fatalf("expected success=false, got reply=%s", string(matched))
+			}
+			if !strings.Contains(reply.Error, tc.wantErrIn) {
+				t.Errorf("error %q does not contain %q", reply.Error, tc.wantErrIn)
+			}
+		})
+	}
+
+	// Confirm the daemon is still healthy after rejecting bad input.
+	if err := cs.Sess.SendBinary(map[string]any{
+		"type":     "list_skills",
+		"relay_id": cs.Sess.RelayID,
+	}); err != nil {
+		t.Fatalf("send list_skills after new_session errors: %v", err)
+	}
+	awaitSkillsListed(t, cs.Sess, 5*time.Second)
+
+	cs.Wait(10 * time.Second)
+}
+
 // ---------- skill helpers ----------
 
 func writeTestSkill(t *testing.T, workdir, name string) {

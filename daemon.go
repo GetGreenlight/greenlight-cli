@@ -40,6 +40,7 @@ type ipcRequest struct {
 	Agent    string            `json:"agent,omitempty"`
 	DeviceID string            `json:"device_id,omitempty"`
 	Project  string            `json:"project,omitempty"`
+	Ticket   string            `json:"ticket,omitempty"`
 	Resume   string            `json:"resume,omitempty"`
 	Cwd      string            `json:"cwd,omitempty"`
 	Winsize  *ipcWinsize       `json:"winsize,omitempty"`

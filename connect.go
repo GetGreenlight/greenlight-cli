@@ -23,6 +23,7 @@ func runConnect(args []string) {
 	resume := fs.String("resume", "", "Resume a previous session by ID")
 	deviceID := fs.String("device-id", "", "Device ID (overrides GREENLIGHT_DEVICE_ID env and config file)")
 	project := fs.String("project", "", "Project name (overrides GREENLIGHT_PROJECT env and config file)")
+	ticket := fs.String("ticket", "", "Ticket reference for this session, e.g. github:owner/repo#423 (exported as GREENLIGHT_TICKET; persisted across resume)")
 	agentFlag := fs.String("agent", "", "Agent runtime: claude, codex, copilot, cursor, gemini, pi (overrides GREENLIGHT_AGENT env and config file)")
 	fs.Parse(args)
 	if fs.NArg() > 0 {
@@ -44,6 +45,9 @@ func runConnect(args []string) {
 			}
 			if *project == "" {
 				*project = rec.Project
+			}
+			if *ticket == "" {
+				*ticket = rec.Ticket
 			}
 			// cd to the session's original directory if we're not already there
 			if rec.Cwd != "" {
@@ -69,7 +73,7 @@ func runConnect(args []string) {
 		os.Exit(1)
 	}
 	cwd, _ := os.Getwd()
-	connectViaDaemon(*agentFlag, resolvedDeviceID, *project, *resume, cwd)
+	connectViaDaemon(*agentFlag, resolvedDeviceID, *project, *ticket, *resume, cwd)
 }
 
 // startTranscriptStreamer polls for the agent's transcript file to appear,
