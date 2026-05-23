@@ -1192,6 +1192,55 @@ func TestIntegration_Daemon_NewSession_Validation(t *testing.T) {
 	cs.Wait(10 * time.Second)
 }
 
+// TestIntegration_Daemon_ListTickets_NotARepo exercises the list_tickets
+// error path: the session's cwd is a fresh tmpdir (not a git repo), so
+// `git remote get-url origin` fails and the daemon must reply with
+// tickets_listed carrying an error rather than hanging or crashing.
+// Happy-path coverage would need a fake GitHub server and a stubbed
+// secrets_get; defer until the iOS side exercises it end-to-end.
+func TestIntegration_Daemon_ListTickets_NotARepo(t *testing.T) {
+	testServerURL.ClearHandlers()
+	cs, cleanup := startConnectSession(t)
+	defer cleanup()
+
+	if err := cs.Sess.SendBinary(map[string]any{
+		"type":     "list_tickets",
+		"relay_id": cs.Sess.RelayID,
+	}); err != nil {
+		t.Fatalf("send list_tickets: %v", err)
+	}
+
+	matched := cs.Sess.WaitForFrame(func(raw json.RawMessage) bool {
+		var m struct {
+			Type    string `json:"type"`
+			RelayID string `json:"relay_id"`
+		}
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return false
+		}
+		return m.Type == "tickets_listed" && m.RelayID == cs.Sess.RelayID
+	}, 5*time.Second)
+	if matched == nil {
+		t.Fatal("no tickets_listed reply")
+	}
+
+	var reply struct {
+		Tickets []map[string]any `json:"tickets"`
+		Error   string           `json:"error"`
+	}
+	if err := json.Unmarshal(matched, &reply); err != nil {
+		t.Fatalf("unmarshal reply: %v", err)
+	}
+	if reply.Error == "" {
+		t.Errorf("expected error for non-repo cwd, got reply=%s", string(matched))
+	}
+	if reply.Tickets == nil {
+		t.Errorf("tickets must be [] on the wire, got nil; reply=%s", string(matched))
+	}
+
+	cs.Wait(10 * time.Second)
+}
+
 // ---------- skill helpers ----------
 
 func writeTestSkill(t *testing.T, workdir, name string) {

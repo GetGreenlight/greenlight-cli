@@ -58,13 +58,16 @@ left to the agent.
 
 ### 4. Minimal GitHub skill
 
-Markdown skill documenting the workflow for the agent:
+Narrow scope: teach the agent to **fetch a GitHub issue** via the REST API
+using the `GITHUB_ACCESS_TOKEN` secret, injected via `greenlight run -e`.
+The skill lives in the permit server repo at
+`~/permit/skills/greenlight-github-issue/` (not in this repo) and is
+delivered to sessions via the `session_started` ack.
 
-- Read issue body to understand acceptance criteria
-- Implement
-- Open PR with `Closes #N`
-
-No code wrapper around `gh` — agents already have it on PATH.
+Deliberately *not* covered by the skill: opening PRs, commenting on
+issues, editing labels. Agents already know how to do generic engineering
+work — the only thing that needed teaching is "use the API, not `gh`, and
+pull the token from greenlight secrets."
 
 ## Out of scope for v1 (revisit after dogfooding)
 
