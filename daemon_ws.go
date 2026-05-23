@@ -328,6 +328,13 @@ func (d *DaemonWS) EndSession(relayID string) {
 }
 
 // routeControlFrame handles binary control frames from the server.
+//
+// Handlers run synchronously on the WS read goroutine. A handler that
+// needs to make a round-trip back to the server (SendRequest, or anything
+// that waits on a response routed by this same loop) MUST do that work
+// in a spawned goroutine — otherwise the read loop blocks on a frame it
+// would have routed and the request times out. See handleListTickets /
+// serveListTickets for the pattern.
 func (d *DaemonWS) routeControlFrame(data []byte) {
 	var msg struct {
 		Type    string `json:"type"`
