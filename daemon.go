@@ -479,6 +479,9 @@ func (d *Daemon) startDaemonWS() {
 	d.daemonWS.SetWakeHandler(func(data []byte) {
 		d.handleWakeMessage(data)
 	})
+	d.daemonWS.SetNewSessionHandler(func(data []byte) {
+		d.handleNewSessionMessage(data)
+	})
 
 	go d.daemonWS.Run()
 
