@@ -28,7 +28,7 @@ jobs:
         run: ./greenlight-test version
 
       - name: Run integration tests
-        run: go test -tags integration -v -timeout 120s
+        run: go test -tags integration -v -timeout 120s -run '^Test'
 
   wsl-test:
     runs-on: windows-latest
@@ -61,4 +61,4 @@ jobs:
         shell: wsl-bash {0}
         run: |
           export PATH=/usr/local/go/bin:$PATH
-          go test -tags integration -v -timeout 120s
+          go test -tags integration -v -timeout 120s -run '^Test'
