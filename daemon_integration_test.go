@@ -1284,24 +1284,35 @@ func TestIntegration_Daemon_ListTickets_HappyPath(t *testing.T) {
 	// 3. Fake GitHub API. Returns one real issue and one PR (the PR
 	// must be filtered out by the daemon).
 	var ghHits int
-	var ghPath string
-	var ghAuth string
+	var ghIssuesPath, ghAuth string
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ghHits++
-		ghPath = r.URL.Path + "?" + r.URL.RawQuery
 		ghAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `[
-		  {"number":1,"title":"real issue","state":"open",
-		   "html_url":"https://github.com/foo/bar/issues/1",
-		   "updated_at":"2026-05-01T00:00:00Z",
-		   "labels":[{"name":"bug"}]},
-		  {"number":2,"title":"a PR","state":"open",
-		   "html_url":"https://github.com/foo/bar/pull/2",
-		   "updated_at":"2026-05-02T00:00:00Z",
-		   "labels":[],
-		   "pull_request":{"url":"x"}}
-		]`)
+		switch {
+		case strings.Contains(r.URL.Path, "/issues"):
+			ghIssuesPath = r.URL.Path + "?" + r.URL.RawQuery
+			fmt.Fprint(w, `[
+			  {"number":1,"title":"real issue","state":"open",
+			   "html_url":"https://github.com/foo/bar/issues/1",
+			   "updated_at":"2026-05-01T00:00:00Z",
+			   "labels":[{"name":"bug"}]},
+			  {"number":2,"title":"a PR","state":"open",
+			   "html_url":"https://github.com/foo/bar/pull/2",
+			   "updated_at":"2026-05-02T00:00:00Z",
+			   "labels":[],
+			   "pull_request":{"url":"x"}}
+			]`)
+		case strings.Contains(r.URL.Path, "/pulls"):
+			// linked_pr enrichment: one open PR referencing issue #1 via
+			// "Fixes #1" so the daemon attaches a linked_pr to it.
+			fmt.Fprint(w, `[
+			  {"number":100,"title":"do the thing","body":"Fixes #1",
+			   "html_url":"https://github.com/foo/bar/pull/100","state":"open","draft":false}
+			]`)
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer gh.Close()
 
@@ -1371,6 +1382,12 @@ func TestIntegration_Daemon_ListTickets_HappyPath(t *testing.T) {
 			Labels    []string `json:"labels"`
 			HTMLURL   string   `json:"html_url"`
 			UpdatedAt string   `json:"updated_at"`
+			LinkedPR  *struct {
+				Number  int    `json:"number"`
+				HTMLURL string `json:"html_url"`
+				State   string `json:"state"`
+				Draft   bool   `json:"draft"`
+			} `json:"linked_pr"`
 		} `json:"tickets"`
 	}
 	if err := json.Unmarshal(matched, &reply); err != nil {
@@ -1394,13 +1411,22 @@ func TestIntegration_Daemon_ListTickets_HappyPath(t *testing.T) {
 		t.Errorf("labels = %v, want [bug]", tk.Labels)
 	}
 
+	// linked_pr enrichment: the open PR with "Fixes #1" must be attached
+	// to ticket #1.
+	if tk.LinkedPR == nil {
+		t.Errorf("ticket #1 should carry linked_pr (PR 100); got nil")
+	} else if tk.LinkedPR.Number != 100 || tk.LinkedPR.HTMLURL != "https://github.com/foo/bar/pull/100" {
+		t.Errorf("linked_pr = %+v", tk.LinkedPR)
+	}
+
 	// Verify the daemon actually hit the fake server with the decrypted
 	// token in the Authorization header — the proxy path end-to-end.
-	if ghHits != 1 {
-		t.Errorf("github hits = %d, want 1", ghHits)
+	// Two calls now: /issues (tickets) and /pulls (linked_pr enrichment).
+	if ghHits != 2 {
+		t.Errorf("github hits = %d, want 2 (issues + pulls)", ghHits)
 	}
-	if !strings.Contains(ghPath, "/repos/foo/bar/issues") {
-		t.Errorf("github path = %q, want /repos/foo/bar/issues...", ghPath)
+	if !strings.Contains(ghIssuesPath, "/repos/foo/bar/issues") {
+		t.Errorf("github issues path = %q, want /repos/foo/bar/issues...", ghIssuesPath)
 	}
 	if ghAuth != "Bearer "+fakeToken {
 		t.Errorf("authorization header = %q, want %q", ghAuth, "Bearer "+fakeToken)
