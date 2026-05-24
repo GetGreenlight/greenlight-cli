@@ -74,13 +74,17 @@ func main() {
 	if cmdline := os.Getenv("MOCK_CLAUDE_EXEC"); cmdline != "" {
 		fields := strings.Fields(cmdline)
 		var execErr error
+		var combined []byte
 		if len(fields) > 0 {
-			execErr = exec.Command(fields[0], fields[1:]...).Run()
+			combined, execErr = exec.Command(fields[0], fields[1:]...).CombinedOutput()
 		}
 		if rp := os.Getenv("MOCK_CLAUDE_EXEC_RESULT"); rp != "" {
 			result := "ok"
 			if execErr != nil {
 				result = "err: " + execErr.Error()
+			}
+			if len(combined) > 0 {
+				result += "\noutput: " + string(combined)
 			}
 			os.WriteFile(rp, []byte(result), 0644)
 		}

@@ -111,13 +111,20 @@ func seccompSupervisorLoop(notifFd int, agent string, ir *interposeRelay) {
 			return
 		}
 
-		allow := handleSeccompNotif(notifFd, &notif, agent, ir)
+		allow, stop := handleSeccompNotif(notifFd, &notif, agent, ir)
 
 		var resp seccompNotifResp
 		resp.ID = notif.ID
-		if allow {
+		switch {
+		case allow:
 			resp.Flags = seccompUserNotifFlagContinue
-		} else {
+		case stop:
+			// Stop variant — return EPERM so the agent sees
+			// "operation not permitted" and the cli system prompt
+			// can treat it as a hard halt.
+			resp.Val = -1
+			resp.Error = -int32(syscall.EPERM)
+		default:
 			resp.Val = -1
 			resp.Error = -int32(syscall.EACCES)
 		}
@@ -132,19 +139,22 @@ func seccompSupervisorLoop(notifFd int, agent string, ir *interposeRelay) {
 	}
 }
 
-// handleSeccompNotif processes a single notification. Returns true to allow.
-func handleSeccompNotif(notifFd int, notif *seccompNotif, agent string, ir *interposeRelay) bool {
+// handleSeccompNotif processes a single notification. Returns
+// (allow, stop): allow=true continues the syscall; allow=false with
+// stop=true denies with EPERM (stop variant); allow=false with
+// stop=false denies with EACCES (soft deny).
+func handleSeccompNotif(notifFd int, notif *seccompNotif, agent string, ir *interposeRelay) (bool, bool) {
 	switch int(notif.Data.Nr) {
 	case sysOpenat:
 		return handleSeccompOpenat(notifFd, notif, agent, ir)
 	case sysRenameat, sysRenameat2:
 		return handleSeccompRename(notifFd, notif, agent, ir)
 	default:
-		return true
+		return true, false
 	}
 }
 
-func handleSeccompOpenat(notifFd int, notif *seccompNotif, agent string, ir *interposeRelay) bool {
+func handleSeccompOpenat(notifFd int, notif *seccompNotif, agent string, ir *interposeRelay) (bool, bool) {
 	pid := notif.PID
 	dirfd := int32(notif.Data.Args[0])
 	pathPtr := notif.Data.Args[1]
@@ -154,7 +164,7 @@ func handleSeccompOpenat(notifFd int, notif *seccompNotif, agent string, ir *int
 	path, err := readStringFromProc(pid, pathPtr)
 	if err != nil {
 		log.Printf("Seccomp: failed to read path from pid %d, denying: %v", pid, err)
-		return false
+		return false, false
 	}
 
 	// Resolve relative paths
@@ -172,7 +182,7 @@ func handleSeccompOpenat(notifFd int, notif *seccompNotif, agent string, ir *int
 
 	// Quick classification — auto-allow paths that don't need permission
 	if !seccompNeedsWritePermission(path, flags) {
-		return true
+		return true, false
 	}
 
 	// Resolve .tmp intermediate to real target path.
@@ -184,12 +194,12 @@ func handleSeccompOpenat(notifFd int, notif *seccompNotif, agent string, ir *int
 
 	// Check permission cache — avoid re-prompting for the same file
 	if seccompPermCacheAllowed(displayPath) {
-		return true
+		return true, false
 	}
 
 	// Verify notification is still valid (TOCTOU check)
 	if !seccompNotifValid(notifFd, notif.ID) {
-		return true
+		return true, false
 	}
 
 	// Determine tool name based on the real target path
@@ -204,7 +214,7 @@ func handleSeccompOpenat(notifFd int, notif *seccompNotif, agent string, ir *int
 	return seccompRequestPermission(toolName, toolInput, displayPath, agent, ir)
 }
 
-func handleSeccompRename(notifFd int, notif *seccompNotif, agent string, ir *interposeRelay) bool {
+func handleSeccompRename(notifFd int, notif *seccompNotif, agent string, ir *interposeRelay) (bool, bool) {
 	pid := notif.PID
 	newdirfd := int32(notif.Data.Args[2])
 	newpathPtr := notif.Data.Args[3]
@@ -212,7 +222,7 @@ func handleSeccompRename(notifFd int, notif *seccompNotif, agent string, ir *int
 	newPath, err := readStringFromProc(pid, newpathPtr)
 	if err != nil {
 		log.Printf("Seccomp: failed to read rename path from pid %d, denying: %v", pid, err)
-		return false
+		return false, false
 	}
 
 	if !filepath.IsAbs(newPath) {
@@ -228,11 +238,11 @@ func handleSeccompRename(notifFd int, notif *seccompNotif, agent string, ir *int
 	}
 
 	if !seccompNeedsRenamePermission(newPath) {
-		return true
+		return true, false
 	}
 
 	if !seccompNotifValid(notifFd, notif.ID) {
-		return true
+		return true, false
 	}
 
 	// Read old path for context
@@ -271,13 +281,15 @@ func handleSeccompRename(notifFd int, notif *seccompNotif, agent string, ir *int
 }
 
 // seccompRequestPermission sends a permission request through the same
-// racePermission path used by LD_PRELOAD interpose requests.
-func seccompRequestPermission(toolName string, toolInput map[string]interface{}, path, agent string, ir *interposeRelay) bool {
+// racePermission path used by LD_PRELOAD interpose requests. Returns
+// (allow, stop): stop is true only when the request was denied with
+// the interrupt flag set.
+func seccompRequestPermission(toolName string, toolInput map[string]interface{}, path, agent string, ir *interposeRelay) (bool, bool) {
 	relay := ir.GetRelay()
 
 	if relay == nil || relay.wsConn == nil {
 		log.Printf("Seccomp: no relay available, denying %s %s", toolName, path)
-		return false
+		return false, false
 	}
 
 	payload := map[string]interface{}{
@@ -296,7 +308,7 @@ func seccompRequestPermission(toolName string, toolInput map[string]interface{},
 		writePermissionDenied(path)
 	}
 
-	return resp.Allow
+	return resp.Allow, resp.Interrupt
 }
 
 // writePermissionDenied writes the standard denial message. This is best-effort.

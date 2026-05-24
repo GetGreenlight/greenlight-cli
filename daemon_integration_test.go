@@ -568,16 +568,27 @@ func TestIntegration_Daemon_Permission_Allow(t *testing.T) {
 	runPermissionTest(t, "allow")
 }
 
-// TestIntegration_Daemon_Permission_Deny is the deny counterpart. The
-// mock server denies the spawn; the C library writes
-// "[GREENLIGHT] Permission denied." to stderr (which appears on the
-// client PTY in daemon mode) and returns an error to mock_claude, which
-// reports "err: ...".
+// TestIntegration_Daemon_Permission_Deny is the soft-deny counterpart.
+// The mock server denies the spawn; the C library writes
+// "[GREENLIGHT] Permission denied." to stderr, _exits 126, and
+// mock_claude reports "err: exit status 126" plus the captured stderr.
 func TestIntegration_Daemon_Permission_Deny(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("interpose spawn interception via DYLD is macOS-specific in this harness")
 	}
 	runPermissionTest(t, "deny")
+}
+
+// TestIntegration_Daemon_Permission_Stop is the deny+stop counterpart.
+// The mock server denies with interrupt:true; the C library writes
+// "[GREENLIGHT] Operation not permitted. Stop all work immediately."
+// to stderr and _exits 137. Exercises the stop branch the agent system
+// prompt teaches the model to treat as a hard halt.
+func TestIntegration_Daemon_Permission_Stop(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("interpose spawn interception via DYLD is macOS-specific in this harness")
+	}
+	runPermissionTest(t, "deny_stop")
 }
 
 // runPermissionTest is the shared body for the allow/deny variants.
@@ -634,8 +645,18 @@ func runPermissionTest(t *testing.T, decision string) {
 			t.Errorf("expected exec ok, got %q", result)
 		}
 	case "deny":
-		if !strings.HasPrefix(result, "err") {
-			t.Errorf("expected exec err (spawn rejected by interpose), got %q", result)
+		if !strings.Contains(result, "exit status 126") {
+			t.Errorf("expected exit status 126 (soft deny), got %q", result)
+		}
+		if !strings.Contains(result, "[GREENLIGHT] Permission denied.") {
+			t.Errorf("expected soft-deny stderr banner, got %q", result)
+		}
+	case "deny_stop":
+		if !strings.Contains(result, "exit status 137") {
+			t.Errorf("expected exit status 137 (stop), got %q", result)
+		}
+		if !strings.Contains(result, "[GREENLIGHT] Operation not permitted. Stop all work immediately.") {
+			t.Errorf("expected stop stderr banner, got %q", result)
 		}
 	}
 }
@@ -659,14 +680,26 @@ func TestIntegration_Daemon_Seccomp_Allow(t *testing.T) {
 	runSeccompTest(t, "allow")
 }
 
-// TestIntegration_Daemon_Seccomp_Deny is the deny counterpart. The mock
-// server denies; the supervisor returns ENOSYS for the openat; mock_claude
-// reports an error.
+// TestIntegration_Daemon_Seccomp_Deny is the soft-deny counterpart.
+// The mock server denies; the supervisor returns EACCES for the openat;
+// mock_claude reports an error containing "permission denied".
 func TestIntegration_Daemon_Seccomp_Deny(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("seccomp supervisor is Linux-only")
 	}
 	runSeccompTest(t, "deny")
+}
+
+// TestIntegration_Daemon_Seccomp_Stop is the deny+stop counterpart.
+// The mock server denies with interrupt:true; the supervisor returns
+// EPERM for the openat; mock_claude reports an error containing
+// "operation not permitted". Exercises the stop branch the agent
+// system prompt teaches the model to treat as a hard halt.
+func TestIntegration_Daemon_Seccomp_Stop(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("seccomp supervisor is Linux-only")
+	}
+	runSeccompTest(t, "deny_stop")
 }
 
 // runSeccompTest is the shared body for the allow/deny variants.
@@ -731,8 +764,12 @@ func runSeccompTest(t *testing.T, decision string) {
 			t.Errorf("expected target file written: %v", err)
 		}
 	case "deny":
-		if !strings.HasPrefix(result, "err") {
-			t.Errorf("expected write err (rejected by seccomp), got %q", result)
+		if !strings.Contains(strings.ToLower(result), "permission denied") {
+			t.Errorf("expected 'permission denied' (EACCES) in result, got %q", result)
+		}
+	case "deny_stop":
+		if !strings.Contains(strings.ToLower(result), "operation not permitted") {
+			t.Errorf("expected 'operation not permitted' (EPERM) in result, got %q", result)
 		}
 	}
 }
@@ -1455,9 +1492,12 @@ type permissionRequest struct {
 
 // startPermissionAutoResponder runs a goroutine that watches the
 // session's inbox for permission_request frames and sends a
-// permission_response back. The decide callback returns "allow" or
-// "deny" given the request. Calling the returned stop func waits for
-// the goroutine and returns the requests it answered (in order).
+// permission_response back. The decide callback returns "allow",
+// "deny", or "deny_stop" given the request — "deny_stop" sets
+// interrupt:true so the interpose library returns its stop variant
+// (exit 137, "Operation not permitted" stderr). Calling the returned
+// stop func waits for the goroutine and returns the requests it
+// answered (in order).
 func startPermissionAutoResponder(
 	t *testing.T,
 	sess *mockserver.Session,
@@ -1491,6 +1531,7 @@ func startPermissionAutoResponder(
 					"type":       "permission_response",
 					"request_id": pr.Data.RequestID,
 					"behavior":   behavior,
+					"interrupt":  behavior == "deny_stop",
 					"message":    "test " + behavior,
 				})
 			}
