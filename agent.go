@@ -111,12 +111,10 @@ func agentSupportsResume(agent string) bool {
 // greenlightSystemPrompt is appended to the agent's system prompt to teach it
 // how to interpret permission denials from the Greenlight interpose library.
 const greenlightSystemPrompt = `Tool calls are managed by a permission system called Greenlight. ` +
-	`If a command exits with code 126, or a file operation fails with "Permission denied", ` +
-	`the user has explicitly denied this action. ` +
+	`If a tool call fails with "Permission denied" (in stderr or as a file operation error), the user has explicitly denied this action. ` +
 	`Do not retry the same action. Try a different approach or ask the user what they'd like instead. ` +
-	`If a command exits with code 127, or a file operation fails with "Operation not permitted", ` +
-	`the user wants you to stop. Do not continue with any further tool calls. ` +
-	`Explain what you were doing and wait for new instructions.` +
+	`If a tool call fails with "Operation not permitted" (in stderr or as a file operation error), the user wants you to stop. ` +
+	`Do not continue with any further tool calls. Explain what you were doing and wait for new instructions.` +
 	"\n\n" +
 	`Encrypted secrets (API tokens, OAuth credentials, etc.) may be available via the greenlight CLI. ` +
 	`Run "greenlight secrets list" to see available keys. ` +
