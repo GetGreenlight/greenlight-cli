@@ -46,6 +46,7 @@ type sessionWS struct {
 	agent      string // server-side agent name (e.g. "claude-code")
 	localAgent string // local agent name (e.g. "claude") — used for skill discovery paths
 	cwd        string
+	ticket     string // optional github:owner/repo#N ref from --ticket
 	version    string
 	injectFunc func([]byte) error
 	killFunc   func()
@@ -375,6 +376,10 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 		d.handleListSkills(data)
 	case "list_tickets":
 		d.handleListTickets(data)
+	case "open_pr":
+		d.handleOpenPR(data)
+	case "merge_pr":
+		d.handleMergePR(data)
 	case "set_session_name":
 		d.handleSetSessionName(data)
 	default:

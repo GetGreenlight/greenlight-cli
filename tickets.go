@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -27,12 +29,23 @@ func githubAPIBase() string {
 }
 
 type ticket struct {
-	Number    int      `json:"number"`
-	Title     string   `json:"title"`
-	State     string   `json:"state"`
-	Labels    []string `json:"labels"`
-	HTMLURL   string   `json:"html_url"`
-	UpdatedAt string   `json:"updated_at"`
+	Number    int       `json:"number"`
+	Title     string    `json:"title"`
+	State     string    `json:"state"`
+	Labels    []string  `json:"labels"`
+	HTMLURL   string    `json:"html_url"`
+	UpdatedAt string    `json:"updated_at"`
+	LinkedPR  *linkedPR `json:"linked_pr,omitempty"`
+}
+
+// linkedPR is the basic v2.6.0 form of the linked-PR metadata.
+// v2.6.1 will add mergeable_state/checks_conclusion/review_decision via a
+// per-PR detail call; for now iOS renders whatever's present.
+type linkedPR struct {
+	Number  int    `json:"number"`
+	HTMLURL string `json:"html_url"`
+	State   string `json:"state"`
+	Draft   bool   `json:"draft"`
 }
 
 // handleListTickets resolves the session's repo from its cwd, fetches open
@@ -85,6 +98,15 @@ func (d *DaemonWS) serveListTickets(relayID, state string) {
 		d.sendTicketsListed(relayID, owner, repo, nil, err.Error())
 		return
 	}
+
+	// Enrich with linked_pr metadata. Failures here are non-fatal: we still
+	// return the tickets, just without the In-Review column information.
+	if prs, err := fetchOpenGitHubPRs(string(token), owner, repo); err != nil {
+		log.Printf("daemon-ws: linked_pr enrichment failed: %v", err)
+	} else {
+		attachLinkedPRs(items, prs)
+	}
+
 	d.sendTicketsListed(relayID, owner, repo, items, "")
 }
 
@@ -230,6 +252,40 @@ func fetchGitHubIssues(token, owner, repo, state string) ([]ticket, error) {
 	return parseIssuesResponse(body)
 }
 
+// fetchGitHubIssueTitle returns the title of a single issue (or PR).
+// Used by the ticket-worktree path to slug the branch name. Returns ""
+// (and a non-nil error) on any failure — callers fall back to a slugless branch.
+func fetchGitHubIssueTitle(token, owner, repo string, number int) (string, error) {
+	u := fmt.Sprintf("%s/repos/%s/%s/issues/%d",
+		strings.TrimRight(githubAPIBase(), "/"),
+		url.PathEscape(owner), url.PathEscape(repo), number)
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("github %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out struct {
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", err
+	}
+	return out.Title, nil
+}
+
 // parseIssuesResponse decodes the GitHub /issues response and drops pull
 // requests. Split out from fetchGitHubIssues so the PR-filter — the
 // gotcha the API actually has — can be tested without an HTTP fixture.
@@ -268,4 +324,109 @@ func parseIssuesResponse(body []byte) ([]ticket, error) {
 		})
 	}
 	return out, nil
+}
+
+// rawPR is the subset of GitHub's PR response we need for linked_pr matching.
+type rawPR struct {
+	Number  int    `json:"number"`
+	Title   string `json:"title"`
+	Body    string `json:"body"`
+	HTMLURL string `json:"html_url"`
+	State   string `json:"state"`
+	Draft   bool   `json:"draft"`
+}
+
+// fetchOpenGitHubPRs lists open PRs in a repo (up to 100). The caller uses
+// title + body to look for closing keywords against the issue list.
+func fetchOpenGitHubPRs(token, owner, repo string) ([]rawPR, error) {
+	u := fmt.Sprintf("%s/repos/%s/%s/pulls?state=open&per_page=100",
+		strings.TrimRight(githubAPIBase(), "/"),
+		url.PathEscape(owner), url.PathEscape(repo))
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("github %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out []rawPR
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("parse pulls: %w", err)
+	}
+	return out, nil
+}
+
+// closingKeywordRE matches GitHub's closing keywords + issue reference:
+// (close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved) #N.
+// The form `owner/repo#N` (cross-repo) is intentionally not matched here —
+// the issue scopes cross-repo linkage to a future phase.
+var closingKeywordRE = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b`)
+
+// parseClosingKeywords pulls every issue number referenced by a closing
+// keyword out of free-form PR text (title + body).
+func parseClosingKeywords(text string) []int {
+	matches := closingKeywordRE.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := make(map[int]struct{}, len(matches))
+	out := make([]int, 0, len(matches))
+	for _, m := range matches {
+		n, err := strconv.Atoi(m[1])
+		if err != nil || n <= 0 {
+			continue
+		}
+		if _, dup := seen[n]; dup {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	return out
+}
+
+// attachLinkedPRs walks the PR list, parses closing keywords out of each
+// PR's title+body, and attaches a linkedPR to every matching issue.
+// Non-draft PRs win over drafts; otherwise first match wins.
+func attachLinkedPRs(items []ticket, prs []rawPR) {
+	if len(items) == 0 || len(prs) == 0 {
+		return
+	}
+	idx := make(map[int]*ticket, len(items))
+	for i := range items {
+		idx[items[i].Number] = &items[i]
+	}
+	for _, pr := range prs {
+		text := pr.Title + "\n" + pr.Body
+		for _, n := range parseClosingKeywords(text) {
+			t, ok := idx[n]
+			if !ok {
+				continue
+			}
+			// Prefer non-draft when overwriting an existing match.
+			if t.LinkedPR != nil && t.LinkedPR.Draft == pr.Draft {
+				continue // keep first match at same draft status
+			}
+			if t.LinkedPR != nil && !t.LinkedPR.Draft && pr.Draft {
+				continue // already have a non-draft, don't downgrade
+			}
+			t.LinkedPR = &linkedPR{
+				Number:  pr.Number,
+				HTMLURL: pr.HTMLURL,
+				State:   pr.State,
+				Draft:   pr.Draft,
+			}
+		}
+	}
 }

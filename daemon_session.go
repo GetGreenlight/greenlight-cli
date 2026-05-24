@@ -105,6 +105,27 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	if d.daemonWS == nil {
 		return nil, fmt.Errorf("daemon WebSocket not connected")
 	}
+
+	// If the session carries a github ticket and cwd is the matching repo,
+	// create (or reuse) a worktree under ~/.greenlight/worktrees/ and switch
+	// the session's cwd to it. On any failure prepareTicketWorktree logs and
+	// returns the original cwd, so we never block session start.
+	if ticket != "" {
+		cwd = prepareTicketWorktree(ticket, cwd, func(o, r string, n int) string {
+			tok, err := d.daemonWS.fetchGitHubToken()
+			if err != nil {
+				log.Printf("worktree: skip title fetch: %v", err)
+				return ""
+			}
+			t, err := fetchGitHubIssueTitle(string(tok), o, r, n)
+			if err != nil {
+				log.Printf("worktree: title fetch: %v", err)
+				return ""
+			}
+			return t
+		})
+	}
+
 	skills, err := d.daemonWS.StartSession(relayID, proj, agentServerName(agent), cwd, version, sessionName)
 	if err != nil {
 		return nil, fmt.Errorf("session start failed: %w", err)
@@ -168,6 +189,7 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		sw.agent = agentServerName(agent)
 		sw.localAgent = agent
 		sw.cwd = cwd
+		sw.ticket = ticket
 		sw.version = version
 		if sessionName != "" {
 			sw.name = sessionName
