@@ -49,6 +49,68 @@ type sessionWS struct {
 	version    string
 	injectFunc func([]byte) error
 	killFunc   func()
+
+	// Human-readable session name (like a ChatGPT/Claude conversation title).
+	// Assigned automatically from the first user message, or explicitly by the
+	// user from the phone. Guarded by nameMu.
+	nameMu  sync.Mutex
+	name    string
+	nameSet bool // a name (auto-derived or user-set) has been assigned
+}
+
+// Name returns the session's current display name.
+func (sw *sessionWS) Name() string {
+	sw.nameMu.Lock()
+	defer sw.nameMu.Unlock()
+	return sw.name
+}
+
+// named reports whether a name has been assigned yet.
+func (sw *sessionWS) named() bool {
+	sw.nameMu.Lock()
+	defer sw.nameMu.Unlock()
+	return sw.nameSet
+}
+
+// SetName assigns an explicit (user-provided) name and notifies the server.
+func (sw *sessionWS) SetName(name string) {
+	sw.nameMu.Lock()
+	changed := sw.name != name
+	sw.name = name
+	sw.nameSet = true
+	sw.nameMu.Unlock()
+	if changed {
+		sw.daemon.sendSessionRenamed(sw.relayID, name)
+	}
+}
+
+// autoName assigns a name derived from the first user message, but only if no
+// name has been set yet. Safe to call repeatedly.
+func (sw *sessionWS) autoName(name string) {
+	if name == "" {
+		return
+	}
+	sw.nameMu.Lock()
+	if sw.nameSet {
+		sw.nameMu.Unlock()
+		return
+	}
+	sw.name = name
+	sw.nameSet = true
+	sw.nameMu.Unlock()
+	log.Printf("daemon-ws: auto-named session %s: %q", sw.relayID, name)
+	sw.daemon.sendSessionRenamed(sw.relayID, name)
+}
+
+// maybeAutoName parses a transcript line and, if it is the first user message,
+// derives a name from it. No-op once the session already has a name.
+func (sw *sessionWS) maybeAutoName(line string) {
+	if sw.named() {
+		return
+	}
+	if name := deriveSessionName(line); name != "" {
+		sw.autoName(name)
+	}
 }
 
 // NewDaemonWS creates a multiplexed WebSocket connection.
@@ -168,7 +230,7 @@ func (d *DaemonWS) SendRequest(msgType, requestID string, data interface{}, time
 // StartSession sends a session_start message over the daemon WS and waits
 // for the server to acknowledge it. This replaces HTTP enrollment for
 // sessions within an already-enrolled daemon.
-func (d *DaemonWS) StartSession(relayID, project, agent, cwd, version string) ([]Skill, error) {
+func (d *DaemonWS) StartSession(relayID, project, agent, cwd, version, name string) ([]Skill, error) {
 	// Store metadata on the session handle so we can re-register on reconnect
 	d.mu.RLock()
 	sw := d.sessions[relayID]
@@ -180,18 +242,19 @@ func (d *DaemonWS) StartSession(relayID, project, agent, cwd, version string) ([
 		sw.version = version
 	}
 
-	return d.sendSessionStart(relayID, project, agent, cwd, version)
+	return d.sendSessionStart(relayID, project, agent, cwd, version, name)
 }
 
 // sendSessionStart sends a session_start message and waits for ack. Returns
 // the skill bundle the server delivered for this session (may be empty).
-func (d *DaemonWS) sendSessionStart(relayID, project, agent, cwd, version string) ([]Skill, error) {
+func (d *DaemonWS) sendSessionStart(relayID, project, agent, cwd, version, name string) ([]Skill, error) {
 	hostname, _ := os.Hostname()
 	data := map[string]string{
 		"project": project,
 		"agent":   agent,
 		"cwd":     cwd,
 		"version": version,
+		"name":    name,
 	}
 	dataBytes, _ := json.Marshal(data)
 
@@ -246,7 +309,7 @@ func (d *DaemonWS) reregisterSessions() {
 	for _, sw := range sessions {
 		// Reconnect re-registers existing sessions; skills are installed once
 		// at original session start, so the returned list is discarded here.
-		if _, err := d.sendSessionStart(sw.relayID, sw.project, sw.agent, sw.cwd, sw.version); err != nil {
+		if _, err := d.sendSessionStart(sw.relayID, sw.project, sw.agent, sw.cwd, sw.version, sw.Name()); err != nil {
 			log.Printf("daemon-ws: failed to re-register session %s: %v", sw.relayID, err)
 		} else {
 			log.Printf("daemon-ws: re-registered session %s", sw.relayID)
@@ -303,9 +366,147 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 		d.handleProjectHistory(data)
 	case "list_skills":
 		d.handleListSkills(data)
+	case "set_session_name":
+		d.handleSetSessionName(data)
 	default:
 		log.Printf("daemon-ws: unknown control message: %s", msg.Type)
 	}
+}
+
+// sendSessionRenamed notifies the server that a session's name changed.
+func (d *DaemonWS) sendSessionRenamed(relayID, name string) {
+	msg := map[string]string{
+		"type":     "session_renamed",
+		"relay_id": relayID,
+		"name":     name,
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return
+	}
+	d.ws.SendText(data)
+}
+
+// sessionName returns the in-memory name for a live session, or "".
+func (d *DaemonWS) sessionName(relayID string) string {
+	d.mu.RLock()
+	sw := d.sessions[relayID]
+	d.mu.RUnlock()
+	if sw == nil {
+		return ""
+	}
+	return sw.Name()
+}
+
+// handleSetSessionName applies a name change requested from the phone. It works
+// for both live sessions (in-memory handle) and completed sessions (on-disk
+// record), then echoes session_renamed back to the server.
+func (d *DaemonWS) handleSetSessionName(data []byte) {
+	var msg struct {
+		RelayID string `json:"relay_id"`
+		Name    string `json:"name"`
+	}
+	if json.Unmarshal(data, &msg) != nil || msg.RelayID == "" {
+		log.Printf("daemon-ws: set_session_name missing relay_id")
+		return
+	}
+	name := sanitizeSessionName(msg.Name)
+
+	// Persist to the on-disk record if one exists. Live sessions have no record
+	// until they end, so this is a no-op for them (the name is held in memory
+	// and written when saveSessionRecord runs at session exit).
+	updateSessionRecordName(msg.RelayID, name)
+
+	d.mu.RLock()
+	sw := d.sessions[msg.RelayID]
+	d.mu.RUnlock()
+	if sw != nil {
+		sw.SetName(name) // updates the live handle and sends session_renamed
+		return
+	}
+	// Completed session — no live handle, so echo the rename directly.
+	d.sendSessionRenamed(msg.RelayID, name)
+	log.Printf("daemon-ws: renamed completed session %s: %q", msg.RelayID, name)
+}
+
+// sanitizeSessionName normalizes a user-provided session name: single-line,
+// trimmed, length-capped.
+func sanitizeSessionName(name string) string {
+	name = strings.ReplaceAll(name, "\r", " ")
+	name = strings.ReplaceAll(name, "\n", " ")
+	name = strings.TrimSpace(name)
+	const maxLen = 80
+	if len(name) > maxLen {
+		name = strings.TrimSpace(name[:maxLen])
+	}
+	return name
+}
+
+// deriveSessionName extracts a short title from a transcript line if it is a
+// genuine first user message. Returns "" for anything else (assistant turns,
+// tool results, system/command-injected messages).
+func deriveSessionName(line string) string {
+	var entry struct {
+		Type    string `json:"type"`
+		Message struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal([]byte(line), &entry) != nil || entry.Type != "user" {
+		return ""
+	}
+	if len(entry.Message.Content) == 0 {
+		return ""
+	}
+	// Content is either a plain string or an array of typed blocks.
+	var text string
+	if json.Unmarshal(entry.Message.Content, &text) != nil {
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(entry.Message.Content, &blocks) != nil {
+			return ""
+		}
+		for _, b := range blocks {
+			if b.Type == "tool_result" {
+				return "" // a tool result, not a typed user message
+			}
+			if b.Type == "text" && b.Text != "" {
+				if text != "" {
+					text += " "
+				}
+				text += b.Text
+			}
+		}
+	}
+	return summarizeSessionName(text)
+}
+
+// summarizeSessionName turns a user message into a one-line title: the first
+// few words, with whitespace collapsed and length capped.
+func summarizeSessionName(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	// Skip system context / command-injected / interrupted-turn messages.
+	if strings.HasPrefix(text, "<") || strings.HasPrefix(text, "[Request interrupted") {
+		return ""
+	}
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return ""
+	}
+	if len(fields) > 7 {
+		fields = fields[:7]
+	}
+	name := strings.Join(fields, " ")
+	const maxLen = 60
+	if len(name) > maxLen {
+		name = strings.TrimSpace(name[:maxLen])
+	}
+	return name
 }
 
 // handleTextFrame handles text frames not matched by routePermissionResponse.

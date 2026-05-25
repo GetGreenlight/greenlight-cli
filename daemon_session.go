@@ -45,6 +45,11 @@ type Session struct {
 	libPath        string
 	libExtracted   bool
 
+	// Per-session bin dir containing a `greenlight` symlink pointing at the
+	// running binary; prepended to the child agent's PATH.
+	cliShimDir   string
+	cliShimClean func()
+
 	// Client connection (nil if detached)
 	client   net.Conn
 	clientMu sync.Mutex
@@ -87,11 +92,19 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	cmdArgs := setup.Args
 	relayID := setup.RelayID
 
+	// On resume, carry the session's name forward from its saved record.
+	var sessionName string
+	if req.Resume != "" {
+		if rec, err := loadSessionRecord(req.Resume); err == nil {
+			sessionName = rec.Name
+		}
+	}
+
 	// Register session with the server via daemon WS (no phone approval needed)
 	if d.daemonWS == nil {
 		return nil, fmt.Errorf("daemon WebSocket not connected")
 	}
-	skills, err := d.daemonWS.StartSession(relayID, proj, agentServerName(agent), cwd, version)
+	skills, err := d.daemonWS.StartSession(relayID, proj, agentServerName(agent), cwd, version, sessionName)
 	if err != nil {
 		return nil, fmt.Errorf("session start failed: %w", err)
 	}
@@ -120,6 +133,10 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	}
 
 	exportEnvs := buildExportEnvs(devID, relayID, proj, s.bridgePath, agent)
+	if shimDir, cleanup := setupCLIShim(relayID); shimDir != "" {
+		s.cliShimDir = shimDir
+		s.cliShimClean = cleanup
+	}
 	command, cmdArgs, interpose, err := setupInterpose(agent, command, cmdArgs, relayID, cwd, exportEnvs)
 	if err != nil {
 		s.cleanup()
@@ -132,7 +149,7 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	s.interposeRelay = interpose.Relay
 
 	// Create the relay (PTY only, no per-session WebSocket) in daemon mode
-	r, err := NewDaemon(command, cmdArgs, exportEnvs, cwd, req.Winsize, req.Env)
+	r, err := NewDaemon(command, cmdArgs, exportEnvs, cwd, req.Winsize, req.Env, s.cliShimDir)
 	if err != nil {
 		s.cleanup()
 		return nil, fmt.Errorf("failed to create relay: %w", err)
@@ -151,6 +168,10 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		sw.localAgent = agent
 		sw.cwd = cwd
 		sw.version = version
+		if sessionName != "" {
+			sw.name = sessionName
+			sw.nameSet = true
+		}
 		r.wsConn = sw
 
 		// Start bridge tailer using the session's WS handle
@@ -317,6 +338,9 @@ func (s *Session) cleanup() {
 	if s.libPath != "" && s.libExtracted {
 		os.Remove(s.libPath)
 	}
+	if s.cliShimClean != nil {
+		s.cliShimClean()
+	}
 	if s.connectPidFile != "" {
 		os.Remove(s.connectPidFile)
 		cleanupAgentFiles(s.agent, s.cwd)
@@ -339,7 +363,7 @@ func (s *Session) cleanup() {
 // NewDaemon creates a Relay configured for daemon mode. The PTY is created
 // but terminal raw mode is NOT set (the client handles that). The child
 // process's working directory is set to cwd.
-func NewDaemon(command string, args []string, exportEnvs map[string]string, cwd string, winsize *ipcWinsize, clientEnv map[string]string) (*Relay, error) {
+func NewDaemon(command string, args []string, exportEnvs map[string]string, cwd string, winsize *ipcWinsize, clientEnv map[string]string, cliShimDir string) (*Relay, error) {
 	master, slave, err := openPTY()
 	if err != nil {
 		return nil, fmt.Errorf("openPTY: %w", err)
@@ -366,6 +390,23 @@ func NewDaemon(command string, args []string, exportEnvs map[string]string, cwd 
 		}
 	} else {
 		childEnv = os.Environ()
+	}
+	// Prepend the per-session CLI shim dir to PATH so that any `greenlight`
+	// invocation by the agent resolves to *this* binary, regardless of what
+	// else is on the user's PATH. Done before exportEnvs so the rest of the
+	// env-building stays unchanged.
+	if cliShimDir != "" {
+		pathFound := false
+		for i, e := range childEnv {
+			if k, v, ok := strings.Cut(e, "="); ok && k == "PATH" {
+				childEnv[i] = "PATH=" + prependPATH(cliShimDir, v)
+				pathFound = true
+				break
+			}
+		}
+		if !pathFound {
+			childEnv = append(childEnv, "PATH="+cliShimDir)
+		}
 	}
 	// Override with greenlight-specific vars
 	for k, v := range exportEnvs {

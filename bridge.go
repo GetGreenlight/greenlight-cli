@@ -16,6 +16,9 @@ import (
 // After done is closed, drains any remaining lines before returning.
 func tailBridge(path string, ws WSConn, done <-chan struct{}, agent string) {
 	log.Printf("bridge: starting tail for %s (agent=%s)", path, agent)
+	// When the WS is a multiplexed session handle, watch the transcript for the
+	// first user message so the session can be auto-named.
+	sw, _ := ws.(*sessionWS)
 	// Wait for the bridge file to appear (hook creates it)
 	var f *os.File
 	for {
@@ -56,6 +59,9 @@ func tailBridge(path string, ws WSConn, done <-chan struct{}, agent string) {
 					if fullLine != "" {
 						msg := fmt.Sprintf(`{"type":"transcript","agent":%q,"data":%s}`, agent, fullLine)
 						ws.SendText([]byte(msg))
+						if sw != nil {
+							sw.maybeAutoName(fullLine)
+						}
 					}
 				} else {
 					// EOF or error — send any remaining buffered partial
@@ -86,6 +92,9 @@ func tailBridge(path string, ws WSConn, done <-chan struct{}, agent string) {
 				linesSent++
 				if linesSent == 1 {
 					log.Printf("bridge: first transcript line sent (%d bytes)", len(msg))
+				}
+				if sw != nil {
+					sw.maybeAutoName(fullLine)
 				}
 			}
 		} else if line != "" {

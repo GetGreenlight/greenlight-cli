@@ -11,13 +11,13 @@ import (
 	"strings"
 )
 
-// configPath returns the path to ~/.greenlight/config.
+// configPath returns the path to the greenlight config file.
 func configPath() (string, error) {
-	home, err := os.UserHomeDir()
+	dir, err := greenlightDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".greenlight", "config"), nil
+	return filepath.Join(dir, "config"), nil
 }
 
 // readConfigValue reads a value by key from ~/.greenlight/config.

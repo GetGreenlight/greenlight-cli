@@ -8,13 +8,13 @@ import (
 	"path/filepath"
 )
 
-// sessionsFilePath returns the path to ~/.greenlight/sessions.json.
+// sessionsFilePath returns the path to the sessions.json file.
 func sessionsFilePath() string {
-	home, err := os.UserHomeDir()
+	dir, err := greenlightDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".greenlight", "sessions.json")
+	return filepath.Join(dir, "sessions.json")
 }
 
 // loadSessions reads the conversation_id → relay_id mapping from disk.

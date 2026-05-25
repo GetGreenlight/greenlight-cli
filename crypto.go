@@ -17,11 +17,11 @@ import (
 
 // keyPath returns the path to the X25519 private key file.
 func keyPath() (string, error) {
-	home, err := os.UserHomeDir()
+	dir, err := greenlightDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".greenlight", "key"), nil
+	return filepath.Join(dir, "key"), nil
 }
 
 // generateKeypair creates a new X25519 keypair.

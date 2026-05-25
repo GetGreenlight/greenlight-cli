@@ -26,13 +26,13 @@ const (
 	historyTruncateLines = 500
 )
 
-// historyStorePath returns ~/.greenlight/history/
+// historyStorePath returns the directory holding per-project history JSONL.
 func historyStorePath() string {
-	home, err := os.UserHomeDir()
+	dir, err := greenlightDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".greenlight", "history")
+	return filepath.Join(dir, "history")
 }
 
 // sanitizeProject replaces path separators and dots to produce a safe filename.

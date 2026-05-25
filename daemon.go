@@ -142,16 +142,16 @@ func daemonSockPath() string {
 	if p := os.Getenv("GREENLIGHT_DAEMON_SOCK"); p != "" {
 		return p
 	}
-	return "/tmp/greenlight-daemon.sock"
+	return filepath.Join("/tmp", daemonSockName())
 }
 
 // daemonPidPath returns the path to the daemon's PID file.
 func daemonPidPath() string {
-	home, err := os.UserHomeDir()
+	dir, err := greenlightDir()
 	if err != nil {
 		return "/tmp/greenlight-daemon.pid"
 	}
-	return filepath.Join(home, ".greenlight", "daemon.pid")
+	return filepath.Join(dir, "daemon.pid")
 }
 
 // isDaemonRunning checks if a daemon is already running by probing the socket.
@@ -283,9 +283,10 @@ func ensureDaemon(deviceIDFlag string) error {
 // runDaemonForeground runs the daemon in the foreground (used by background start).
 func runDaemonForeground() {
 	// Set up logging
-	home, _ := os.UserHomeDir()
-	logDir := filepath.Join(home, ".greenlight")
-	os.MkdirAll(logDir, 0755)
+	logDir, _ := greenlightDir()
+	if logDir != "" {
+		os.MkdirAll(logDir, 0755)
+	}
 	logPath := filepath.Join(logDir, "daemon.log")
 	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
 		log.SetOutput(f)

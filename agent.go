@@ -110,6 +110,9 @@ func agentSupportsResume(agent string) bool {
 
 // greenlightSystemPrompt is appended to the agent's system prompt to teach it
 // how to interpret permission denials from the Greenlight interpose library.
+// Bare "greenlight" works across prod/dev/local builds because every session
+// prepends a per-session bin dir to the agent's PATH with a symlink that
+// points at the running binary (see setupCLIShim).
 const greenlightSystemPrompt = `Tool calls are managed by a permission system called Greenlight. ` +
 	`If a command exits with code 126, or a file operation fails with "Permission denied", ` +
 	`the user has explicitly denied this action. ` +
