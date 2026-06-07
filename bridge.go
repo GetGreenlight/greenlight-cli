@@ -94,6 +94,7 @@ func tailBridge(path string, ws WSConn, done <-chan struct{}, agent string) {
 					log.Printf("bridge: first transcript line sent (%d bytes)", len(msg))
 				}
 				if sw != nil {
+					sw.markTranscript()
 					sw.maybeAutoName(fullLine)
 				}
 			}

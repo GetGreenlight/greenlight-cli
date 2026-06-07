@@ -29,7 +29,9 @@ type InterposeSetup struct {
 
 // buildAgentCommand constructs the agent binary command, flags, session IDs,
 // and relay ID. This is the shared core between direct and daemon modes.
-func buildAgentCommand(agent, resume string) (*AgentSetup, error) {
+// If ticket is non-nil, agents that use --append-system-prompt get a line
+// pointing at the ticket URL.
+func buildAgentCommand(agent, resume string, ticket *TicketRef) (*AgentSetup, error) {
 	command := agentBinary(agent)
 	var cmdArgs []string
 
@@ -72,12 +74,12 @@ func buildAgentCommand(agent, resume string) (*AgentSetup, error) {
 	case "codex":
 		cmdArgs = append(cmdArgs, "--dangerously-bypass-approvals-and-sandbox")
 	case "claude":
-		cmdArgs = append(cmdArgs, "--dangerously-skip-permissions", "--append-system-prompt", greenlightSystemPrompt)
+		cmdArgs = append(cmdArgs, "--dangerously-skip-permissions", "--append-system-prompt", greenlightSystemPrompt(ticket))
 		if resume == "" && agentSessionID != "" {
 			cmdArgs = append(cmdArgs, "--session-id", agentSessionID)
 		}
 	case "pi":
-		cmdArgs = append(cmdArgs, "--append-system-prompt", greenlightSystemPrompt)
+		cmdArgs = append(cmdArgs, "--append-system-prompt", greenlightSystemPrompt(ticket))
 		if agentSessionID != "" {
 			sessPath := piSessionPath(agentSessionID, "")
 			if sessPath != "" {
@@ -134,13 +136,14 @@ func resolveDeviceAndProject(deviceID, project, cwd string) (string, string, err
 	return devID, proj, nil
 }
 
-// installAgentFiles installs agent-specific instruction files for agents that use them.
-func installAgentFiles(agent, relayID, cwd string) {
+// installAgentFiles installs agent-specific instruction files and hooks.
+func installAgentFiles(agent, relayID, cwd string, ticket *TicketRef) {
 	if agent == "gemini" || agent == "copilot" || agent == "cursor" || agent == "codex" {
-		if err := installGreenlightInstructions(agent, relayID, cwd); err != nil {
+		if err := installGreenlightInstructions(agent, relayID, cwd, ticket); err != nil {
 			log.Printf("Warning: failed to install agent instructions: %v", err)
 		}
 	}
+	installHooks(agent, cwd)
 }
 
 // buildExportEnvs returns the GREENLIGHT_* environment variables for the child process.

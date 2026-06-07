@@ -448,6 +448,140 @@ func TestIntegration_Daemon_ListSkills(t *testing.T) {
 	cs.Wait(10 * time.Second)
 }
 
+// TestIntegration_Daemon_Config exercises the config_get/config_set control
+// frames end to end: the server pushes them over the daemon WS, the daemon
+// applies/reads its config file, and replies config_set_result / config_loaded.
+// Covers host vs project scope, project-overrides-host resolution, and the
+// device_id / enum validation rejections.
+func TestIntegration_Daemon_Config(t *testing.T) {
+	testServerURL.ClearHandlers()
+	cs, cleanup := startConnectSession(t)
+	defer cleanup()
+
+	// Host-scope batch: a known enum key + an arbitrary secret name.
+	if err := cs.Sess.SendBinary(map[string]any{
+		"type":       "config_set",
+		"request_id": "c1",
+		"scope":      "host",
+		"set":        map[string]string{"agent": "codex", "tickets_secret": "HOST_TOK"},
+	}); err != nil {
+		t.Fatalf("send config_set host: %v", err)
+	}
+	if r := awaitConfigSetResult(t, cs.Sess, "c1", 5*time.Second); !r.Success {
+		t.Fatalf("host config_set failed: error=%q", r.Error)
+	}
+
+	// Project-scope override of the same enum key.
+	if err := cs.Sess.SendBinary(map[string]any{
+		"type":       "config_set",
+		"request_id": "c2",
+		"scope":      "project",
+		"project":    "test-proj",
+		"set":        map[string]string{"agent": "gemini"},
+	}); err != nil {
+		t.Fatalf("send config_set project: %v", err)
+	}
+	if r := awaitConfigSetResult(t, cs.Sess, "c2", 5*time.Second); !r.Success {
+		t.Fatalf("project config_set failed: error=%q", r.Error)
+	}
+
+	// config_get with a project returns both scopes; project overrides host.
+	if err := cs.Sess.SendBinary(map[string]any{
+		"type":       "config_get",
+		"request_id": "c3",
+		"project":    "test-proj",
+	}); err != nil {
+		t.Fatalf("send config_get: %v", err)
+	}
+	loaded := awaitConfigLoaded(t, cs.Sess, "c3", 5*time.Second)
+	if loaded.Config.Host["agent"] != "codex" {
+		t.Errorf("host.agent = %q, want codex", loaded.Config.Host["agent"])
+	}
+	if loaded.Config.Host["tickets_secret"] != "HOST_TOK" {
+		t.Errorf("host.tickets_secret = %q, want HOST_TOK", loaded.Config.Host["tickets_secret"])
+	}
+	if loaded.Config.Host["device_id"] != "" {
+		t.Errorf("device_id leaked into host config: %q", loaded.Config.Host["device_id"])
+	}
+	if loaded.Config.Project["agent"] != "gemini" {
+		t.Errorf("project.agent = %q, want gemini", loaded.Config.Project["agent"])
+	}
+
+	// device_id is forbidden.
+	cs.Sess.SendBinary(map[string]any{
+		"type": "config_set", "request_id": "c4", "scope": "host",
+		"set": map[string]string{"device_id": "evil"},
+	})
+	if r := awaitConfigSetResult(t, cs.Sess, "c4", 5*time.Second); r.Success || r.Error != "device_id_forbidden" {
+		t.Errorf("device_id set: got success=%v error=%q, want device_id_forbidden", r.Success, r.Error)
+	}
+
+	// Unknown agent is rejected.
+	cs.Sess.SendBinary(map[string]any{
+		"type": "config_set", "request_id": "c5", "scope": "host",
+		"set": map[string]string{"agent": "vim"},
+	})
+	if r := awaitConfigSetResult(t, cs.Sess, "c5", 5*time.Second); r.Success || r.Error != "invalid_agent" {
+		t.Errorf("bad agent: got success=%v error=%q, want invalid_agent", r.Success, r.Error)
+	}
+
+	// Syntactically bad custom key is rejected.
+	cs.Sess.SendBinary(map[string]any{
+		"type": "config_set", "request_id": "c6", "scope": "host",
+		"set": map[string]string{"bad key": "v"},
+	})
+	if r := awaitConfigSetResult(t, cs.Sess, "c6", 5*time.Second); r.Success || r.Error != "invalid_key" {
+		t.Errorf("bad key: got success=%v error=%q, want invalid_key", r.Success, r.Error)
+	}
+
+	// project scope without a project name is rejected.
+	cs.Sess.SendBinary(map[string]any{
+		"type": "config_set", "request_id": "c7", "scope": "project",
+		"set": map[string]string{"agent": "pi"},
+	})
+	if r := awaitConfigSetResult(t, cs.Sess, "c7", 5*time.Second); r.Success || r.Error != "missing_project" {
+		t.Errorf("missing project: got success=%v error=%q, want missing_project", r.Success, r.Error)
+	}
+
+	// Unknown scope is rejected.
+	cs.Sess.SendBinary(map[string]any{
+		"type": "config_set", "request_id": "c8", "scope": "galaxy",
+		"set": map[string]string{"agent": "pi"},
+	})
+	if r := awaitConfigSetResult(t, cs.Sess, "c8", 5*time.Second); r.Success || r.Error != "invalid_scope" {
+		t.Errorf("bad scope: got success=%v error=%q, want invalid_scope", r.Success, r.Error)
+	}
+
+	// unset over the wire removes the project override set earlier (c2).
+	cs.Sess.SendBinary(map[string]any{
+		"type": "config_set", "request_id": "c9", "scope": "project", "project": "test-proj",
+		"unset": []string{"agent"},
+	})
+	if r := awaitConfigSetResult(t, cs.Sess, "c9", 5*time.Second); !r.Success {
+		t.Fatalf("unset failed: error=%q", r.Error)
+	}
+
+	// Host-only config_get (no project) returns the host scope and an empty
+	// project map.
+	cs.Sess.SendBinary(map[string]any{"type": "config_get", "request_id": "c10"})
+	hostOnly := awaitConfigLoaded(t, cs.Sess, "c10", 5*time.Second)
+	if hostOnly.Config.Host["agent"] != "codex" {
+		t.Errorf("host-only get: host.agent = %q, want codex", hostOnly.Config.Host["agent"])
+	}
+	if len(hostOnly.Config.Project) != 0 {
+		t.Errorf("host-only get: project map should be empty, got %v", hostOnly.Config.Project)
+	}
+
+	// And the project override is gone after the unset.
+	cs.Sess.SendBinary(map[string]any{"type": "config_get", "request_id": "c11", "project": "test-proj"})
+	afterUnset := awaitConfigLoaded(t, cs.Sess, "c11", 5*time.Second)
+	if _, ok := afterUnset.Config.Project["agent"]; ok {
+		t.Errorf("project override still present after unset: %v", afterUnset.Config.Project)
+	}
+
+	cs.Wait(10 * time.Second)
+}
+
 // TestIntegration_Daemon_ListSkills_Empty verifies the daemon replies
 // with an empty array (not null) when no skills are installed. The
 // distinction matters on the wire — clients distinguish "session has no
@@ -892,6 +1026,27 @@ func TestIntegration_Daemon_SessionTranscript(t *testing.T) {
 // daemon's sessions.json (the file that lookupConversationID reads).
 // Used by transcript tests to skip the live transcript-discovery path
 // and get straight to the handler under test.
+// seedDaemonConfig appends key=value entries to the daemon's config file. The
+// daemon writes its own keys (agent, host_id) at startup, and the file ends with
+// a newline, so appending is safe — the connect session reads config fresh.
+func seedDaemonConfig(t *testing.T, daemonHome string, kv map[string]string) {
+	t.Helper()
+	dir := filepath.Join(daemonHome, ".greenlight")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "config"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	for k, v := range kv {
+		if _, err := fmt.Fprintf(f, "%s=%s\n", k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func seedRelayMapping(t *testing.T, daemonHome, convID, relayID string) {
 	t.Helper()
 	dir := filepath.Join(daemonHome, ".greenlight")
@@ -1204,6 +1359,61 @@ func awaitSkillsListed(t *testing.T, sess *mockserver.Session, timeout time.Dura
 	return reply
 }
 
+type configSetResultReply struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	Success   bool   `json:"success"`
+	Error     string `json:"error"`
+}
+
+type configLoadedReply struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	Config    struct {
+		Host    map[string]string `json:"host"`
+		Project map[string]string `json:"project"`
+	} `json:"config"`
+	Error string `json:"error"`
+}
+
+func awaitConfigSetResult(t *testing.T, sess *mockserver.Session, requestID string, timeout time.Duration) configSetResultReply {
+	t.Helper()
+	matched := sess.WaitForFrame(func(raw json.RawMessage) bool {
+		var hdr struct {
+			Type      string `json:"type"`
+			RequestID string `json:"request_id"`
+		}
+		return json.Unmarshal(raw, &hdr) == nil && hdr.Type == "config_set_result" && hdr.RequestID == requestID
+	}, timeout)
+	if matched == nil {
+		t.Fatalf("did not receive config_set_result for %q within %v", requestID, timeout)
+	}
+	var reply configSetResultReply
+	if err := json.Unmarshal(matched, &reply); err != nil {
+		t.Fatalf("parse config_set_result: %v (raw=%s)", err, string(matched))
+	}
+	return reply
+}
+
+func awaitConfigLoaded(t *testing.T, sess *mockserver.Session, requestID string, timeout time.Duration) configLoadedReply {
+	t.Helper()
+	matched := sess.WaitForFrame(func(raw json.RawMessage) bool {
+		var hdr struct {
+			Type      string `json:"type"`
+			RequestID string `json:"request_id"`
+		}
+		return json.Unmarshal(raw, &hdr) == nil && hdr.Type == "config_loaded" && hdr.RequestID == requestID
+	}, timeout)
+	if matched == nil {
+		t.Fatalf("did not receive config_loaded for %q within %v", requestID, timeout)
+	}
+	var reply configLoadedReply
+	if err := json.Unmarshal(matched, &reply); err != nil {
+		t.Fatalf("parse config_loaded: %v (raw=%s)", err, string(matched))
+	}
+	return reply
+}
+
 // connectSession is the live state needed to drive a `greenlight connect`
 // session in a test: the running client process, the PTY master used to
 // inject input, the agent workdir, the daemon's home dir (for tests
@@ -1214,6 +1424,7 @@ type connectSession struct {
 	Master     *os.File
 	Workdir    string
 	DaemonHome string
+	DaemonTmp  string // daemon's TMPDIR; per-session shim dir lives here
 	Sess       *mockserver.Session
 	done       chan error
 }
@@ -1258,6 +1469,9 @@ type connectOpts struct {
 	// SkipMockClaudeOutput omits MOCK_CLAUDE_OUTPUT, letting mock_claude
 	// run to completion instead of blocking on stdin.
 	SkipMockClaudeOutput bool
+	// ConfigSeed writes key=value entries into the daemon's ~/.greenlight/config
+	// before the connect session starts (e.g. tickets_secret for shim tests).
+	ConfigSeed map[string]string
 }
 
 // startConnectSession boots a daemon (with a fresh enrolled host),
@@ -1284,6 +1498,10 @@ func startConnectSession(t *testing.T, opts ...connectOpts) (*connectSession, fu
 		daemonEnv = append(daemonEnv, "GREENLIGHT_DISABLE_INTERPOSE=1")
 	}
 	sockPath, tmpDir, daemonHome, daemonCleanup := startTestDaemonWithHome(t, t.TempDir(), daemonEnv...)
+
+	if len(opt.ConfigSeed) > 0 {
+		seedDaemonConfig(t, daemonHome, opt.ConfigSeed)
+	}
 
 	workDir := t.TempDir()
 	pathWithMock := filepath.Dir(mockClaudeBin) + ":" + os.Getenv("PATH")
@@ -1361,6 +1579,7 @@ func startConnectSession(t *testing.T, opts ...connectOpts) (*connectSession, fu
 		Master:     master,
 		Workdir:    workDir,
 		DaemonHome: daemonHome,
+		DaemonTmp:  tmpDir,
 		Sess:       sess,
 		done:       done,
 	}, cleanup

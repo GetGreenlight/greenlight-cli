@@ -38,6 +38,14 @@ func main() {
 		}
 	}
 
+	// Multi-call dispatch: when greenlight is invoked under a shimmed command
+	// name (via the per-session PATH symlink, e.g. argv[0] == "gh"), run the
+	// shim path instead of the normal subcommand dispatch.
+	if spec, ok := knownShims[filepath.Base(os.Args[0])]; ok {
+		runShim(spec, os.Args[1:])
+		return
+	}
+
 	if len(os.Args) < 2 {
 		runConnect(nil)
 		return
@@ -48,14 +56,20 @@ func main() {
 		runConnect(os.Args[2:])
 	case "stream":
 		runStream(os.Args[2:])
+	case "pair":
+		runPairCommand(os.Args[2:])
 	case "register":
 		runRegister(os.Args[2:])
 	case "agent":
 		runAgent(os.Args[2:])
+	case "config":
+		runConfig(os.Args[2:])
 	case "daemon":
 		runDaemon(os.Args[2:])
 	case "secrets":
 		runSecrets(os.Args[2:])
+	case "hook":
+		runHook(os.Args[2:])
 	case "run":
 		runRun(os.Args[2:])
 	case "update":
@@ -97,8 +111,10 @@ When no command is given, 'connect' is used by default.
 
 Commands:
   connect    Start an agent session with a remote relay to the Greenlight app
+  pair       Pair with the Greenlight app on your phone (QR code or numeric code)
   register   Register a device ID for the Greenlight app
   agent      Get or set the default agent runtime (claude, codex, copilot, cursor, gemini, pi)
+  config     Get, set, unset, or list config values (get, set, unset, list)
   daemon     Manage the background daemon (start, stop, status)
   secrets    Manage encrypted secrets (init, list, set, rm)
   run        Run a command with secrets injected into its environment

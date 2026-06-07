@@ -47,8 +47,16 @@ type sessionWS struct {
 	localAgent string // local agent name (e.g. "claude") — used for skill discovery paths
 	cwd        string
 	version    string
-	injectFunc func([]byte) error
-	killFunc   func()
+	ticket              *TicketRef
+	idleNotifyAfterSecs int
+	injectFunc          func([]byte) error
+	killFunc            func()
+
+	// lastTranscriptAt records when this session last sent a transcript frame.
+	// Reported to the server on (re)connect so it can restore the idle-timer
+	// baseline after a server restart. Guarded by transcriptMu.
+	transcriptMu     sync.Mutex
+	lastTranscriptAt time.Time
 
 	// Human-readable session name (like a ChatGPT/Claude conversation title).
 	// Assigned automatically from the first user message, or explicitly by the
@@ -56,6 +64,21 @@ type sessionWS struct {
 	nameMu  sync.Mutex
 	name    string
 	nameSet bool // a name (auto-derived or user-set) has been assigned
+}
+
+// markTranscript records that a transcript frame was just sent for this session.
+func (sw *sessionWS) markTranscript() {
+	sw.transcriptMu.Lock()
+	sw.lastTranscriptAt = time.Now()
+	sw.transcriptMu.Unlock()
+}
+
+// lastTranscript returns when this session last sent a transcript frame (zero
+// if none yet).
+func (sw *sessionWS) lastTranscript() time.Time {
+	sw.transcriptMu.Lock()
+	defer sw.transcriptMu.Unlock()
+	return sw.lastTranscriptAt
 }
 
 // Name returns the session's current display name.
@@ -230,31 +253,47 @@ func (d *DaemonWS) SendRequest(msgType, requestID string, data interface{}, time
 // StartSession sends a session_start message over the daemon WS and waits
 // for the server to acknowledge it. This replaces HTTP enrollment for
 // sessions within an already-enrolled daemon.
-func (d *DaemonWS) StartSession(relayID, project, agent, cwd, version, name string) ([]Skill, error) {
-	// Store metadata on the session handle so we can re-register on reconnect
-	d.mu.RLock()
+func (d *DaemonWS) StartSession(relayID, project, agent, cwd, version, name string, ticket *TicketRef, idleNotifyAfterSecs int) ([]Skill, error) {
+	// Store metadata on the session handle so we can re-register on reconnect.
+	// Use a write lock: reregisterSessions reads these fields after releasing
+	// d.mu, so writing them without the lock is a data race.
+	d.mu.Lock()
 	sw := d.sessions[relayID]
-	d.mu.RUnlock()
 	if sw != nil {
 		sw.project = project
 		sw.agent = agent
 		sw.cwd = cwd
 		sw.version = version
+		sw.ticket = ticket
+		sw.idleNotifyAfterSecs = idleNotifyAfterSecs
 	}
+	d.mu.Unlock()
 
-	return d.sendSessionStart(relayID, project, agent, cwd, version, name)
+	// Initial start has no transcripts yet, so report 0 (omitted on the wire).
+	return d.sendSessionStart(relayID, project, agent, cwd, version, name, ticket, idleNotifyAfterSecs, 0)
 }
 
 // sendSessionStart sends a session_start message and waits for ack. Returns
 // the skill bundle the server delivered for this session (may be empty).
-func (d *DaemonWS) sendSessionStart(relayID, project, agent, cwd, version, name string) ([]Skill, error) {
+// lastTranscriptUnix, when > 0, tells the server when this session last sent a
+// transcript so it can restore the idle-timer baseline after a restart.
+func (d *DaemonWS) sendSessionStart(relayID, project, agent, cwd, version, name string, ticket *TicketRef, idleNotifyAfterSecs int, lastTranscriptUnix int64) ([]Skill, error) {
 	hostname, _ := os.Hostname()
-	data := map[string]string{
+	data := map[string]interface{}{
 		"project": project,
 		"agent":   agent,
 		"cwd":     cwd,
 		"version": version,
 		"name":    name,
+	}
+	if ticket != nil {
+		data["ticket"] = ticket
+	}
+	if idleNotifyAfterSecs > 0 {
+		data["idle_notify_after_secs"] = idleNotifyAfterSecs
+	}
+	if lastTranscriptUnix > 0 {
+		data["last_transcript_at"] = lastTranscriptUnix
 	}
 	dataBytes, _ := json.Marshal(data)
 
@@ -307,9 +346,15 @@ func (d *DaemonWS) reregisterSessions() {
 
 	log.Printf("daemon-ws: reconnected, re-registering %d session(s)", len(sessions))
 	for _, sw := range sessions {
+		// Report the last transcript time so the server can restore the idle
+		// timer if it restarted while this session was idle.
+		var lastTranscriptUnix int64
+		if t := sw.lastTranscript(); !t.IsZero() {
+			lastTranscriptUnix = t.Unix()
+		}
 		// Reconnect re-registers existing sessions; skills are installed once
 		// at original session start, so the returned list is discarded here.
-		if _, err := d.sendSessionStart(sw.relayID, sw.project, sw.agent, sw.cwd, sw.version, sw.Name()); err != nil {
+		if _, err := d.sendSessionStart(sw.relayID, sw.project, sw.agent, sw.cwd, sw.version, sw.Name(), sw.ticket, sw.idleNotifyAfterSecs, lastTranscriptUnix); err != nil {
 			log.Printf("daemon-ws: failed to re-register session %s: %v", sw.relayID, err)
 		} else {
 			log.Printf("daemon-ws: re-registered session %s", sw.relayID)
@@ -366,6 +411,12 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 		d.handleProjectHistory(data)
 	case "list_skills":
 		d.handleListSkills(data)
+	case "list_tickets":
+		go d.handleListTickets(data)
+	case "config_get":
+		d.handleConfigGet(data)
+	case "config_set":
+		d.handleConfigSet(data)
 	case "set_session_name":
 		d.handleSetSessionName(data)
 	default:
@@ -385,6 +436,39 @@ func (d *DaemonWS) sendSessionRenamed(relayID, name string) {
 		return
 	}
 	d.ws.SendText(data)
+}
+
+// sendSessionIdleConfig tells the server that a live session's resolved idle
+// threshold changed, so it can re-arm (or cancel) the idle timer. The server
+// otherwise only learns the threshold at session_start, so a mid-session config
+// edit wouldn't take effect until the session restarts or reconnects.
+func (d *DaemonWS) sendSessionIdleConfig(relayID string, idleNotifyAfterSecs int) {
+	data, err := json.Marshal(map[string]int{"idle_notify_after_secs": idleNotifyAfterSecs})
+	if err != nil {
+		return
+	}
+	msg := map[string]interface{}{
+		"type":     "session_idle_config",
+		"relay_id": relayID,
+		"data":     json.RawMessage(data),
+	}
+	msgBytes, err := json.Marshal(msg)
+	if err != nil {
+		return
+	}
+	d.ws.SendText(msgBytes)
+}
+
+// liveSessionProjects returns a relay_id → project snapshot of every live
+// session. Used to recompute resolved config per session after a config write.
+func (d *DaemonWS) liveSessionProjects() map[string]string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	out := make(map[string]string, len(d.sessions))
+	for id, sw := range d.sessions {
+		out[id] = sw.project
+	}
+	return out
 }
 
 // sessionName returns the in-memory name for a live session, or "".
@@ -483,8 +567,10 @@ func deriveSessionName(line string) string {
 	return summarizeSessionName(text)
 }
 
-// summarizeSessionName turns a user message into a one-line title: the first
-// few words, with whitespace collapsed and length capped.
+// summarizeSessionName turns a user message into a title: its first line,
+// length-capped. The device truncates to the row width for display, so the cap
+// only exists to bound transport (the name rides every session_start and the
+// full session_history_response replay) — keep it generous.
 func summarizeSessionName(text string) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -494,19 +580,25 @@ func summarizeSessionName(text string) string {
 	if strings.HasPrefix(text, "<") || strings.HasPrefix(text, "[Request interrupted") {
 		return ""
 	}
-	fields := strings.Fields(text)
-	if len(fields) == 0 {
+	// First line only — keeps a multi-paragraph prompt's later lines out of the
+	// title.
+	if i := strings.IndexByte(text, '\n'); i >= 0 {
+		text = strings.TrimSpace(text[:i])
+	}
+	if text == "" {
 		return ""
 	}
-	if len(fields) > 7 {
-		fields = fields[:7]
+	// Cap by rune count (not bytes, so we never split a multi-byte character),
+	// then trim back to the last word boundary so we don't cut mid-word.
+	const maxLen = 120
+	if r := []rune(text); len(r) > maxLen {
+		text = string(r[:maxLen])
+		if i := strings.LastIndexByte(text, ' '); i > 0 {
+			text = text[:i]
+		}
+		text = strings.TrimSpace(text)
 	}
-	name := strings.Join(fields, " ")
-	const maxLen = 60
-	if len(name) > maxLen {
-		name = strings.TrimSpace(name[:maxLen])
-	}
-	return name
+	return text
 }
 
 // handleTextFrame handles text frames not matched by routePermissionResponse.
@@ -523,7 +615,17 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 		Text    string `json:"text"`
 		Data    string `json:"data"`
 	}
-	if json.Unmarshal(data, &msg) != nil || msg.RelayID == "" {
+	if json.Unmarshal(data, &msg) != nil {
+		return false
+	}
+
+	// Device-scoped control frames have no relay_id (no session yet).
+	// Dispatch them directly to routeControlFrame.
+	if msg.RelayID == "" {
+		if msg.Type == "new_session" || msg.Type == "list_tickets" || msg.Type == "config_get" || msg.Type == "config_set" {
+			d.routeControlFrame(data)
+			return true
+		}
 		return false
 	}
 

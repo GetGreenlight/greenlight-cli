@@ -41,6 +41,11 @@ type Session struct {
 	transcriptCancel context.CancelFunc
 	convID          string // set by startTranscriptStreamer, read at exit
 
+	// Optional ticket reference stamped at launch when the session was spawned
+	// from a phone Tickets-tab `+`. Echoed in session_start and persisted in
+	// the session record so the UI can group sessions by ticket.
+	ticket *TicketRef
+
 	connectPidFile string
 	libPath        string
 	libExtracted   bool
@@ -67,24 +72,43 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		return nil, fmt.Errorf("no relay server URL configured")
 	}
 
-	agent := resolveAgent(req.Agent)
-	if !knownAgents[agent] {
-		return nil, fmt.Errorf("unknown agent %q", agent)
-	}
-
 	cwd := req.Cwd
 	if cwd == "" {
 		return nil, fmt.Errorf("working directory is required")
 	}
 
-	// Resolve device ID and project
+	// Resolve device ID and project first, so a project-scoped `agent` config
+	// override can shadow the host default.
 	devID, proj, err := resolveDeviceAndProject(req.DeviceID, req.Project, cwd)
 	if err != nil {
 		return nil, err
 	}
 
+	agent := resolveAgentForProject(req.Agent, proj)
+	if !knownAgents[agent] {
+		return nil, fmt.Errorf("unknown agent %q", agent)
+	}
+
+	// On resume, carry the session's name and ticket forward from its saved
+	// record. For fresh sessions, the ticket arrives via the
+	// GREENLIGHT_TICKET_JSON env var set by the daemon when spawning the
+	// terminal in response to a phone-initiated new_session.
+	var sessionName string
+	var ticket *TicketRef
+	if req.Resume != "" {
+		if rec, err := loadSessionRecord(req.Resume); err == nil {
+			sessionName = rec.Name
+			ticket = rec.Ticket
+		}
+	} else if blob := req.Env["GREENLIGHT_TICKET_JSON"]; blob != "" {
+		var t TicketRef
+		if err := json.Unmarshal([]byte(blob), &t); err == nil && t.Provider != "" {
+			ticket = &t
+		}
+	}
+
 	// Build agent command with session IDs and flags
-	setup, err := buildAgentCommand(agent, req.Resume)
+	setup, err := buildAgentCommand(agent, req.Resume, ticket)
 	if err != nil {
 		return nil, err
 	}
@@ -92,24 +116,17 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	cmdArgs := setup.Args
 	relayID := setup.RelayID
 
-	// On resume, carry the session's name forward from its saved record.
-	var sessionName string
-	if req.Resume != "" {
-		if rec, err := loadSessionRecord(req.Resume); err == nil {
-			sessionName = rec.Name
-		}
-	}
-
 	// Register session with the server via daemon WS (no phone approval needed)
 	if d.daemonWS == nil {
 		return nil, fmt.Errorf("daemon WebSocket not connected")
 	}
-	skills, err := d.daemonWS.StartSession(relayID, proj, agentServerName(agent), cwd, version, sessionName)
+	idleNotifyAfterSecs := resolveIdleNotifyAfterSecs(proj)
+	skills, err := d.daemonWS.StartSession(relayID, proj, agentServerName(agent), cwd, version, sessionName, ticket, idleNotifyAfterSecs)
 	if err != nil {
 		return nil, fmt.Errorf("session start failed: %w", err)
 	}
 
-	installAgentFiles(agent, relayID, cwd)
+	installAgentFiles(agent, relayID, cwd, ticket)
 	installSkills(agent, cwd, skills)
 
 	s := &Session{
@@ -121,6 +138,7 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		startedAt: time.Now(),
 		promptCh:  make(chan byte, 32),
 		daemon:    d,
+		ticket:    ticket,
 	}
 
 	// Write connect PID file
@@ -136,6 +154,16 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	if shimDir, cleanup := setupCLIShim(relayID); shimDir != "" {
 		s.cliShimDir = shimDir
 		s.cliShimClean = cleanup
+		// Transparently wrap known token-authenticated commands (gh, glab, …)
+		// whose secret is stored, so the agent runs them bare while greenlight
+		// injects the token via `greenlight run`.
+		if shimsEnabled() {
+			present := d.presentSecretNames()
+			if active := activeShims(present, configuredShimOverrides(proj, present)); len(active) > 0 {
+				installCommandShims(shimDir, active)
+				setActiveShims(active)
+			}
+		}
 	}
 	command, cmdArgs, interpose, err := setupInterpose(agent, command, cmdArgs, relayID, cwd, exportEnvs)
 	if err != nil {
@@ -586,4 +614,18 @@ drained:
 			}
 		}
 	}
+}
+
+// resolveIdleNotifyAfterSecs returns the idle_notify_after config value for the
+// given project, converted to seconds. Returns 0 if not set, invalid, or < 1m.
+func resolveIdleNotifyAfterSecs(project string) int {
+	v := resolveConfig(project, configKeyIdleNotifyAfter)
+	if v == "" || v == "0" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < time.Minute {
+		return 0
+	}
+	return int(d.Seconds())
 }

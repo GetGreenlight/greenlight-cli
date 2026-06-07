@@ -26,14 +26,22 @@ var knownAgents = map[string]bool{
 const defaultAgent = "claude"
 
 // resolveAgent resolves the agent runtime from flag > env > config > default.
+// The config lookup is host-scoped (no project context at this call site).
 func resolveAgent(flagVal string) string {
+	return resolveAgentForProject(flagVal, "")
+}
+
+// resolveAgentForProject is resolveAgent with project-override awareness: a
+// project's `agent` config entry shadows the host default. flag and env still
+// win over config.
+func resolveAgentForProject(flagVal, project string) string {
 	if flagVal != "" {
 		return flagVal
 	}
 	if v := os.Getenv("GREENLIGHT_AGENT"); v != "" {
 		return v
 	}
-	if v := readConfigValue("agent"); v != "" {
+	if v := resolveConfig(project, configKeyAgent); v != "" {
 		return v
 	}
 	return defaultAgent
@@ -108,12 +116,13 @@ func agentSupportsResume(agent string) bool {
 	}
 }
 
-// greenlightSystemPrompt is appended to the agent's system prompt to teach it
-// how to interpret permission denials from the Greenlight interpose library.
+// greenlightSystemPromptBase is the static portion of the system-prompt
+// injection — permission semantics and secret access. ticket-specific
+// context, if any, is appended by greenlightSystemPrompt.
 // Bare "greenlight" works across prod/dev/local builds because every session
 // prepends a per-session bin dir to the agent's PATH with a symlink that
 // points at the running binary (see setupCLIShim).
-const greenlightSystemPrompt = `Tool calls are managed by a permission system called Greenlight. ` +
+const greenlightSystemPromptBase = `Tool calls are managed by a permission system called Greenlight. ` +
 	`If a command exits with code 126, or a file operation fails with "Permission denied", ` +
 	`the user has explicitly denied this action. ` +
 	`Do not retry the same action. Try a different approach or ask the user what they'd like instead. ` +
@@ -125,7 +134,25 @@ const greenlightSystemPrompt = `Tool calls are managed by a permission system ca
 	`Run "greenlight secrets list" to see available keys. ` +
 	`To use one, run "greenlight run -e KEY_NAME -- <command>" — KEY_NAME will be injected as an environment variable for that command only, and the secret value is scrubbed from stdout/stderr before you see it. ` +
 	`Prefer this over asking the user to paste tokens. ` +
-	`OAuth access tokens are stored as ${PROVIDER}_ACCESS_TOKEN (e.g. GITHUB_ACCESS_TOKEN) and refresh automatically when expired.`
+	`OAuth access tokens are stored as ${PROVIDER}_ACCESS_TOKEN (e.g. GITHUB_ACCESS_TOKEN) and refresh automatically when expired.` +
+	"\n\n" +
+	`To reduce approval prompts, phrase Bash commands so they match existing auto-approve rules: ` +
+	`(1) Run unrelated steps as separate Bash calls — compound commands (&&, ||, |) auto-approve only when every segment matches a rule; one unusual segment blocks the whole chain. ` +
+	`(2) Run commands directly rather than wrapping them in "bash -c" or "sh -c" — the server unwraps inline scripts anyway and they won't match wildcard rules. ` +
+	`(3) Avoid heredocs: use the Write tool to write files, and pass multi-line git commit messages as repeated -m flags (e.g. git commit -m "summary" -m "details") rather than a heredoc. ` +
+	`(4) Some flags are never covered by wildcard rules and always need their own approval: sed -i / --in-place (use the Edit tool instead), curl -X/-d/-F/--data* (non-GET requests), find -exec/-execdir/-delete. ` +
+	`(5) rm, mv, chmod, kill, ssh, scp, rsync, and similar destructive or network commands always require exact-match approval — keep them minimal and self-explanatory so they're easy to approve.`
+
+// greenlightSystemPrompt returns the system-prompt injection for this
+// session. When the session was launched against a specific ticket, a
+// single neutral line is appended pointing the agent at the URL — what to
+// do with it (read / update / close) is left to the user's prompt.
+func greenlightSystemPrompt(ticket *TicketRef) string {
+	if ticket == nil || ticket.URL == "" {
+		return greenlightSystemPromptBase
+	}
+	return greenlightSystemPromptBase + "\n\nA ticket is in scope for this session: " + ticket.URL
+}
 
 // deriveTranscriptPath constructs the transcript file path for the given agent.
 // For Claude it finds the newest .jsonl in the project dir; for Copilot it
@@ -806,8 +833,9 @@ func runAgent(args []string) {
 		fmt.Fprintf(os.Stderr, "greenlight: unknown agent %q (supported: claude, codex, copilot, cursor, gemini, pi)\n", name)
 		os.Exit(1)
 	}
-
-	if err := writeConfigValue("agent", name); err != nil {
+	// Delegate the write to the generic config plumbing so the agent subcommand
+	// and `greenlight config set agent` share one path.
+	if err := applyConfigBatch(scopeHost, "", map[string]string{configKeyAgent: name}, nil); err != nil {
 		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
 		os.Exit(1)
 	}

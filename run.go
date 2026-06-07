@@ -87,6 +87,19 @@ rest:
 		plaintexts[spc.envName] = val
 	}
 
+	runDecryptedChild(plaintexts, cmdArgs, exec.LookPath)
+}
+
+// runDecryptedChild injects the given plaintexts into the child environment,
+// runs cmdArgs (resolving cmdArgs[0] via resolveReal), scrubs every encoded
+// form of each secret from the child's stdout/stderr, and exits the process
+// with the child's status. resolveReal lets callers control PATH resolution —
+// `greenlight run` passes exec.LookPath; the command shims pass a resolver that
+// excludes the per-session shim dir so it doesn't resolve back to this binary.
+//
+// plaintexts is zeroed before exit (best effort). This function does not return
+// on success — it calls os.Exit with the child's exit status.
+func runDecryptedChild(plaintexts map[string][]byte, cmdArgs []string, resolveReal func(string) (string, error)) {
 	// Build forms for scrubbing.
 	var forms [][]byte
 	for _, v := range plaintexts {
@@ -113,7 +126,7 @@ rest:
 		filtered = append(filtered, k+"="+string(v))
 	}
 
-	bin, err := exec.LookPath(cmdArgs[0])
+	bin, err := resolveReal(cmdArgs[0])
 	if err != nil {
 		dieErr(fmt.Errorf("not found: %s", cmdArgs[0]))
 	}
@@ -170,6 +183,7 @@ rest:
 		}
 		dieErr(waitErr)
 	}
+	os.Exit(0)
 }
 
 func runUsage() {

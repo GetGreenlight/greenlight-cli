@@ -21,25 +21,27 @@ import (
 
 // interposeRequest is the JSON structure sent by the interpose library.
 type interposeRequest struct {
-	Type    string   `json:"type"`              // "open", "spawn", "connect", "read"
-	Path    string   `json:"path,omitempty"`    // file path or binary path
-	OldPath string   `json:"old_path,omitempty"` // source path for rename edits
-	Args    []string `json:"args,omitempty"`    // argv for spawn
-	Flags   string   `json:"flags,omitempty"`   // "w", "rw", "rename" for open
-	Host    string   `json:"host,omitempty"`    // hostname for connect
-	IP      string   `json:"ip,omitempty"`      // IP for connect
-	Port    int      `json:"port,omitempty"`    // port for connect
-	PID     int      `json:"pid,omitempty"`
-	Project *bool    `json:"project,omitempty"` // true if file is within project dir
+	Type      string                 `json:"type"`               // "open", "spawn", "connect", "read", "hook"
+	Path      string                 `json:"path,omitempty"`     // file path or binary path
+	OldPath   string                 `json:"old_path,omitempty"` // source path for rename edits
+	Args      []string               `json:"args,omitempty"`     // argv for spawn
+	Flags     string                 `json:"flags,omitempty"`    // "w", "rw", "rename" for open
+	Host      string                 `json:"host,omitempty"`     // hostname for connect
+	IP        string                 `json:"ip,omitempty"`       // IP for connect
+	Port      int                    `json:"port,omitempty"`     // port for connect
+	PID       int                    `json:"pid,omitempty"`
+	Project   *bool                  `json:"project,omitempty"`   // true if file is within project dir
+	ToolName  string                 `json:"tool_name,omitempty"`  // for "hook" type: tool name from Claude hook
+	ToolInput map[string]interface{} `json:"tool_input,omitempty"` // for "hook" type: tool input from Claude hook
 }
 
 // interposeResponse is sent back to the interpose library.
 type interposeResponse struct {
-	Allow     bool   `json:"allow"`
-	Interrupt bool   `json:"interrupt,omitempty"`
-	Message   string `json:"message,omitempty"`
+	Allow        bool            `json:"allow"`
+	Interrupt    bool            `json:"interrupt,omitempty"`
+	Message      string          `json:"message,omitempty"`
+	UpdatedInput json.RawMessage `json:"updated_input,omitempty"` // non-nil when server provided tool input overrides (e.g. AskUserQuestion answers)
 }
-
 
 // interposeRelay is a per-socket reference to the session's Relay.
 // Created by startInterposeSock, set via SetRelay after the Relay is created.
@@ -276,6 +278,30 @@ func handleInterposeConn(conn net.Conn, agent string, ir *interposeRelay) {
 	// Translate to server permission request format
 	toolName, toolInput := translateInterposeRequest(req)
 
+	// Loop guard: auto-allow a command shim's re-exec of the real binary it
+	// was just approved to wrap, so it doesn't prompt a second time.
+	if toolName == "Bash" {
+		if cmd, ok := toolInput["command"].(string); ok && consumeShimReexec(cmd) {
+			log.Printf("Interpose: auto-allow shim re-exec: %s", cmd)
+			respond(conn, interposeResponse{Allow: true})
+			return
+		}
+	}
+
+	// Rewrite bare shim invocations (e.g. `gh issue list`) to the
+	// `greenlight run -e ENV=SECRET -- gh issue list` form the PATH shim
+	// actually executes, so the approver sees the secret-injecting command.
+	// shimKeys are the re-exec keys to pre-approve if this request is allowed.
+	var shimKeys []string
+	if toolName == "Bash" {
+		if cmd, ok := toolInput["command"].(string); ok {
+			if rewritten, keys := rewriteShimCommandKeys(cmd); rewritten != cmd {
+				toolInput["command"] = rewritten
+				shimKeys = keys
+			}
+		}
+	}
+
 	// Auto-allow safe commands (read-only with no output redirects)
 	if toolName == "Bash" {
 		if cmd, ok := toolInput["command"].(string); ok && isSafeCommand(cmd) {
@@ -304,9 +330,30 @@ func handleInterposeConn(conn net.Conn, agent string, ir *interposeRelay) {
 		return
 	}
 
-	resp := racePermission(relay, toolName, toolInput, payload)
+	// Hook requests (AskUserQuestion, ExitPlanMode) must not show a terminal
+	// prompt — Claude Code already displays the question/plan in its own window.
+	// Send straight to the phone and wait, no terminal fallback.
+	var resp interposeResponse
+	if req.Type == "hook" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		requestID := generateUUID()
+		var err error
+		resp, err = wsPermission(ctx, relay.wsConn, requestID, payload)
+		if err != nil {
+			log.Printf("Interpose: hook WS permission error for %s: %v", toolName, err)
+			resp = interposeResponse{Allow: false}
+		}
+	} else {
+		resp = racePermission(relay, toolName, toolInput, payload)
+	}
 	log.Printf("Interpose: %s %s → %v", toolName, interposeRequestSummary(req),
 		map[bool]string{true: "allow", false: "deny"}[resp.Allow])
+	// On approval of a shim command, pre-approve the shim's re-exec of the
+	// real binary so it doesn't prompt again.
+	if resp.Allow && len(shimKeys) > 0 {
+		rememberShimReexec(shimKeys)
+	}
 	respond(conn, resp)
 }
 
@@ -337,17 +384,19 @@ func wsPermission(ctx context.Context, ws WSConn, requestID string, payload map[
 	select {
 	case respData := <-respCh:
 		var resp struct {
-			Behavior  string `json:"behavior"`
-			Message   string `json:"message"`
-			Interrupt bool   `json:"interrupt"`
+			Behavior     string          `json:"behavior"`
+			Message      string          `json:"message"`
+			Interrupt    bool            `json:"interrupt"`
+			UpdatedInput json.RawMessage `json:"updated_input"`
 		}
 		if err := json.Unmarshal(respData, &resp); err != nil {
 			return interposeResponse{Allow: false}, err
 		}
 		return interposeResponse{
-			Allow:     resp.Behavior == "allow",
-			Interrupt: resp.Interrupt,
-			Message:   resp.Message,
+			Allow:        resp.Behavior == "allow",
+			Interrupt:    resp.Interrupt,
+			Message:      resp.Message,
+			UpdatedInput: resp.UpdatedInput,
 		}, nil
 	case <-ctx.Done():
 		return interposeResponse{Allow: false}, ctx.Err()
@@ -578,6 +627,8 @@ func translateInterposeRequest(req interposeRequest) (string, map[string]interfa
 		return "Bash", map[string]interface{}{
 			"command": cmd,
 		}
+	case "hook":
+		return req.ToolName, req.ToolInput
 	case "connect":
 		url := "https://" + req.Host
 		if req.Port != 0 && req.Port != 443 {

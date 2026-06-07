@@ -125,6 +125,18 @@ type Server struct {
 	// reply. Useful for tests that need the ack to carry skills, errors,
 	// or other negotiated fields. Default returns the minimal ack.
 	onSessionStart func(relayID string, startFrame json.RawMessage) any
+
+	// secrets is the set of secret key names returned for device-scoped
+	// secrets_list requests. Empty by default; set via SetSecrets.
+	secrets []string
+}
+
+// SetSecrets sets the secret key names the mock returns for secrets_list
+// requests over the daemon WebSocket.
+func (s *Server) SetSecrets(names ...string) {
+	s.mu.Lock()
+	s.secrets = append([]string(nil), names...)
+	s.mu.Unlock()
 }
 
 // New starts a new mock server on a random port.
@@ -260,6 +272,49 @@ func (s *Server) defaultWS(w http.ResponseWriter, r *http.Request) {
 			}
 			ack, _ := json.Marshal(reply)
 			conn.Write(ctx, websocket.MessageText, ack)
+		}
+
+		// Device-scoped secrets_list: reply with the configured key names so
+		// the daemon's shim-activation probe resolves quickly.
+		if hdr.Type == "secrets_list" {
+			var env struct {
+				Data struct {
+					RequestID string `json:"request_id"`
+				} `json:"data"`
+			}
+			json.Unmarshal(data, &env)
+			s.mu.Lock()
+			names := append([]string(nil), s.secrets...)
+			s.mu.Unlock()
+			secrets := make([]map[string]any, 0, len(names))
+			for _, n := range names {
+				secrets = append(secrets, map[string]any{"key_name": n})
+			}
+			resp, _ := json.Marshal(map[string]any{
+				"type":       "secrets_list_response",
+				"request_id": env.Data.RequestID,
+				"secrets":    secrets,
+			})
+			conn.Write(ctx, websocket.MessageText, resp)
+		}
+
+		// Device-scoped secrets_get: reply not_found by default so callers
+		// (e.g. a command shim falling back) fail fast rather than blocking
+		// on the request timeout. Tests that exercise real decryption can
+		// override via SetWSHandler.
+		if hdr.Type == "secrets_get" {
+			var env struct {
+				Data struct {
+					RequestID string `json:"request_id"`
+				} `json:"data"`
+			}
+			json.Unmarshal(data, &env)
+			resp, _ := json.Marshal(map[string]any{
+				"type":       "secrets_get_response",
+				"request_id": env.Data.RequestID,
+				"error":      "not_found",
+			})
+			conn.Write(ctx, websocket.MessageText, resp)
 		}
 	}
 }

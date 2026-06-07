@@ -24,19 +24,19 @@ import (
 
 // IPC frame types for binary-framed PTY I/O between client and daemon.
 const (
-	frameStdin         byte = 0x01
-	frameStdout        byte = 0x02
-	frameResize        byte = 0x03
-	frameSignal        byte = 0x04
-	frameExit          byte = 0x05
-	framePrompt        byte = 0x06
-	framePromptResp    byte = 0x07
-	framePromptCancel  byte = 0x08
+	frameStdin        byte = 0x01
+	frameStdout       byte = 0x02
+	frameResize       byte = 0x03
+	frameSignal       byte = 0x04
+	frameExit         byte = 0x05
+	framePrompt       byte = 0x06
+	framePromptResp   byte = 0x07
+	framePromptCancel byte = 0x08
 )
 
 // ipcRequest is the JSON control message sent by the client to the daemon.
 type ipcRequest struct {
-	Type     string            `json:"type"`               // connect, status, stop, update_shutdown, ws_request
+	Type     string            `json:"type"` // connect, status, stop, update_shutdown, ws_request
 	Agent    string            `json:"agent,omitempty"`
 	DeviceID string            `json:"device_id,omitempty"`
 	Project  string            `json:"project,omitempty"`
@@ -47,15 +47,18 @@ type ipcRequest struct {
 	Force    bool              `json:"force,omitempty"`
 
 	// ws_request: forward an arbitrary daemon-WS message and return its response.
-	WSType    string          `json:"ws_type,omitempty"`     // e.g. secrets_get
-	WSData    json.RawMessage `json:"ws_data,omitempty"`     // payload for `data` envelope
+	WSType    string          `json:"ws_type,omitempty"` // e.g. secrets_get
+	WSData    json.RawMessage `json:"ws_data,omitempty"` // payload for `data` envelope
 	WSReqID   string          `json:"ws_request_id,omitempty"`
 	TimeoutMS int             `json:"timeout_ms,omitempty"`
+
+	// resolve_shim: command name whose active shim resolution to look up.
+	Shim string `json:"shim,omitempty"`
 }
 
 // ipcResponse is the JSON control message sent by the daemon to the client.
 type ipcResponse struct {
-	Type      string          `json:"type"`                 // session_started, error, status_response, ok, ws_response
+	Type      string          `json:"type"` // session_started, error, status_response, ok, ws_response
 	SessionID string          `json:"session_id,omitempty"`
 	RelayID   string          `json:"relay_id,omitempty"`
 	Message   string          `json:"message,omitempty"`
@@ -66,6 +69,11 @@ type ipcResponse struct {
 	// ws_response: raw response payload from the server (full JSON message).
 	WSResponse json.RawMessage `json:"ws_response,omitempty"`
 	DeviceID   string          `json:"device_id,omitempty"` // for clients that need it (run/secrets)
+
+	// resolve_shim_response: the secret/env the daemon resolved for a shim.
+	// Empty ShimSecret means no active shim for that command.
+	ShimSecret string `json:"shim_secret,omitempty"`
+	ShimEnv    string `json:"shim_env,omitempty"`
 }
 
 type ipcWinsize struct {
@@ -230,25 +238,26 @@ func ensureDaemon(deviceIDFlag string) error {
 		if deviceID == "" {
 			deviceID = readConfigValue("device_id")
 		}
-		if deviceID != "" {
-			// Use persisted host_id if available; otherwise generate a new one
-			hostID = readConfigValue("host_id")
-			if hostID == "" {
-				hostID = generateUUID()
-			}
-			baseURL, err := serverBaseURL()
-			if err != nil {
-				return fmt.Errorf("cannot derive server URL: %w", err)
-			}
-			hostname, _ := os.Hostname()
-			fmt.Fprintf(os.Stderr, "greenlight: enrolling host...\n")
-			if err := enrollSession(baseURL, deviceID, hostID, "", "", "", hostname); err != nil {
-				return fmt.Errorf("host enrollment failed: %w", err)
-			}
-			fmt.Fprintf(os.Stderr, "greenlight: enrolled\n")
-			if err := writeConfigValue("host_id", hostID); err != nil {
-				return fmt.Errorf("failed to persist host_id: %w", err)
-			}
+		if deviceID == "" {
+			return fmt.Errorf("no device ID configured\n\nPair your phone first by running:\n  greenlight connect\n\nOr start the daemon with an explicit device ID:\n  greenlight daemon start --device-id <ID>")
+		}
+		// Use persisted host_id if available; otherwise generate a new one
+		hostID = readConfigValue("host_id")
+		if hostID == "" {
+			hostID = generateUUID()
+		}
+		baseURL, err := serverBaseURL()
+		if err != nil {
+			return fmt.Errorf("cannot derive server URL: %w", err)
+		}
+		hostname, _ := os.Hostname()
+		fmt.Fprintf(os.Stderr, "greenlight: enrolling host...\n")
+		if err := enrollSession(baseURL, deviceID, hostID, "", "", "", hostname); err != nil {
+			return fmt.Errorf("host enrollment failed: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "greenlight: enrolled\n")
+		if err := writeConfigValue("host_id", hostID); err != nil {
+			return fmt.Errorf("failed to persist host_id: %w", err)
 		}
 	}
 
@@ -290,6 +299,23 @@ func runDaemonForeground() {
 	logPath := filepath.Join(logDir, "daemon.log")
 	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
 		log.SetOutput(f)
+	}
+
+	// Persist a concrete default agent if none is configured, so the host config
+	// always has an explicit `agent` value (the UI shows it directly, with no
+	// implicit-default state to disambiguate). Other config keys stay optional.
+	if readConfigValue(configKeyAgent) == "" {
+		if err := writeConfigValue(configKeyAgent, defaultAgent); err != nil {
+			log.Printf("daemon: could not persist default agent: %v", err)
+		}
+	}
+
+	// Persist default prompt chips on first run so users can customise them via
+	// the Config UI without losing the built-in set.
+	if readConfigValue(configKeyChips) == "" {
+		if err := writeConfigValue(configKeyChips, defaultChipsJSON); err != nil {
+			log.Printf("daemon: could not persist default chips: %v", err)
+		}
 	}
 
 	sockPath := daemonSockPath()
@@ -380,6 +406,15 @@ func (d *Daemon) Shutdown() {
 	d.listener.Close()
 	os.Remove(d.sockPath)
 
+	// Save session records before killing sessions so names and state are
+	// persisted. runRelay() also calls saveSessionRecord after the child exits,
+	// but the daemon process may exit before those goroutines run.
+	d.mu.RLock()
+	for _, s := range d.sessions {
+		saveSessionRecord(s)
+	}
+	d.mu.RUnlock()
+
 	// Close multiplexed WebSocket
 	if d.daemonWS != nil {
 		d.daemonWS.Close()
@@ -423,20 +458,7 @@ func (d *Daemon) handleUpdateShutdown(conn net.Conn, req ipcRequest) {
 	}
 
 	sendControl(conn, ipcResponse{Type: "ok"})
-	go d.ShutdownForUpdate()
-}
-
-// ShutdownForUpdate saves session records before stopping sessions,
-// so they can be resumed after the update.
-func (d *Daemon) ShutdownForUpdate() {
-	// Save session records before killing sessions
-	d.mu.RLock()
-	for _, s := range d.sessions {
-		saveSessionRecord(s)
-	}
-	d.mu.RUnlock()
-
-	d.Shutdown()
+	go d.Shutdown()
 }
 
 // startDaemonWS starts the multiplexed WebSocket connection. All sessions
@@ -538,6 +560,8 @@ func (d *Daemon) handleConn(conn net.Conn) {
 		d.handleWSRequest(conn, req)
 	case "device_info":
 		sendControl(conn, ipcResponse{Type: "device_info_response", DeviceID: d.deviceID})
+	case "resolve_shim":
+		d.handleResolveShim(conn, req)
 	default:
 		sendControl(conn, ipcResponse{Type: "error", Message: "unknown request type"})
 	}
@@ -562,6 +586,18 @@ func (d *Daemon) handleStatus(conn net.Conn) {
 		Type:     "status_response",
 		Sessions: sessions,
 	})
+}
+
+// handleResolveShim returns the active shim resolution for a command so a shim
+// child process injects the exact secret the daemon showed on the phone,
+// instead of re-resolving it independently. Empty fields mean no active shim.
+func (d *Daemon) handleResolveShim(conn net.Conn, req ipcRequest) {
+	resp := ipcResponse{Type: "resolve_shim_response"}
+	if rs, ok := lookupActiveShim(req.Shim); ok {
+		resp.ShimSecret = rs.secret
+		resp.ShimEnv = rs.envName
+	}
+	sendControl(conn, resp)
 }
 
 // handleWSRequest forwards a generic message over the daemon WebSocket and

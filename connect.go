@@ -56,13 +56,28 @@ func runConnect(args []string) {
 		}
 	}
 
-	// Resolve device ID early so the daemon can verify it matches
+	// Resolve device ID: flag > env > config file > interactive pairing
 	resolvedDeviceID := *deviceID
 	if resolvedDeviceID == "" {
 		resolvedDeviceID = os.Getenv("GREENLIGHT_DEVICE_ID")
 	}
 	if resolvedDeviceID == "" {
 		resolvedDeviceID = readConfigValue("device_id")
+	}
+	if resolvedDeviceID == "" {
+		// No device ID configured — start interactive pairing
+		baseURL, err := serverBaseURL()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+			os.Exit(1)
+		}
+		paired, err := runPair(baseURL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "greenlight: pairing failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "greenlight: you can also use --device-id or run 'greenlight register <device-id>'\n")
+			os.Exit(1)
+		}
+		resolvedDeviceID = paired
 	}
 	if err := ensureDaemon(resolvedDeviceID); err != nil {
 		fmt.Fprintf(os.Stderr, "greenlight: failed to start daemon: %v\n", err)
@@ -234,16 +249,15 @@ func cleanupAgentFiles(agent, cwd string) {
 	// Skills are installed under each agent's own root, namespaced under
 	// _greenlight/. Idempotent — safe to call even if nothing was installed.
 	removeSkills(agent, cwd)
+	removeHooks(agent, cwd)
 }
 
-// hasOtherSessions checks if any other greenlight connect sessions are alive
-// for the same agent and working directory. PID files are keyed by relay ID,
-// so the caller's own file must already be removed before this runs — the
-// daemon PID is shared across every session it owns, so we cannot filter by
-// PID to identify self.
+// hasOtherSessions checks if any other greenlight connect processes are alive
+// for the same agent and working directory.
 func hasOtherSessions(agent, cwd string) bool {
 	pattern := filepath.Join(os.TempDir(), "greenlight-connect-*.pid")
 	matches, _ := filepath.Glob(pattern)
+	myPid := os.Getpid()
 	for _, p := range matches {
 		data, err := os.ReadFile(p)
 		if err != nil {
@@ -255,7 +269,7 @@ func hasOtherSessions(agent, cwd string) bool {
 		}
 		var pid int
 		fmt.Sscanf(parts[0], "%d", &pid)
-		if pid == 0 {
+		if pid == myPid || pid == 0 {
 			continue
 		}
 		pAgent := parts[1]
@@ -279,10 +293,7 @@ func isGreenlightProcess(pid int) bool {
 	if err != nil {
 		return false
 	}
-	// signal 0 is the portable liveness probe; passing a nil os.Signal
-	// makes the type assertion in os.Process.signal fail and always
-	// returns an error on darwin.
-	if proc.Signal(syscall.Signal(0)) != nil {
+	if proc.Signal(nil) != nil {
 		return false
 	}
 	// Verify it's actually a greenlight process (PIDs can be recycled)

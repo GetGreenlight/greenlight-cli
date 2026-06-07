@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 )
@@ -17,15 +18,16 @@ import (
 // sessionRecord is the persisted state of a completed session,
 // containing everything needed to resume it.
 type sessionRecord struct {
-	ConversationID string `json:"conversation_id"`
-	RelayID        string `json:"relay_id"`
-	Agent          string `json:"agent"`
-	Project        string `json:"project"`
-	Cwd            string `json:"cwd"`
-	Hostname       string `json:"hostname"`
-	StartedAt      string `json:"started_at"`
-	EndedAt        string `json:"ended_at"`
-	Name           string `json:"name,omitempty"` // human-readable session title
+	ConversationID string     `json:"conversation_id"`
+	RelayID        string     `json:"relay_id"`
+	Agent          string     `json:"agent"`
+	Project        string     `json:"project"`
+	Cwd            string     `json:"cwd"`
+	Hostname       string     `json:"hostname"`
+	StartedAt      string     `json:"started_at"`
+	EndedAt        string     `json:"ended_at"`
+	Name           string     `json:"name,omitempty"` // human-readable session title
+	Ticket         *TicketRef `json:"ticket,omitempty"`
 }
 
 // sessionStorePath returns the directory holding completed session records.
@@ -52,8 +54,15 @@ func saveSessionRecord(s *Session) {
 	}
 
 	hostname, _ := os.Hostname()
+	// Read the name directly from the sessionWS handle rather than through the
+	// daemonWS map, which may already be cleared if the session was killed.
 	var name string
-	if s.daemon != nil && s.daemon.daemonWS != nil {
+	if s.relay != nil {
+		if sw, ok := s.relay.wsConn.(*sessionWS); ok {
+			name = sw.Name()
+		}
+	}
+	if name == "" && s.daemon != nil && s.daemon.daemonWS != nil {
 		name = s.daemon.daemonWS.sessionName(s.relayID)
 	}
 	rec := sessionRecord{
@@ -66,6 +75,7 @@ func saveSessionRecord(s *Session) {
 		StartedAt:      s.startedAt.Format(time.RFC3339),
 		EndedAt:        time.Now().Format(time.RFC3339),
 		Name:           name,
+		Ticket:         s.ticket,
 	}
 
 	data, err := json.MarshalIndent(rec, "", "  ")
@@ -136,7 +146,34 @@ func listSessionRecords() []sessionRecord {
 			records = append(records, rec)
 		}
 	}
+	// Order by last-activity timestamp descending so a just-terminated session
+	// lands at the top of the history. Unlike live sessions (sorted by DATE for
+	// stability), completed sessions have frozen timestamps, so full-resolution
+	// ordering can't shuffle. Name ascending is a tiebreaker for equal or
+	// unparseable timestamps. EndedAt is the last-activity time, falling back to
+	// StartedAt.
+	sort.SliceStable(records, func(i, j int) bool {
+		ti, tj := recordTime(records[i]), recordTime(records[j])
+		if !ti.Equal(tj) {
+			return ti.After(tj)
+		}
+		return strings.ToLower(records[i].Name) < strings.ToLower(records[j].Name)
+	})
 	return records
+}
+
+// recordTime returns a completed session's last-activity time, used to order
+// the session history. A record with no parseable timestamp sorts last.
+func recordTime(r sessionRecord) time.Time {
+	ts := r.EndedAt
+	if ts == "" {
+		ts = r.StartedAt
+	}
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // removeSessionRecord deletes a persisted session record.
@@ -402,9 +439,10 @@ func (d *Daemon) handleWakeMessage(data []byte) {
 // session will register itself when it enrolls.
 func (d *Daemon) handleNewSessionMessage(data []byte) {
 	var msg struct {
-		RequestID string `json:"request_id"`
-		Cwd       string `json:"cwd"`
-		Agent     string `json:"agent"`
+		RequestID string     `json:"request_id"`
+		Cwd       string     `json:"cwd"`
+		Agent     string     `json:"agent"`
+		Ticket    *TicketRef `json:"ticket"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		log.Printf("daemon: invalid new_session message: %v", err)
@@ -424,20 +462,22 @@ func (d *Daemon) handleNewSessionMessage(data []byte) {
 		return
 	}
 
-	if err := newSession(msg.Cwd, msg.Agent, d.deviceID); err != nil {
+	if err := newSession(msg.Cwd, msg.Agent, d.deviceID, msg.Ticket); err != nil {
 		log.Printf("daemon: new_session: failed to open terminal: %v", err)
 		d.sendNewSessionResult(msg.RequestID, false, err.Error())
 		return
 	}
 
-	log.Printf("daemon: spawned new session in %s (agent %q)", msg.Cwd, msg.Agent)
+	log.Printf("daemon: spawned new session in %s (agent %q ticket %v)", msg.Cwd, msg.Agent, msg.Ticket)
 	d.sendNewSessionResult(msg.RequestID, true, "")
 }
 
 // newSession spawns a new terminal window running `greenlight connect` with
 // the given agent and cwd. If agent is empty, connect's normal resolution
-// (env > config > default) applies.
-func newSession(cwd, agent, deviceID string) error {
+// (env > config > default) applies. If ticket is non-nil, it is exported as
+// GREENLIGHT_TICKET_JSON so the spawned connect can stamp it into session
+// metadata.
+func newSession(cwd, agent, deviceID string, ticket *TicketRef) error {
 	exePath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("cannot resolve executable: %w", err)
@@ -454,7 +494,14 @@ func newSession(cwd, agent, deviceID string) error {
 	if agent != "" {
 		agentFlag = "--agent " + shellQuote(agent) + " "
 	}
-	connectCmd := fmt.Sprintf("unset GREENLIGHT_DEVICE_ID GREENLIGHT_DAEMON_SESSION_ID; cd %s && %s connect %s%s",
+	ticketExport := ""
+	if ticket != nil {
+		if blob, err := json.Marshal(ticket); err == nil {
+			ticketExport = "export GREENLIGHT_TICKET_JSON=" + shellQuote(string(blob)) + "; "
+		}
+	}
+	connectCmd := fmt.Sprintf("unset GREENLIGHT_DEVICE_ID GREENLIGHT_DAEMON_SESSION_ID; %scd %s && %s connect %s%s",
+		ticketExport,
 		shellQuote(cwd),
 		shellQuote(exePath),
 		deviceFlag,

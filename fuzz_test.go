@@ -416,6 +416,9 @@ func FuzzParseConfigValue(f *testing.F) {
 	f.Add("# comment\n  agent = claude  \n", "agent")
 	f.Add("nokey\n=noval\nkey=\n", "key")
 	f.Add("", "missing")
+	// Project-scoped key form (percent-encoded project segment) must parse like
+	// any other key=value line.
+	f.Add("project.permit.agent=codex\nproject.org%2Frepo.shim_secret=X\n", "project.permit.agent")
 	f.Fuzz(func(t *testing.T, content, key string) {
 		_ = parseConfigValue(strings.NewReader(content), key)
 	})
