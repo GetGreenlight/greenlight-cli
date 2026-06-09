@@ -328,6 +328,9 @@ func FuzzIsSafeCommand(f *testing.F) {
 	f.Add(`FOO=bar echo hi`)
 	f.Add(`greenlight secrets list`)
 	f.Add(`greenlight secrets get token`)
+	f.Add(`ls /tmp && rm /tmp/foo`)
+	f.Add(`echo hi || rm -rf /`)
+	f.Add(`ls | rm -rf /`)
 	f.Add(``)
 	f.Fuzz(func(t *testing.T, cmd string) {
 		safe := isSafeCommand(cmd)
@@ -341,6 +344,10 @@ func FuzzIsSafeCommand(f *testing.F) {
 			"chmod", "chown", "kill", "git", "ssh"} {
 			if isSafeCommand(bin + " " + cmd) {
 				t.Fatalf("isSafeCommand approved dangerous binary %q (cmd=%q)", bin, cmd)
+			}
+			// Dangerous binary in a compound must never be safe either.
+			if isSafeCommand("ls /tmp && " + bin + " " + cmd) {
+				t.Fatalf("isSafeCommand approved dangerous binary %q in compound (cmd=%q)", bin, cmd)
 			}
 		}
 	})

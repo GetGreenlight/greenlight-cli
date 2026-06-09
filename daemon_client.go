@@ -410,13 +410,12 @@ func resetScrollRegionLocked() {
 	for i := uint16(0); i < promptHeight; i++ {
 		fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K", agentRows+1+i)
 	}
-	// Move cursor to just below the agent area so the shell prompt
-	// appears after the agent's output.
-	fmt.Fprintf(os.Stdout, "\033[%d;1H", agentRows+1)
 	// Reset scroll region.
 	fmt.Fprintf(os.Stdout, "\033[r")
-	// Re-position cursor after reset (some terminals move cursor on DECSTBM reset).
-	fmt.Fprintf(os.Stdout, "\033[%d;1H", agentRows+1)
+	// Position cursor at the last row so the shell prompt appears at the
+	// bottom. \033[r moves the cursor to home on most terminals, so we
+	// must re-position after the reset rather than before.
+	fmt.Fprintf(os.Stdout, "\033[%d;1H", ws.Row)
 }
 
 // resetTerminalModesLocked clears terminal modes the child agent may have

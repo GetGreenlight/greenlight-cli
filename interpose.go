@@ -136,7 +136,69 @@ func handleInterposeSock(listener net.Listener, agent string, ir *interposeRelay
 // isSafeCommand checks if a Bash command can be auto-allowed without
 // prompting the user. A command is safe if its base binary is read-only
 // AND it contains no output redirects (which could write to files).
+// For compound commands (&&, ||, |), ALL segments must be safe.
 func isSafeCommand(cmd string) bool {
+	for _, segment := range splitCompoundCommand(cmd) {
+		if !isSafeSimpleCommand(segment) {
+			return false
+		}
+	}
+	return true
+}
+
+// splitCompoundCommand splits a shell command on unquoted &&, ||, and |
+// operators, returning the individual segments.
+func splitCompoundCommand(cmd string) []string {
+	var segments []string
+	var cur strings.Builder
+	inSingle := false
+	inDouble := false
+	for i := 0; i < len(cmd); i++ {
+		c := cmd[i]
+		if c == '\'' && !inDouble {
+			inSingle = !inSingle
+			cur.WriteByte(c)
+			continue
+		}
+		if c == '"' && !inSingle {
+			inDouble = !inDouble
+			cur.WriteByte(c)
+			continue
+		}
+		if c == '\\' && inDouble && i+1 < len(cmd) {
+			cur.WriteByte(c)
+			i++
+			cur.WriteByte(cmd[i])
+			continue
+		}
+		if !inSingle && !inDouble {
+			// &&
+			if c == '&' && i+1 < len(cmd) && cmd[i+1] == '&' {
+				segments = append(segments, strings.TrimSpace(cur.String()))
+				cur.Reset()
+				i++ // skip second &
+				continue
+			}
+			// || or |
+			if c == '|' {
+				if i+1 < len(cmd) && cmd[i+1] == '|' {
+					i++ // skip second |
+				}
+				segments = append(segments, strings.TrimSpace(cur.String()))
+				cur.Reset()
+				continue
+			}
+		}
+		cur.WriteByte(c)
+	}
+	if s := strings.TrimSpace(cur.String()); s != "" {
+		segments = append(segments, s)
+	}
+	return segments
+}
+
+// isSafeSimpleCommand checks a single (non-compound) command.
+func isSafeSimpleCommand(cmd string) bool {
 	// Check for output redirects: any unquoted > means the command can
 	// write to a file, even if the binary itself is read-only.
 	inSingle := false
