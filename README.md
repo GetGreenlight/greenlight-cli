@@ -1,8 +1,6 @@
 # Greenlight CLI
 
-The command-line companion to [Greenlight](https://aigreenlight.app) — approve AI actions from your phone.
-
-Greenlight CLI connects [Claude Code](https://claude.ai/code) to the Greenlight relay server, letting you review and approve tool calls from the Greenlight iOS app.
+The command-line companion to [Greenlight](https://aigreenlight.app) — the mobile app that keeps Claude coding. Your agents keep stopping. Greenlight keeps them working — so you get what you're paying for.
 
 ## Install
 
@@ -43,22 +41,6 @@ Or use `scripts/build.sh` which auto-detects the version from git tags and build
 ```bash
 scripts/build.sh
 ```
-
-## Quick Start
-
-Register your device ID (found on the "About" tab in the Greenlight app):
-
-```bash
-greenlight register your-device-id
-```
-
-Then start a session:
-
-```bash
-greenlight connect
-```
-
-This launches Claude Code and connects to the Greenlight relay server. Approve the session on your phone to begin.
 
 ## Usage
 
@@ -120,11 +102,11 @@ Settings can be provided via flags, environment variables, or a config file. Pri
 
 ### Config File
 
-The config file at `~/.greenlight/config` is a key=value file. `device_id` is set by `greenlight register`; `project` can be added manually:
+The config file at `~/.greenlight/config` is a key=value file. `device_id` is set by `greenlight register`. Other settings can be controlled from the mobile app.
 
 ```
 device_id=your-device-id
-project=my-project
+
 ```
 
 ## Testing
