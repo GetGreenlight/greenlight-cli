@@ -5,8 +5,10 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -113,6 +115,100 @@ func TestIntegration_Daemon_StartStop(t *testing.T) {
 	resp = daemonIPC(t, sockPath, ipcRequest{Type: "stop"})
 	if resp.Type != "ok" {
 		t.Errorf("expected ok, got %q", resp.Type)
+	}
+}
+
+func TestIntegration_Daemon_Restart(t *testing.T) {
+	testServerURL.ClearHandlers()
+
+	// Pre-enroll a host so the initial daemon's WebSocket can connect.
+	hostID := enrollTestHost(t, "test-dev")
+
+	// Start an initial daemon bound to a unique socket.
+	sockPath, tmpDir, daemonHome, cleanup := startTestDaemonWithHome(t, t.TempDir(),
+		"GREENLIGHT_DEVICE_ID=test-dev",
+		"GREENLIGHT_DAEMON_SESSION_ID="+hostID,
+	)
+	defer cleanup()
+
+	pidPath := filepath.Join(daemonHome, ".greenlight", "daemon.pid")
+	origPID := strings.TrimSpace(readFileOrEmpty(pidPath))
+	if origPID == "" {
+		t.Fatal("expected initial daemon to write a pid file")
+	}
+
+	// Restart stops the running daemon and starts a fresh one on the same socket.
+	r := run(t, []string{"daemon", "restart", "--device-id", "test-dev"}, []string{
+		"HOME=" + daemonHome,
+		"TMPDIR=" + tmpDir,
+		"GREENLIGHT_DAEMON_SOCK=" + sockPath,
+		"GREENLIGHT_DEVICE_ID=test-dev",
+	}, "")
+	if !strings.Contains(r.Stderr, "daemon restarted") {
+		t.Fatalf("expected 'daemon restarted', got stderr=%q exit=%d", r.Stderr, r.ExitCode)
+	}
+
+	// The new daemon should answer on the same socket.
+	if !waitForSocket(t, sockPath, 5*time.Second) {
+		t.Fatal("daemon socket did not reappear after restart")
+	}
+	resp := daemonIPC(t, sockPath, ipcRequest{Type: "status"})
+	if resp.Type != "status_response" {
+		t.Errorf("expected status_response after restart, got %q", resp.Type)
+	}
+
+	// ...and it should be a different process than the original.
+	newPID := strings.TrimSpace(readFileOrEmpty(pidPath))
+	if newPID == "" || newPID == origPID {
+		t.Errorf("expected a new daemon pid after restart, orig=%q new=%q", origPID, newPID)
+	}
+
+	// Stop the restarted (detached) daemon so it doesn't linger past the test.
+	daemonIPC(t, sockPath, ipcRequest{Type: "stop"})
+}
+
+// TestIntegration_Daemon_StopWedged verifies that `daemon stop` doesn't hang
+// forever against a wedged daemon — one that accepts the connection but never
+// replies. The client reads carry a deadline, so the command must return.
+func TestIntegration_Daemon_StopWedged(t *testing.T) {
+	sockPath := fmt.Sprintf("/tmp/gl-test-wedged-%d.sock", int64(os.Getpid())^time.Now().UnixNano())
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	defer os.Remove(sockPath)
+
+	// Accept connections and hold them open without ever replying.
+	go func() {
+		var conns []net.Conn
+		defer func() {
+			for _, c := range conns {
+				c.Close()
+			}
+		}()
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conns = append(conns, conn)
+		}
+	}()
+
+	start := time.Now()
+	r := runWithTimeout(t, []string{"daemon", "stop", "--force"}, []string{
+		"HOME=" + t.TempDir(),
+		"GREENLIGHT_DAEMON_SOCK=" + sockPath,
+	}, "", 20*time.Second)
+	elapsed := time.Since(start)
+
+	// It should give up on the unresponsive daemon (best-effort stop), not hang.
+	if !strings.Contains(r.Stderr, "daemon stopped") {
+		t.Errorf("expected 'daemon stopped', got stderr=%q", r.Stderr)
+	}
+	if elapsed > 15*time.Second {
+		t.Errorf("stop took too long against wedged daemon: %v", elapsed)
 	}
 }
 
@@ -332,6 +428,196 @@ func TestIntegration_Daemon_InputInjection(t *testing.T) {
 
 }
 
+// ---------- autopilot initial-prompt injection (#145) ----------
+
+// TestIntegration_Daemon_InitialPromptInjection verifies that an autopilot
+// stage session (launched with GREENLIGHT_INITIAL_PROMPT set) reliably injects
+// AND submits the stage prompt as the first user message — without any human
+// typing. mock_claude's readStdinToFile uses a bufio.Scanner that only returns
+// a line once a terminator arrives, so a successful read proves both halves:
+// the prompt text was injected and a separate submit (\r) followed it. If the
+// prompt were injected without a submit, the scanner would block and record
+// "TIMEOUT" instead. This is the autopilot analog of the relay_input injection
+// path (both now go through submitInput).
+func TestIntegration_Daemon_InitialPromptInjection(t *testing.T) {
+	testServerURL.ClearHandlers()
+
+	hostID := enrollTestHost(t, "test-dev")
+
+	sockPath, tmpDir, cleanup := startTestDaemon(t,
+		"GREENLIGHT_DEVICE_ID=test-dev",
+		"GREENLIGHT_DAEMON_SESSION_ID="+hostID,
+		"GREENLIGHT_DISABLE_INTERPOSE=1",
+	)
+	defer cleanup()
+
+	workDir := t.TempDir()
+	outputFile := filepath.Join(workDir, "claude-received.txt")
+	pathWithMock := filepath.Dir(mockClaudeBin) + ":" + os.Getenv("PATH")
+
+	const initialPrompt = "AUTOPILOT_PROMPT_TEST"
+
+	master, slave, err := openPTY()
+	if err != nil {
+		t.Fatalf("openPTY: %v", err)
+	}
+	defer master.Close()
+	setWinsize(slave.Fd(), &Winsize{Row: 24, Col: 80})
+
+	client := exec.Command(greenlightBin, "connect",
+		"--device-id", "test-dev",
+		"--project", "test-proj",
+	)
+	client.Dir = workDir
+	clientLog := filepath.Join(tmpDir, "client.log")
+	client.Env = []string{
+		"HOME=" + t.TempDir(),
+		"PATH=" + pathWithMock,
+		"TMPDIR=" + tmpDir,
+		"TERM=xterm-256color",
+		"MOCK_CLAUDE_OUTPUT=" + outputFile,
+		"GREENLIGHT_DAEMON_SOCK=" + sockPath,
+		"GREENLIGHT_LOG=" + clientLog,
+		// Drives Session.injectInitialPrompt — no human keystrokes are sent.
+		"GREENLIGHT_INITIAL_PROMPT=" + initialPrompt,
+	}
+	client.Stdin = slave
+	client.Stdout = slave
+	client.Stderr = slave
+	defer func() {
+		if t.Failed() {
+			t.Logf("client log:\n%s", readFileOrEmpty(clientLog))
+		}
+	}()
+
+	done := make(chan error, 1)
+	if err := client.Start(); err != nil {
+		t.Fatalf("start client: %v", err)
+	}
+	slave.Close()
+	go func() { done <- client.Wait() }()
+
+	// Drain PTY output so the master read loop keeps the agent's first output
+	// flowing (which is what closes readyCh and releases the injection).
+	go io.Copy(io.Discard, master)
+
+	// Wait for the client to exit — mock_claude returns from readStdinToFile as
+	// soon as it scans a full line, i.e. once the prompt + submit arrive.
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		client.Process.Kill()
+		t.Fatal("client timed out waiting for initial-prompt injection")
+	}
+
+	data, err := os.ReadFile(outputFile)
+	if err != nil {
+		t.Fatalf("mock claude output not created: %v", err)
+	}
+	if strings.Contains(string(data), "TIMEOUT") {
+		t.Fatalf("initial prompt never submitted (mock claude saw no line terminator): %q", string(data))
+	}
+	if !strings.Contains(string(data), initialPrompt) {
+		t.Errorf("expected initial prompt %q, got %q", initialPrompt, string(data))
+	}
+}
+
+// TestIntegration_Daemon_InitialPromptFileInjection is the file-handoff (#4)
+// analog of the test above: the prompt is delivered via a $TMPDIR temp file
+// referenced by GREENLIGHT_INITIAL_PROMPT_FILE (the path the daemon types into
+// the spawn command), not the inline var. It asserts the prompt is injected AND
+// submitted (same mock_claude scanner proof) AND that the daemon unlinks the
+// file after consuming it. The prompt deliberately carries the special chars
+// that broke inline quoting (apostrophe, backtick, em-dash, parens).
+func TestIntegration_Daemon_InitialPromptFileInjection(t *testing.T) {
+	testServerURL.ClearHandlers()
+
+	hostID := enrollTestHost(t, "test-dev")
+
+	sockPath, tmpDir, cleanup := startTestDaemon(t,
+		"GREENLIGHT_DEVICE_ID=test-dev",
+		"GREENLIGHT_DAEMON_SESSION_ID="+hostID,
+		"GREENLIGHT_DISABLE_INTERPOSE=1",
+	)
+	defer cleanup()
+
+	workDir := t.TempDir()
+	outputFile := filepath.Join(workDir, "claude-received.txt")
+	pathWithMock := filepath.Dir(mockClaudeBin) + ":" + os.Getenv("PATH")
+
+	// A single line (mock_claude scans line-by-line) carrying the quoting-hostile
+	// classes from #4. No newline so the whole thing is one injected message.
+	const initialPrompt = "AUTOPILOT_FILE_TEST don't `run` it — check (a,b)"
+	promptFile := filepath.Join(workDir, "stage-prompt.txt")
+	if err := os.WriteFile(promptFile, []byte(initialPrompt), 0644); err != nil {
+		t.Fatalf("write prompt file: %v", err)
+	}
+
+	master, slave, err := openPTY()
+	if err != nil {
+		t.Fatalf("openPTY: %v", err)
+	}
+	defer master.Close()
+	setWinsize(slave.Fd(), &Winsize{Row: 24, Col: 80})
+
+	client := exec.Command(greenlightBin, "connect",
+		"--device-id", "test-dev",
+		"--project", "test-proj",
+	)
+	client.Dir = workDir
+	clientLog := filepath.Join(tmpDir, "client.log")
+	client.Env = []string{
+		"HOME=" + t.TempDir(),
+		"PATH=" + pathWithMock,
+		"TMPDIR=" + tmpDir,
+		"TERM=xterm-256color",
+		"MOCK_CLAUDE_OUTPUT=" + outputFile,
+		"GREENLIGHT_DAEMON_SOCK=" + sockPath,
+		"GREENLIGHT_LOG=" + clientLog,
+		// File handoff (#4): only the path is in the env; the daemon reads it.
+		"GREENLIGHT_INITIAL_PROMPT_FILE=" + promptFile,
+	}
+	client.Stdin = slave
+	client.Stdout = slave
+	client.Stderr = slave
+	defer func() {
+		if t.Failed() {
+			t.Logf("client log:\n%s", readFileOrEmpty(clientLog))
+		}
+	}()
+
+	done := make(chan error, 1)
+	if err := client.Start(); err != nil {
+		t.Fatalf("start client: %v", err)
+	}
+	slave.Close()
+	go func() { done <- client.Wait() }()
+
+	go io.Copy(io.Discard, master)
+
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		client.Process.Kill()
+		t.Fatal("client timed out waiting for initial-prompt-file injection")
+	}
+
+	data, err := os.ReadFile(outputFile)
+	if err != nil {
+		t.Fatalf("mock claude output not created: %v", err)
+	}
+	if strings.Contains(string(data), "TIMEOUT") {
+		t.Fatalf("initial prompt never submitted (mock claude saw no line terminator): %q", string(data))
+	}
+	if !strings.Contains(string(data), initialPrompt) {
+		t.Errorf("expected initial prompt %q, got %q", initialPrompt, string(data))
+	}
+	// The daemon must unlink the prompt file once it has read it.
+	if _, err := os.Stat(promptFile); !os.IsNotExist(err) {
+		t.Errorf("prompt file %q was not unlinked after consumption (err=%v)", promptFile, err)
+	}
+}
+
 // ---------- daemon connect error handling ----------
 
 func TestIntegration_Daemon_ConnectError(t *testing.T) {
@@ -443,6 +729,68 @@ func TestIntegration_Daemon_ListSkills(t *testing.T) {
 	}
 	if len(reply.Skills) != 1 || reply.Skills[0] != "demo-skill" {
 		t.Errorf("skills mismatch: got %v want [demo-skill]", reply.Skills)
+	}
+
+	cs.Wait(10 * time.Second)
+}
+
+// TestIntegration_Daemon_SuggestionGet exercises the composer suggestion tap
+// (#38) end to end: the daemon maintains a VT screen model from the agent's PTY
+// output; mock_claude paints a fake composer line with an italic ghost
+// suggestion; the server pushes a suggestion_get control frame; the daemon greps
+// the composer line and replies suggested_prompt with the extracted text.
+func TestIntegration_Daemon_SuggestionGet(t *testing.T) {
+	testServerURL.ClearHandlers()
+	// Paint: clear screen, position to row 10, draw the ❯ prompt, then the
+	// ghost suggestion in italic (SGR 3) — which vt10x tracks.
+	composer := `\033[2J\033[10;1H❯ \033[3mTry \"add a test for the parser\"\033[0m`
+	cs, cleanup := startConnectSession(t, connectOpts{
+		AgentEnv: []string{"MOCK_CLAUDE_RAW=" + composer},
+	})
+	defer cleanup()
+
+	// Deliver exactly as the production server does: a text frame wrapping
+	// {"type":"control","data":base64({"type":"suggestion_get"})}, which the CLI
+	// decodes and routes via handleTextFrame's "control" branch (never the PTY
+	// injection path). This validates the real wire path end to end.
+	if err := cs.Sess.Send(map[string]any{
+		"relay_id": cs.Sess.RelayID,
+		"type":     "control",
+		"data":     base64.StdEncoding.EncodeToString([]byte(`{"type":"suggestion_get"}`)),
+	}); err != nil {
+		t.Fatalf("send suggestion_get: %v", err)
+	}
+
+	reply := awaitSuggestedPrompt(t, cs.Sess, 5*time.Second)
+	if reply.RelayID != cs.Sess.RelayID {
+		t.Errorf("relay_id mismatch: got %q want %q", reply.RelayID, cs.Sess.RelayID)
+	}
+	if reply.Text != `Try "add a test for the parser"` {
+		t.Errorf("suggestion mismatch: got %q", reply.Text)
+	}
+
+	cs.Wait(10 * time.Second)
+}
+
+// TestIntegration_Daemon_SuggestionGet_NoComposer confirms that when no composer
+// suggestion is on screen (no marker / ghost text painted), the daemon still
+// replies — with empty text — so a caller is never left waiting. The screen tap
+// is always on now; an empty reply means "nothing to extract", not "feature off".
+func TestIntegration_Daemon_SuggestionGet_NoComposer(t *testing.T) {
+	testServerURL.ClearHandlers()
+	cs, cleanup := startConnectSession(t)
+	defer cleanup()
+
+	if err := cs.Sess.SendBinary(map[string]any{
+		"type":     "suggestion_get",
+		"relay_id": cs.Sess.RelayID,
+	}); err != nil {
+		t.Fatalf("send suggestion_get: %v", err)
+	}
+
+	reply := awaitSuggestedPrompt(t, cs.Sess, 5*time.Second)
+	if reply.Text != "" {
+		t.Errorf("expected empty text with no composer on screen, got %q", reply.Text)
 	}
 
 	cs.Wait(10 * time.Second)
@@ -1022,6 +1370,137 @@ func TestIntegration_Daemon_SessionTranscript(t *testing.T) {
 	cs.Wait(10 * time.Second)
 }
 
+// TestIntegration_Daemon_AwaitUser drives the ticket-handoff IPC verb end to end:
+// an `await_user` IPC for a live session must make the daemon emit a
+// session_await_user envelope (relay_id-tagged) on the daemon WS. This is the new
+// wire path that lets `greenlight ticket submit/approve/reject/merge/close` flip
+// the session to "waiting" and suppress its idle push.
+func TestIntegration_Daemon_AwaitUser(t *testing.T) {
+	testServerURL.ClearHandlers()
+	cs, cleanup := startConnectSession(t)
+	defer cleanup()
+
+	resp := daemonIPC(t, cs.SockPath, ipcRequest{Type: "await_user", RelayID: cs.Sess.RelayID})
+	if resp.Type != "ok" {
+		t.Fatalf("await_user ipc response = %q, want ok (msg=%q)", resp.Type, resp.Message)
+	}
+
+	matched := cs.Sess.WaitForFrame(func(raw json.RawMessage) bool {
+		var hdr struct {
+			Type    string `json:"type"`
+			RelayID string `json:"relay_id"`
+		}
+		return json.Unmarshal(raw, &hdr) == nil &&
+			hdr.Type == "session_await_user" && hdr.RelayID == cs.Sess.RelayID
+	}, 5*time.Second)
+	if matched == nil {
+		t.Fatalf("did not receive session_await_user for relay %q within 5s", cs.Sess.RelayID)
+	}
+
+	cs.Wait(10 * time.Second)
+}
+
+// TestIntegration_Daemon_ScratchpadRoot exercises issue #182 end to end with the
+// real daemon + transcript streamer: with scratch_auto=false (so the blanket
+// /private/tmp root is NOT reported), planting a Claude transcript must make the
+// daemon discover the session UUID and push a session_roots frame carrying the
+// session's scratchpad as a kind:"scratch" root — derived solely from the
+// transcript path, scoped to this session's UUID.
+func TestIntegration_Daemon_ScratchpadRoot(t *testing.T) {
+	testServerURL.ClearHandlers()
+	// Have mock_claude dump its argv so we can recover the daemon-generated
+	// --session-id (Claude names both the transcript file and the scratchpad
+	// dir by it), then plant the transcript where the streamer scans.
+	argsFile := filepath.Join(t.TempDir(), "claude-args.txt")
+	cs, cleanup := startConnectSession(t, connectOpts{
+		ConfigSeed: map[string]string{"scratch_auto": "false"},
+		AgentEnv:   []string{"MOCK_CLAUDE_ARGS_FILE=" + argsFile},
+	})
+	defer cleanup()
+
+	// Recover the session id from the dumped argv.
+	var sessID string
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline) && sessID == ""; {
+		data, err := os.ReadFile(argsFile)
+		if err != nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		fields := strings.Split(string(data), "\n")
+		for i, f := range fields {
+			if f == "--session-id" && i+1 < len(fields) {
+				sessID = strings.TrimSpace(fields[i+1])
+			}
+		}
+	}
+	if sessID == "" {
+		t.Fatalf("could not recover --session-id from mock_claude argv (%q)", readFileOrEmpty(argsFile))
+	}
+
+	// Plant the transcript at the path the daemon's by-ID scanner looks for:
+	// <daemonHome>/.claude/projects/<dir>/<sessID>.jsonl.
+	projDir := filepath.Join(cs.DaemonHome, ".claude", "projects", "scratch-proj")
+	if err := os.MkdirAll(projDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(projDir, sessID+".jsonl")
+	if err := os.WriteFile(transcriptPath,
+		[]byte(`{"type":"summary","summary":"s","cwd":"`+cs.Workdir+`"}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The path the CLI should report — derived the same way it does internally.
+	wantScratch := claudeScratchpadDir("claude", transcriptPath)
+	if wantScratch == "" {
+		t.Fatal("claudeScratchpadDir returned empty for the planted transcript")
+	}
+	if !strings.HasSuffix(wantScratch, "/"+sessID+"/scratchpad") {
+		t.Fatalf("derived scratchpad %q is not scoped to the session UUID %q", wantScratch, sessID)
+	}
+
+	// Wait for a session_roots frame in the daemon inbox carrying it as scratch.
+	deadline := time.Now().Add(10 * time.Second)
+	var found bool
+	var seenTypes []string
+	for time.Now().Before(deadline) && !found {
+		for _, raw := range cs.Sess.Inbox() {
+			var env struct {
+				Type string `json:"type"`
+				Data struct {
+					Roots []SessionRoot `json:"roots"`
+				} `json:"data"`
+			}
+			if json.Unmarshal(raw, &env) != nil {
+				continue
+			}
+			if env.Type != "session_roots" {
+				continue
+			}
+			for _, r := range env.Data.Roots {
+				if r.Path == wantScratch && r.Kind == cliRootKindScratch {
+					found = true
+				}
+			}
+		}
+		if !found {
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+	if !found {
+		for _, raw := range cs.Sess.Inbox() {
+			var hdr struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(raw, &hdr) == nil {
+				seenTypes = append(seenTypes, hdr.Type)
+			}
+		}
+		t.Fatalf("no session_roots frame carried scratchpad root %q; inbox frame types=%v", wantScratch, seenTypes)
+	}
+
+	cs.Wait(10 * time.Second)
+}
+
 // seedRelayMapping writes a conversation_id → relay_id entry into the
 // daemon's sessions.json (the file that lookupConversationID reads).
 // Used by transcript tests to skip the live transcript-discovery path
@@ -1359,6 +1838,30 @@ func awaitSkillsListed(t *testing.T, sess *mockserver.Session, timeout time.Dura
 	return reply
 }
 
+type suggestedPromptReply struct {
+	Type    string `json:"type"`
+	RelayID string `json:"relay_id"`
+	Text    string `json:"text"`
+}
+
+func awaitSuggestedPrompt(t *testing.T, sess *mockserver.Session, timeout time.Duration) suggestedPromptReply {
+	t.Helper()
+	matched := sess.WaitForFrame(func(raw json.RawMessage) bool {
+		var hdr struct {
+			Type string `json:"type"`
+		}
+		return json.Unmarshal(raw, &hdr) == nil && hdr.Type == "suggested_prompt"
+	}, timeout)
+	if matched == nil {
+		t.Fatalf("did not receive suggested_prompt within %v", timeout)
+	}
+	var reply suggestedPromptReply
+	if err := json.Unmarshal(matched, &reply); err != nil {
+		t.Fatalf("parse suggested_prompt: %v (raw=%s)", err, string(matched))
+	}
+	return reply
+}
+
 type configSetResultReply struct {
 	Type      string `json:"type"`
 	RequestID string `json:"request_id"`
@@ -1425,6 +1928,7 @@ type connectSession struct {
 	Workdir    string
 	DaemonHome string
 	DaemonTmp  string // daemon's TMPDIR; per-session shim dir lives here
+	SockPath   string // daemon IPC socket, for driving subcommand verbs
 	Sess       *mockserver.Session
 	done       chan error
 }
@@ -1472,6 +1976,9 @@ type connectOpts struct {
 	// ConfigSeed writes key=value entries into the daemon's ~/.greenlight/config
 	// before the connect session starts (e.g. tickets_secret for shim tests).
 	ConfigSeed map[string]string
+	// DaemonEnv is appended to the daemon process's env (e.g. to enable
+	// experimental features gated behind an env var).
+	DaemonEnv []string
 }
 
 // startConnectSession boots a daemon (with a fresh enrolled host),
@@ -1497,6 +2004,7 @@ func startConnectSession(t *testing.T, opts ...connectOpts) (*connectSession, fu
 	if !opt.EnableInterpose {
 		daemonEnv = append(daemonEnv, "GREENLIGHT_DISABLE_INTERPOSE=1")
 	}
+	daemonEnv = append(daemonEnv, opt.DaemonEnv...)
 	sockPath, tmpDir, daemonHome, daemonCleanup := startTestDaemonWithHome(t, t.TempDir(), daemonEnv...)
 
 	if len(opt.ConfigSeed) > 0 {
@@ -1580,6 +2088,7 @@ func startConnectSession(t *testing.T, opts ...connectOpts) (*connectSession, fu
 		Workdir:    workDir,
 		DaemonHome: daemonHome,
 		DaemonTmp:  tmpDir,
+		SockPath:   sockPath,
 		Sess:       sess,
 		done:       done,
 	}, cleanup
@@ -1624,4 +2133,220 @@ func readPTYUntil(t *testing.T, master *os.File, target string, timeout time.Dur
 		}
 	}
 	return buf.String()
+}
+
+// TestIntegration_Daemon_TicketStage drives the full CLI stage round-trip:
+// `greenlight ticket stage` → daemon IPC → daemon WS → (mock) server → back.
+// Exercises the wire shapes of ticket_stage_get/set plus get/set/clear. The
+// mock server keeps an in-memory scalar store standing in for ticket_stages.
+func TestIntegration_Daemon_TicketStage(t *testing.T) {
+	testServerURL.ClearHandlers()
+	hostID := enrollTestHost(t, "test-dev")
+	sockPath, _, daemonHome, cleanup := startTestDaemonWithHome(t, t.TempDir(),
+		"GREENLIGHT_DEVICE_ID=test-dev",
+		"GREENLIGHT_DAEMON_SESSION_ID="+hostID,
+	)
+	defer cleanup()
+	// resolveStageTarget needs only the provider; the repo comes from the cwd's
+	// origin remote (no provider token — stages never touch the provider API).
+	seedDaemonConfig(t, daemonHome, map[string]string{"tickets_provider": "github"})
+
+	repo := t.TempDir()
+	for _, gitArgs := range [][]string{
+		{"init"},
+		{"remote", "add", "origin", "https://github.com/acme/widget.git"},
+	} {
+		cmd := exec.Command("git", gitArgs...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", gitArgs, err, out)
+		}
+	}
+
+	env := append(os.Environ(),
+		"HOME="+daemonHome,
+		"GREENLIGHT_DAEMON_SOCK="+sockPath,
+		"GREENLIGHT_PROJECT=test-proj",
+	)
+	runStage := func(args ...string) string {
+		cmd := exec.Command(greenlightBin, append([]string{"ticket", "stage"}, args...)...)
+		cmd.Dir = repo
+		cmd.Env = env
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("ticket stage %v: %v\nstderr: %s", args, err, stderr.String())
+		}
+		return strings.TrimSpace(stdout.String())
+	}
+
+	// Set the stage.
+	if out := runStage("5", "in-progress"); out != "in-progress" {
+		t.Fatalf("set stage output = %q, want in-progress", out)
+	}
+	// Bare read reflects the stored scalar.
+	if out := runStage("5"); out != "in-progress" {
+		t.Fatalf("get stage output = %q, want in-progress", out)
+	}
+	// Setting again replaces (single value).
+	if out := runStage("5", "in-review"); out != "in-review" {
+		t.Fatalf("replace stage output = %q, want in-review", out)
+	}
+	// Clear empties the stage (stdout has no stage line).
+	if out := runStage("5", "--clear"); out != "" {
+		t.Fatalf("--clear should print no stage, got: %q", out)
+	}
+}
+
+func TestIntegration_Daemon_TicketTags(t *testing.T) {
+	testServerURL.ClearHandlers()
+	hostID := enrollTestHost(t, "test-dev")
+	sockPath, _, daemonHome, cleanup := startTestDaemonWithHome(t, t.TempDir(),
+		"GREENLIGHT_DEVICE_ID=test-dev",
+		"GREENLIGHT_DAEMON_SESSION_ID="+hostID,
+	)
+	defer cleanup()
+	// resolveTagTarget needs only the provider; the repo comes from the cwd's
+	// origin remote (no provider token — tags never touch the provider API).
+	seedDaemonConfig(t, daemonHome, map[string]string{"tickets_provider": "github"})
+
+	// A git repo whose origin gives resolveTagTarget its repo_key.
+	repo := t.TempDir()
+	for _, gitArgs := range [][]string{
+		{"init"},
+		{"remote", "add", "origin", "https://github.com/acme/widget.git"},
+	} {
+		cmd := exec.Command("git", gitArgs...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", gitArgs, err, out)
+		}
+	}
+
+	env := append(os.Environ(),
+		"HOME="+daemonHome,
+		"GREENLIGHT_DAEMON_SOCK="+sockPath,
+		"GREENLIGHT_PROJECT=test-proj",
+	)
+	runTag := func(args ...string) string {
+		cmd := exec.Command(greenlightBin, append([]string{"ticket", "tag"}, args...)...)
+		cmd.Dir = repo
+		cmd.Env = env
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("ticket tag %v: %v\nstderr: %s", args, err, stderr.String())
+		}
+		return stdout.String()
+	}
+
+	// This test exercises the transport + client-side delta resolution; tag
+	// normalization is server-side logic, unit-tested in the permit-cloud
+	// package (the mock here just echoes the stored set), so we use
+	// already-normalized tags.
+
+	// Replace-set over the daemon WS.
+	out := runTag("5", "--set", "blocked,foo")
+	if !strings.Contains(out, "blocked") || !strings.Contains(out, "foo") {
+		t.Fatalf("--set output missing tags: %q", out)
+	}
+
+	// Incremental: the CLI does get → merge (+urgent, -blocked) → set.
+	out = runTag("5", "+urgent", "-blocked")
+	if !strings.Contains(out, "urgent") || !strings.Contains(out, "foo") || strings.Contains(out, "blocked") {
+		t.Fatalf("incremental delta resolution wrong: %q", out)
+	}
+
+	// Bare list reflects the stored set {foo, urgent}.
+	out = runTag("5")
+	if !strings.Contains(out, "foo") || !strings.Contains(out, "urgent") {
+		t.Fatalf("list output wrong: %q", out)
+	}
+
+	// Clear empties the set (stdout has no tag lines).
+	out = runTag("5", "--clear")
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("--clear should print no tags, got: %q", out)
+	}
+}
+
+// TestIntegration_Daemon_TicketRejectTag drives the reject↔tag interaction
+// (#106): `greenlight ticket reject` on a *-in-review ticket sets the
+// "<phase>-rejected" tag, and a subsequent `submit` from *-in-progress clears
+// it. A no-op reject (not in-review) touches no tags. Behavior is observed
+// through the CLI's own stage/tag readers against the mock server's in-memory
+// stores.
+func TestIntegration_Daemon_TicketRejectTag(t *testing.T) {
+	testServerURL.ClearHandlers()
+	hostID := enrollTestHost(t, "test-dev")
+	sockPath, _, daemonHome, cleanup := startTestDaemonWithHome(t, t.TempDir(),
+		"GREENLIGHT_DEVICE_ID=test-dev",
+		"GREENLIGHT_DAEMON_SESSION_ID="+hostID,
+	)
+	defer cleanup()
+	seedDaemonConfig(t, daemonHome, map[string]string{"tickets_provider": "github"})
+
+	repo := t.TempDir()
+	for _, gitArgs := range [][]string{
+		{"init"},
+		{"remote", "add", "origin", "https://github.com/acme/widget.git"},
+	} {
+		cmd := exec.Command("git", gitArgs...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", gitArgs, err, out)
+		}
+	}
+
+	env := append(os.Environ(),
+		"HOME="+daemonHome,
+		"GREENLIGHT_DAEMON_SOCK="+sockPath,
+		"GREENLIGHT_PROJECT=test-proj",
+	)
+	run := func(args ...string) string {
+		cmd := exec.Command(greenlightBin, append([]string{"ticket"}, args...)...)
+		cmd.Dir = repo
+		cmd.Env = env
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("ticket %v: %v\nstderr: %s", args, err, stderr.String())
+		}
+		return strings.TrimSpace(stdout.String())
+	}
+
+	// Put the ticket at spec-in-review, then reject it.
+	if out := run("stage", "5", "spec-in-review"); out != "spec-in-review" {
+		t.Fatalf("seed stage = %q, want spec-in-review", out)
+	}
+	if out := run("reject", "5"); out != "spec-in-progress" {
+		t.Fatalf("reject stage = %q, want spec-in-progress", out)
+	}
+	// Reject from *-in-review tags the bounce.
+	if out := run("tag", "5"); !strings.Contains(out, "spec-rejected") {
+		t.Fatalf("reject should add spec-rejected tag, got: %q", out)
+	}
+
+	// Submit from *-in-progress clears the bounce tag and re-enters review.
+	if out := run("submit", "5"); out != "spec-in-review" {
+		t.Fatalf("submit stage = %q, want spec-in-review", out)
+	}
+	if out := run("tag", "5"); strings.Contains(out, "spec-rejected") {
+		t.Fatalf("submit should clear spec-rejected tag, got: %q", out)
+	}
+
+	// A no-op reject (ticket is in-review again, so reject moves it; instead
+	// test the genuine no-op: reject an in-progress ticket touches no tags).
+	if out := run("stage", "8", "code-in-progress"); out != "code-in-progress" {
+		t.Fatalf("seed stage = %q, want code-in-progress", out)
+	}
+	if out := run("reject", "8"); out != "code-in-progress" {
+		t.Fatalf("no-op reject stage = %q, want code-in-progress (unchanged)", out)
+	}
+	if out := run("tag", "8"); strings.TrimSpace(out) != "" {
+		t.Fatalf("no-op reject should add no tag, got: %q", out)
+	}
 }

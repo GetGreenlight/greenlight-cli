@@ -30,8 +30,10 @@ type InterposeSetup struct {
 // buildAgentCommand constructs the agent binary command, flags, session IDs,
 // and relay ID. This is the shared core between direct and daemon modes.
 // If ticket is non-nil, agents that use --append-system-prompt get a line
-// pointing at the ticket URL.
-func buildAgentCommand(agent, resume string, ticket *TicketRef) (*AgentSetup, error) {
+// pointing at the ticket URL. shims is the active command-shim set (resolved
+// at session start); when non-empty the system prompt names those commands as
+// pre-authenticated (issue #198).
+func buildAgentCommand(agent, resume string, ticket *TicketRef, shims []resolvedShim) (*AgentSetup, error) {
 	command := agentBinary(agent)
 	var cmdArgs []string
 
@@ -74,12 +76,12 @@ func buildAgentCommand(agent, resume string, ticket *TicketRef) (*AgentSetup, er
 	case "codex":
 		cmdArgs = append(cmdArgs, "--dangerously-bypass-approvals-and-sandbox")
 	case "claude":
-		cmdArgs = append(cmdArgs, "--dangerously-skip-permissions", "--append-system-prompt", greenlightSystemPrompt(ticket))
+		cmdArgs = append(cmdArgs, "--dangerously-skip-permissions", "--append-system-prompt", greenlightSystemPrompt(ticket, shims))
 		if resume == "" && agentSessionID != "" {
 			cmdArgs = append(cmdArgs, "--session-id", agentSessionID)
 		}
 	case "pi":
-		cmdArgs = append(cmdArgs, "--append-system-prompt", greenlightSystemPrompt(ticket))
+		cmdArgs = append(cmdArgs, "--append-system-prompt", greenlightSystemPrompt(ticket, shims))
 		if agentSessionID != "" {
 			sessPath := piSessionPath(agentSessionID, "")
 			if sessPath != "" {
@@ -137,9 +139,9 @@ func resolveDeviceAndProject(deviceID, project, cwd string) (string, string, err
 }
 
 // installAgentFiles installs agent-specific instruction files and hooks.
-func installAgentFiles(agent, relayID, cwd string, ticket *TicketRef) {
+func installAgentFiles(agent, relayID, cwd string, ticket *TicketRef, shims []resolvedShim) {
 	if agent == "gemini" || agent == "copilot" || agent == "cursor" || agent == "codex" {
-		if err := installGreenlightInstructions(agent, relayID, cwd, ticket); err != nil {
+		if err := installGreenlightInstructions(agent, relayID, cwd, ticket, shims); err != nil {
 			log.Printf("Warning: failed to install agent instructions: %v", err)
 		}
 	}
@@ -147,14 +149,20 @@ func installAgentFiles(agent, relayID, cwd string, ticket *TicketRef) {
 }
 
 // buildExportEnvs returns the GREENLIGHT_* environment variables for the child process.
-func buildExportEnvs(devID, relayID, proj, bridgePath, agent string) map[string]string {
-	return map[string]string{
+// ticketJSON, when non-empty, is the session's in-scope ticket (marshaled
+// TicketRef) so the agent can run `greenlight ticket start|submit` without an id.
+func buildExportEnvs(devID, relayID, proj, bridgePath, agent, ticketJSON string) map[string]string {
+	envs := map[string]string{
 		"GREENLIGHT_DEVICE_ID":  devID,
 		"GREENLIGHT_SESSION_ID": relayID,
 		"GREENLIGHT_PROJECT":    proj,
 		"GREENLIGHT_BRIDGE":     bridgePath,
 		"GREENLIGHT_AGENT":      agent,
 	}
+	if ticketJSON != "" {
+		envs["GREENLIGHT_TICKET_JSON"] = ticketJSON
+	}
+	return envs
 }
 
 // setupInterpose configures library interposition (DYLD_INSERT_LIBRARIES or

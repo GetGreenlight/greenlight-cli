@@ -34,12 +34,12 @@ type Session struct {
 	interposeClean func()
 	interposeRelay *interposeRelay
 
-	bridgePath      string
-	bridgeDone      chan struct{}
-	bridgeFinished  chan struct{}
+	bridgePath     string
+	bridgeDone     chan struct{}
+	bridgeFinished chan struct{}
 
 	transcriptCancel context.CancelFunc
-	convID          string // set by startTranscriptStreamer, read at exit
+	convID           string // set by startTranscriptStreamer, read at exit
 
 	// Optional ticket reference stamped at launch when the session was spawned
 	// from a phone Tickets-tab `+`. Echoed in session_start and persisted in
@@ -62,6 +62,10 @@ type Session struct {
 	// Prompt proxying: when interpose needs a prompt, the daemon sends it
 	// to the client and waits for a response.
 	promptCh chan byte
+
+	// Autopilot (#142): the stage prompt to inject as the session's first user
+	// message once the agent is up. Empty for ordinary sessions.
+	initialPrompt string
 }
 
 // newSession creates and starts a new agent session. This is the daemon-side
@@ -106,9 +110,44 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 			ticket = &t
 		}
 	}
+	// Autopilot (#142): the orchestrator spawns with a role-derived name and a
+	// stage prompt. The name overrides the auto-derived one; the prompt is
+	// injected as the first user message once the agent is up (see runRelay).
+	if req.Resume == "" {
+		if n := req.Env["GREENLIGHT_SESSION_NAME"]; n != "" {
+			sessionName = n
+		}
+	}
+	// Autopilot stage prompt. Prefer the file handoff (#4) — the daemon writes
+	// the prompt to a temp file and exports its path, so prompt prose never
+	// traverses the shellQuote + AppleScript-typing layers that spawn the
+	// terminal. Read it, then unlink so it doesn't linger in $TMPDIR. Fall back
+	// to the inline GREENLIGHT_INITIAL_PROMPT var for compatibility.
+	initialPrompt := req.Env["GREENLIGHT_INITIAL_PROMPT"]
+	if pf := req.Env["GREENLIGHT_INITIAL_PROMPT_FILE"]; pf != "" {
+		if data, err := os.ReadFile(pf); err == nil {
+			initialPrompt = string(data)
+		} else {
+			log.Printf("daemon: failed to read initial prompt file %s: %v", pf, err)
+		}
+		os.Remove(pf)
+	}
+
+	// Resolve the active command shims (gh, glab, …) before the system prompt
+	// is built, so the prompt can name the pre-authenticated commands (#198).
+	// The actual PATH-shim install + display registration happen later (they
+	// need shimDir from setupCLIShim), but both read this same slice, so the
+	// prompt and the installed shim can never diverge. presentSecretNames
+	// degrades to nil if the daemon WS is unavailable, so this stays empty
+	// rather than blocking the session.
+	var activeShim []resolvedShim
+	if shimsEnabled() {
+		present := d.presentSecretNames()
+		activeShim = activeShims(present, configuredShimOverrides(proj, present))
+	}
 
 	// Build agent command with session IDs and flags
-	setup, err := buildAgentCommand(agent, req.Resume, ticket)
+	setup, err := buildAgentCommand(agent, req.Resume, ticket, activeShim)
 	if err != nil {
 		return nil, err
 	}
@@ -121,24 +160,33 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		return nil, fmt.Errorf("daemon WebSocket not connected")
 	}
 	idleNotifyAfterSecs := resolveIdleNotifyAfterSecs(proj)
-	skills, err := d.daemonWS.StartSession(relayID, proj, agentServerName(agent), cwd, version, sessionName, ticket, idleNotifyAfterSecs)
+	// Trusted-root set (#119): git worktrees (scoped) + OS scratch dirs
+	// (ephemeral, gated by scratch_auto). Sent on session_start and re-sent on
+	// mid-session worktree changes.
+	rootsMgr := newSessionRootsManager(d.daemonWS, relayID, cwd, scratchAutoEnabled(proj))
+	// Capture the start time before registering so it rides session_start and is
+	// reused for the Session record below. The server emits it for live sessions
+	// so the apps can order concurrent sessions chronologically (#154).
+	startedAt := time.Now()
+	skills, err := d.daemonWS.StartSession(relayID, proj, agentServerName(agent), cwd, version, sessionName, ticket, idleNotifyAfterSecs, startedAt, rootsMgr.snapshot())
 	if err != nil {
 		return nil, fmt.Errorf("session start failed: %w", err)
 	}
 
-	installAgentFiles(agent, relayID, cwd, ticket)
+	installAgentFiles(agent, relayID, cwd, ticket, activeShim)
 	installSkills(agent, cwd, skills)
 
 	s := &Session{
-		relayID:   relayID,
-		agent:     agent,
-		project:   proj,
-		cwd:       cwd,
-		deviceID:  devID,
-		startedAt: time.Now(),
-		promptCh:  make(chan byte, 32),
-		daemon:    d,
-		ticket:    ticket,
+		relayID:       relayID,
+		agent:         agent,
+		project:       proj,
+		cwd:           cwd,
+		deviceID:      devID,
+		startedAt:     startedAt,
+		promptCh:      make(chan byte, 32),
+		daemon:        d,
+		ticket:        ticket,
+		initialPrompt: initialPrompt,
 	}
 
 	// Write connect PID file
@@ -150,19 +198,27 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		f.Close()
 	}
 
-	exportEnvs := buildExportEnvs(devID, relayID, proj, s.bridgePath, agent)
+	// Re-marshal the in-scope ticket so the agent's child env carries it
+	// uniformly for both fresh (env-supplied) and resumed (record-supplied)
+	// sessions, letting `greenlight ticket start|submit` default to it.
+	var ticketJSON string
+	if ticket != nil {
+		if blob, err := json.Marshal(ticket); err == nil {
+			ticketJSON = string(blob)
+		}
+	}
+	exportEnvs := buildExportEnvs(devID, relayID, proj, s.bridgePath, agent, ticketJSON)
 	if shimDir, cleanup := setupCLIShim(relayID); shimDir != "" {
 		s.cliShimDir = shimDir
 		s.cliShimClean = cleanup
 		// Transparently wrap known token-authenticated commands (gh, glab, …)
 		// whose secret is stored, so the agent runs them bare while greenlight
-		// injects the token via `greenlight run`.
-		if shimsEnabled() {
-			present := d.presentSecretNames()
-			if active := activeShims(present, configuredShimOverrides(proj, present)); len(active) > 0 {
-				installCommandShims(shimDir, active)
-				setActiveShims(active)
-			}
+		// injects the token via `greenlight run`. Resolved above (activeShim) so
+		// the PATH shim and the system-prompt "pre-authenticated" line stay in
+		// lockstep (#198).
+		if len(activeShim) > 0 {
+			installCommandShims(shimDir, activeShim)
+			setActiveShims(activeShim)
 		}
 	}
 	command, cmdArgs, interpose, err := setupInterpose(agent, command, cmdArgs, relayID, cwd, exportEnvs)
@@ -177,7 +233,7 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	s.interposeRelay = interpose.Relay
 
 	// Create the relay (PTY only, no per-session WebSocket) in daemon mode
-	r, err := NewDaemon(command, cmdArgs, exportEnvs, cwd, req.Winsize, req.Env, s.cliShimDir)
+	r, err := NewDaemon(command, cmdArgs, exportEnvs, cwd, req.Winsize, req.Env, s.cliShimDir, agent)
 	if err != nil {
 		s.cleanup()
 		return nil, fmt.Errorf("failed to create relay: %w", err)
@@ -196,6 +252,11 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		sw.localAgent = agent
 		sw.cwd = cwd
 		sw.version = version
+		// r.screen is non-nil only for suggestion-capable agents (see
+		// NewDaemon), so its presence is the gate.
+		if r.screen != nil {
+			sw.suggestionFunc = r.screen.suggestion
+		}
 		if sessionName != "" {
 			sw.name = sessionName
 			sw.nameSet = true
@@ -214,13 +275,19 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	// Set up prompt relay so interpose can show prompts
 	if s.interposeRelay != nil {
 		s.interposeRelay.SetRelay(r)
+		// Re-report trusted roots when the agent adds/removes/moves a worktree
+		// (issue #119, trigger 2).
+		s.interposeRelay.SetWorktreeHandler(rootsMgr.onWorktreeChange)
+		// Lazily reconcile roots when a file op targets a path outside the known
+		// set — the durable net for a mid-session worktree (#119 trigger 3 / #148).
+		s.interposeRelay.SetReconcileHandler(rootsMgr.reconcileForPath)
 	}
 
 	// Start transcript streamer
 	startTime := time.Now()
 	var transcriptCtx context.Context
 	transcriptCtx, s.transcriptCancel = context.WithCancel(context.Background())
-	go startTranscriptStreamer(transcriptCtx, agent, relayID, setup.AgentSessionID, s.bridgePath, cwd, startTime, &s.convID)
+	go startTranscriptStreamer(transcriptCtx, agent, relayID, setup.AgentSessionID, s.bridgePath, cwd, startTime, &s.convID, rootsMgr.addScratchpadRoot)
 
 	// Note: don't start the relay yet — wait until a client attaches
 	// so no PTY output is lost. runRelay() is called from AttachClient.
@@ -230,11 +297,74 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 
 // runRelay runs the PTY child process. When it exits, the session is done.
 func (s *Session) runRelay() {
+	// Autopilot (#142): inject the stage prompt as the first user message once
+	// the agent's TUI has had a moment to come up. Best-effort: agents buffer
+	// stdin, so a modest delay after the PTY starts reliably lands the prompt;
+	// failure (agent not ready / no prompt) is harmless and just logged.
+	if s.initialPrompt != "" {
+		go s.injectInitialPrompt()
+	}
 	err := s.relay.RunDaemon()
 
 	s.transcriptCancel()
 	killStreamer(s.relayID)
+	s.finishRelay(err)
+}
 
+// injectInitialPrompt delivers the autopilot stage prompt into the agent's PTY
+// as the first user message. Typing into the composer before the agent's TUI is
+// interactive is the cause of the "prompt typed but never submitted" failure
+// (#145): the first PTY bytes are terminal-setup escapes, not a ready input box,
+// so a fixed settle after them is unreliable. Instead we wait for the agent to
+// start producing output (relay.readyCh) and then for that output to go quiet —
+// the TUI has finished its initial paint and is waiting for input. This adapts
+// to fast and slow starts alike. Both waits are bounded so a pathological start
+// still delivers rather than hanging. Delivery uses the shared submitInput path,
+// but with a wider Enter gap than steady-state phone input because a
+// just-rendered composer needs a longer beat to register the submit and not
+// fold the trailing Enter into the pasted text.
+func (s *Session) injectInitialPrompt() {
+	// Wait for the agent to begin painting; safety net for a no-output start.
+	const firstOutputTimeout = 10 * time.Second
+	// How long PTY output must stay quiet to consider the TUI settled.
+	const quietPeriod = 750 * time.Millisecond
+	// Overall cap on the quiet-wait so a perpetually chatty start still delivers.
+	const settleDeadline = 20 * time.Second
+	// Enter gap for a freshly rendered composer — wider than the phone path's.
+	const initialSubmitGap = 300 * time.Millisecond
+
+	select {
+	case <-s.relay.readyCh: // agent has produced output — TUI is coming up.
+	case <-time.After(firstOutputTimeout):
+		log.Printf("daemon: autopilot prompt readiness timed out (relay %s); delivering anyway", s.relayID)
+	case <-s.relay.shutdownCh: // session ended before the agent rendered.
+		return
+	}
+
+	// Wait for output to fall quiet for quietPeriod — i.e. the TUI has stopped
+	// repainting and is idle at the input prompt — bounded by settleDeadline.
+	deadline := time.Now().Add(settleDeadline)
+	for {
+		quietFor := time.Since(time.Unix(0, s.relay.lastOutputAt.Load()))
+		if quietFor >= quietPeriod {
+			break
+		}
+		if time.Now().After(deadline) {
+			log.Printf("daemon: autopilot prompt settle deadline reached (relay %s); delivering anyway", s.relayID)
+			break
+		}
+		time.Sleep(quietPeriod - quietFor)
+	}
+
+	if err := submitInputGap(s.relay.Inject, []byte(s.initialPrompt), initialSubmitGap); err != nil {
+		log.Printf("daemon: autopilot prompt delivery failed (relay %s): %v", s.relayID, err)
+		return
+	}
+	log.Printf("daemon: autopilot injected initial prompt into relay %s (%d bytes)", s.relayID, len(s.initialPrompt))
+}
+
+// finishRelay carries out the post-exit bookkeeping for a relay that has stopped.
+func (s *Session) finishRelay(err error) {
 	if s.bridgeDone != nil {
 		close(s.bridgeDone)
 		<-s.bridgeFinished
@@ -315,10 +445,13 @@ func (s *Session) AttachClient(conn net.Conn) {
 				}
 				winsize := &Winsize{Row: rows, Col: ws.Cols}
 				setWinsize(s.relay.master.Fd(), winsize)
+				s.relay.screen.resize(int(ws.Cols), int(rows))
 			}
 
 		case frameSignal:
-			var sig struct{ Signal string `json:"signal"` }
+			var sig struct {
+				Signal string `json:"signal"`
+			}
 			if json.Unmarshal(payload, &sig) == nil && s.relay.cmd.Process != nil {
 				switch sig.Signal {
 				case "INT":
@@ -391,7 +524,7 @@ func (s *Session) cleanup() {
 // NewDaemon creates a Relay configured for daemon mode. The PTY is created
 // but terminal raw mode is NOT set (the client handles that). The child
 // process's working directory is set to cwd.
-func NewDaemon(command string, args []string, exportEnvs map[string]string, cwd string, winsize *ipcWinsize, clientEnv map[string]string, cliShimDir string) (*Relay, error) {
+func NewDaemon(command string, args []string, exportEnvs map[string]string, cwd string, winsize *ipcWinsize, clientEnv map[string]string, cliShimDir string, agent string) (*Relay, error) {
 	master, slave, err := openPTY()
 	if err != nil {
 		return nil, fmt.Errorf("openPTY: %w", err)
@@ -466,7 +599,22 @@ func NewDaemon(command string, args []string, exportEnvs map[string]string, cwd 
 		master:     master,
 		slave:      slave,
 		promptCh:   make(chan byte, 32),
+		readyCh:    make(chan struct{}),
 		daemonMode: true,
+	}
+
+	// PTY screen tap (issue #38): a virtual terminal fed every PTY byte so the
+	// composer ghost-suggestion can be read on demand. Created only for agents
+	// that support extraction (claude today) — the model can't be reconstructed
+	// retroactively so it must observe from session start, but feeding vt10x +
+	// the per-Write faint rewrite for an agent that can never produce a
+	// suggestion is pure overhead on the hot output path.
+	if agentSupportsSuggestions(agent) {
+		cols, rows := 80, 24
+		if ws, err := getWinsize(master.Fd()); err == nil {
+			cols, rows = int(ws.Col), int(ws.Row)
+		}
+		r.screen = newScreenTap(cols, rows)
 	}
 
 	return r, nil
@@ -508,6 +656,21 @@ func (r *Relay) RunDaemon() error {
 			n, err := r.master.Read(buf)
 			if n > 0 {
 				data := buf[:n]
+
+				// First output from the agent means its TUI is coming up — the
+				// CLI-side analog of the phone's transcript view appearing once
+				// the session starts. Signal readiness so a pending autopilot
+				// initial-prompt injection can proceed (see injectInitialPrompt).
+				r.readyOnce.Do(func() { close(r.readyCh) })
+
+				// Track the latest output time so injectInitialPrompt can wait
+				// for the TUI to stop painting before it types and submits.
+				r.lastOutputAt.Store(time.Now().UnixNano())
+
+				// Feed the experimental screen model (observe-only, #38).
+				if r.screen != nil {
+					r.screen.Write(data)
+				}
 
 				// Send to attached client via daemon writer
 				r.daemonMu.RLock()

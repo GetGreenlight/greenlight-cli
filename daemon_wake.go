@@ -260,7 +260,7 @@ func openTerminalDarwin(cmd string) error {
 	// a default window; a subsequent unqualified `do script` then opens a
 	// second window. Detect that case and target the auto-opened window
 	// explicitly so only one window appears.
-	escaped := strings.ReplaceAll(cmd, `"`, `\"`)
+	escaped := escapeAppleScriptString(cmd)
 	script := fmt.Sprintf(`tell application "Terminal"
 	set wasRunning to running
 	activate
@@ -275,6 +275,18 @@ func openTerminalDarwin(cmd string) error {
 end tell`, escaped, escaped)
 
 	return exec.Command("osascript", "-e", script).Run()
+}
+
+// escapeAppleScriptString escapes a Go string for embedding in an AppleScript
+// double-quoted string literal. Backslash must be escaped first (so the quotes
+// we escape next aren't doubled), then the double quotes themselves. The command
+// can legitimately contain backslashes — shellQuote renders an apostrophe in an
+// autopilot prompt as '\'' — and an unescaped backslash makes osascript fail to
+// parse the whole script (syntax error -2741), so no session ever spawns.
+func escapeAppleScriptString(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return s
 }
 
 // resolveSessionEnv discovers the current graphical session's environment
@@ -443,6 +455,10 @@ func (d *Daemon) handleNewSessionMessage(data []byte) {
 		Cwd       string     `json:"cwd"`
 		Agent     string     `json:"agent"`
 		Ticket    *TicketRef `json:"ticket"`
+		// Autopilot (#142): an orchestrator-spawned session carries the resolved
+		// stage prompt (fed as the first user message) and a role-derived name.
+		Prompt string `json:"prompt"`
+		Name   string `json:"name"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		log.Printf("daemon: invalid new_session message: %v", err)
@@ -462,13 +478,13 @@ func (d *Daemon) handleNewSessionMessage(data []byte) {
 		return
 	}
 
-	if err := newSession(msg.Cwd, msg.Agent, d.deviceID, msg.Ticket); err != nil {
+	if err := newSession(msg.Cwd, msg.Agent, d.deviceID, msg.Ticket, msg.Prompt, msg.Name); err != nil {
 		log.Printf("daemon: new_session: failed to open terminal: %v", err)
 		d.sendNewSessionResult(msg.RequestID, false, err.Error())
 		return
 	}
 
-	log.Printf("daemon: spawned new session in %s (agent %q ticket %v)", msg.Cwd, msg.Agent, msg.Ticket)
+	log.Printf("daemon: spawned new session in %s (agent %q ticket %v name %q prompt %d bytes)", msg.Cwd, msg.Agent, msg.Ticket, msg.Name, len(msg.Prompt))
 	d.sendNewSessionResult(msg.RequestID, true, "")
 }
 
@@ -476,8 +492,17 @@ func (d *Daemon) handleNewSessionMessage(data []byte) {
 // the given agent and cwd. If agent is empty, connect's normal resolution
 // (env > config > default) applies. If ticket is non-nil, it is exported as
 // GREENLIGHT_TICKET_JSON so the spawned connect can stamp it into session
-// metadata.
-func newSession(cwd, agent, deviceID string, ticket *TicketRef) error {
+// metadata. A non-empty name/prompt (autopilot, #142) names the session by role
+// and injects the stage prompt as the first message.
+//
+// The prompt is handed off via a temp file, not an inline env export (#4): a
+// stage prompt is free-form prose (apostrophes, backticks, em-dashes, 600+
+// chars) and the spawn command is typed into a terminal through shellQuote +
+// AppleScript escaping; carrying prompt text through those layers is fragile and
+// has broken spawns. The file path is generated ASCII, so the typed command
+// stays deterministic and quoting-proof regardless of prompt content. The
+// spawned connect reads the file (GREENLIGHT_INITIAL_PROMPT_FILE) and unlinks it.
+func newSession(cwd, agent, deviceID string, ticket *TicketRef, prompt, name string) error {
 	exePath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("cannot resolve executable: %w", err)
@@ -486,6 +511,72 @@ func newSession(cwd, agent, deviceID string, ticket *TicketRef) error {
 		exePath = resolved
 	}
 
+	promptFile := ""
+	if prompt != "" {
+		promptFile, err = writeInitialPromptFile(prompt)
+		if err != nil {
+			return fmt.Errorf("cannot write initial prompt file: %w", err)
+		}
+	}
+
+	connectCmd := buildConnectCommand(exePath, cwd, agent, deviceID, ticket, promptFile, name)
+
+	log.Printf("daemon: spawning new session: %s", connectCmd)
+
+	switch runtime.GOOS {
+	case "darwin":
+		err = openTerminalDarwin(connectCmd)
+	case "linux":
+		err = openTerminalLinux(connectCmd)
+	default:
+		err = fmt.Errorf("unsupported OS: %s", runtime.GOOS)
+	}
+	if err != nil && promptFile != "" {
+		// The spawned connect never launched, so it will not consume and unlink
+		// the prompt file. Clean it up here rather than leaking it into $TMPDIR.
+		os.Remove(promptFile)
+	}
+	return err
+}
+
+// writeInitialPromptFile writes an autopilot stage prompt to a uniquely named
+// file under $TMPDIR so the spawn command can reference it by path instead of
+// embedding the prose. The caller is responsible for ensuring it is consumed
+// (the spawned connect unlinks it) or removed on a spawn failure.
+func writeInitialPromptFile(prompt string) (string, error) {
+	f, err := os.CreateTemp("", "greenlight-initprompt-*.txt")
+	if err != nil {
+		return "", err
+	}
+	if _, err := f.WriteString(prompt); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+// buildConnectCommand assembles the shell command the daemon runs in a fresh
+// terminal to spawn a `greenlight connect` session. Pure (no side effects) so it
+// can be unit-tested. ticket → GREENLIGHT_TICKET_JSON; name (autopilot, #142) →
+// GREENLIGHT_SESSION_NAME; a non-empty promptFile → GREENLIGHT_INITIAL_PROMPT_FILE
+// (the spawned connect reads the prompt from that path — see newSession).
+//
+// The handoff vars are passed as an inline `VAR=val cmd` env-assignment prefix on
+// the connect command only — never `export`ed (#195). An `export` leaks the name,
+// ticket, and prompt-file path into the spawned terminal's persistent interactive
+// shell (macOS Terminal.app `do script`, Linux `exec bash`), so a later manual
+// `greenlight connect` in the same window — even in a different project —
+// inherits the stale handoff and is misnamed (e.g. "Implementer for #191"). An
+// inline prefix scopes the vars to the connect process's own environment: connect
+// still forwards them in os.Environ() (daemon handoff unchanged), but they vanish
+// when connect exits and never enter the shell. Every value is still shellQuote'd
+// to preserve the #4 quoting round-trip.
+func buildConnectCommand(exePath, cwd, agent, deviceID string, ticket *TicketRef, promptFile, name string) string {
 	deviceFlag := ""
 	if deviceID != "" {
 		deviceFlag = "--device-id " + shellQuote(deviceID) + " "
@@ -494,31 +585,28 @@ func newSession(cwd, agent, deviceID string, ticket *TicketRef) error {
 	if agent != "" {
 		agentFlag = "--agent " + shellQuote(agent) + " "
 	}
-	ticketExport := ""
+	// Inline env-assignment prefix (`VAR=val … <exe> connect …`), applied to the
+	// connect process only — not exported, so nothing leaks into the shell.
+	envPrefix := ""
 	if ticket != nil {
 		if blob, err := json.Marshal(ticket); err == nil {
-			ticketExport = "export GREENLIGHT_TICKET_JSON=" + shellQuote(string(blob)) + "; "
+			envPrefix += "GREENLIGHT_TICKET_JSON=" + shellQuote(string(blob)) + " "
 		}
 	}
-	connectCmd := fmt.Sprintf("unset GREENLIGHT_DEVICE_ID GREENLIGHT_DAEMON_SESSION_ID; %scd %s && %s connect %s%s",
-		ticketExport,
+	if name != "" {
+		envPrefix += "GREENLIGHT_SESSION_NAME=" + shellQuote(name) + " "
+	}
+	if promptFile != "" {
+		envPrefix += "GREENLIGHT_INITIAL_PROMPT_FILE=" + shellQuote(promptFile) + " "
+	}
+	connectCmd := fmt.Sprintf("unset GREENLIGHT_DEVICE_ID GREENLIGHT_DAEMON_SESSION_ID; cd %s && %s%s connect %s%s",
 		shellQuote(cwd),
+		envPrefix,
 		shellQuote(exePath),
 		deviceFlag,
 		agentFlag,
 	)
-	connectCmd = strings.TrimRight(connectCmd, " ")
-
-	log.Printf("daemon: spawning new session: %s", connectCmd)
-
-	switch runtime.GOOS {
-	case "darwin":
-		return openTerminalDarwin(connectCmd)
-	case "linux":
-		return openTerminalLinux(connectCmd)
-	default:
-		return fmt.Errorf("unsupported OS: %s", runtime.GOOS)
-	}
+	return strings.TrimRight(connectCmd, " ")
 }
 
 // sendNewSessionResult sends a new_session_result message back to the server.

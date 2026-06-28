@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -89,6 +90,15 @@ func TestIntegration_Daemon_ShimRewrite(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("interpose spawn interception via DYLD is macOS-specific in this harness")
 	}
+	// The shim execs the *real* gh after the prompt is approved. Without a
+	// genuine gh on PATH (one resolving outside any greenlight-bin-* shim dir)
+	// the client can never exit, so document the dependency with a skip instead
+	// of hanging into the 15s timeout. The production fix in resolveRealBinary
+	// is what lets this pass even when a stale greenlight shim sits ahead of the
+	// real gh on PATH.
+	if realGH := findRealBinaryOnPath("gh"); realGH == "" {
+		t.Skip("no real gh on PATH (outside any greenlight-bin-* dir); this test needs one to exercise the post-approval exec")
+	}
 	testServerURL.ClearHandlers()
 	testServerURL.SetSecrets("GITHUB_ACCESS_TOKEN")
 	defer testServerURL.SetSecrets()
@@ -129,6 +139,29 @@ func TestIntegration_Daemon_ShimRewrite(t *testing.T) {
 	if len(bashReqs) != 1 || bashReqs[0] != want {
 		t.Errorf("expected exactly one rewritten Bash request %q, got %v", want, bashReqs)
 	}
+}
+
+// findRealBinaryOnPath returns the first executable named cmd on PATH that does
+// NOT live in a greenlight shim dir (base name "greenlight-bin-*"), i.e. a
+// genuine OS binary the shim could exec. Empty if none — mirrors the skip logic
+// resolveRealBinary uses in production. Used to gate the rewrite test on a real
+// gh being present.
+func findRealBinaryOnPath(cmd string) string {
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if dir == "" {
+			dir = "."
+		}
+		if strings.HasPrefix(filepath.Base(dir), shimDirPrefix) {
+			continue
+		}
+		cand := filepath.Join(dir, cmd)
+		fi, err := os.Stat(cand)
+		if err != nil || fi.IsDir() || fi.Mode()&0111 == 0 {
+			continue
+		}
+		return cand
+	}
+	return ""
 }
 
 // waitForSymlink polls until path exists (as a symlink or file) or the

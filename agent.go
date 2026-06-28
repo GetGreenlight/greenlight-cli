@@ -141,17 +141,51 @@ const greenlightSystemPromptBase = `Tool calls are managed by a permission syste
 	`(2) Run commands directly rather than wrapping them in "bash -c" or "sh -c" — the server unwraps inline scripts anyway and they won't match wildcard rules. ` +
 	`(3) Avoid heredocs: use the Write tool to write files, and pass multi-line git commit messages as repeated -m flags (e.g. git commit -m "summary" -m "details") rather than a heredoc. ` +
 	`(4) Some flags are never covered by wildcard rules and always need their own approval: sed -i / --in-place (use the Edit tool instead), curl -X/-d/-F/--data* (non-GET requests), find -exec/-execdir/-delete. ` +
-	`(5) rm, mv, chmod, kill, ssh, scp, rsync, and similar destructive or network commands always require exact-match approval — keep them minimal and self-explanatory so they're easy to approve.`
+	`(5) rm, mv, chmod, kill, ssh, scp, rsync, and similar destructive or network commands always require exact-match approval — keep them minimal and self-explanatory so they're easy to approve. ` +
+	`(6) To read or filter JSON, use "jq" — it is auto-approved. Avoid parsing JSON with interpreter one-liners (python3 -c, node -e, perl -e, ruby -e): they run arbitrary code, can't be auto-approved, and will prompt every time. ` +
+	`(7) For text substitutions, prefer "sed" or "awk" (read-only, auto-approved) over perl/python one-liners, which run arbitrary code and always prompt; to change a file in place, use the Edit tool rather than perl -i / sed -i.`
 
 // greenlightSystemPrompt returns the system-prompt injection for this
-// session. When the session was launched against a specific ticket, a
-// single neutral line is appended pointing the agent at the URL — what to
-// do with it (read / update / close) is left to the user's prompt.
-func greenlightSystemPrompt(ticket *TicketRef) string {
-	if ticket == nil || ticket.URL == "" {
-		return greenlightSystemPromptBase
+// session. When command shims are active at session start, a line names the
+// pre-authenticated commands so the agent runs them bare instead of
+// hand-rolling `greenlight run` with manual token plumbing (issue #198).
+// When the session was launched against a specific ticket, a single neutral
+// line is appended pointing the agent at the URL — what to do with it (read /
+// update / close / stage moves) is left to the user's prompt (the app's
+// stage-aware launch chips drive this).
+//
+// shims is the same []resolvedShim the PATH shim is installed from, so the
+// prompt and the actual shim can't diverge: an empty list leaves the prompt
+// byte-for-byte unchanged, never claiming a CLI is pre-authenticated when it
+// would fall through to its own ambient auth.
+func greenlightSystemPrompt(ticket *TicketRef, shims []resolvedShim) string {
+	prompt := greenlightSystemPromptBase
+	if line := shimPreauthLine(shims); line != "" {
+		prompt += "\n\n" + line
 	}
-	return greenlightSystemPromptBase + "\n\nA ticket is in scope for this session: " + ticket.URL
+	if ticket != nil && ticket.URL != "" {
+		prompt += "\n\nA ticket is in scope for this session: " + ticket.URL
+	}
+	return prompt
+}
+
+// shimPreauthLine returns the system-prompt sentence naming the commands whose
+// greenlight shim is active for this session, or "" when no shim is active.
+// The agent should run these bare; greenlight injects the token and scrubs it
+// from output, so wrapping them in `greenlight run` or plumbing the env var
+// manually is strictly worse (issue #198).
+func shimPreauthLine(shims []resolvedShim) string {
+	if len(shims) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(shims))
+	for _, s := range shims {
+		names = append(names, s.cmd)
+	}
+	joined := strings.Join(names, ", ")
+	return "The following commands are pre-authenticated — run them directly " +
+		"(e.g. `" + names[0] + " issue list`); do not wrap them in \"greenlight run\" " +
+		"or pass a token manually: " + joined + "."
 }
 
 // deriveTranscriptPath constructs the transcript file path for the given agent.

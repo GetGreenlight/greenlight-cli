@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -18,28 +19,33 @@ import (
 // Well-known config keys. Arbitrary keys are also allowed (free strings); only
 // these have special handling (enum validation or exclusion from interfaces).
 const (
-	configKeyDeviceID        = "device_id"        // daemon-internal; never exposed via config get/set/list
-	configKeyHostID          = "host_id"          // daemon-internal (persisted host UUID); never exposed
-	configKeyAgent           = "agent"            // enum: knownAgents
-	configKeyTicketsProvider = "tickets_provider" // enum: knownTicketProviders
-	configKeyTicketsSecret   = "tickets_secret"   // greenlight secret name for the provider API token
-	configKeyShimSecret      = "shim_secret"      // greenlight secret name injected into the shimmed provider CLI
-	configKeyChips           = "chips"            // JSON array of prompt chip rules (see configChip)
+	configKeyDeviceID        = "device_id"         // daemon-internal; never exposed via config get/set/list
+	configKeyHostID          = "host_id"           // daemon-internal (persisted host UUID); never exposed
+	configKeyAgent           = "agent"             // enum: knownAgents
+	configKeyTicketsProvider = "tickets_provider"  // enum: knownTicketProviders
+	configKeyTicketsSecret   = "tickets_secret"    // greenlight secret name for the provider API token
+	configKeyShimSecret      = "shim_secret"       // greenlight secret name injected into the shimmed provider CLI
+	configKeyChips           = "chips"             // JSON array of prompt chip rules (see configChip)
 	configKeyIdleNotifyAfter = "idle_notify_after" // duration after which to send idle push notification (e.g. "5m", "1h")
+	configKeyScratchAuto     = "scratch_auto"      // bool (default on): report OS scratch dirs as ephemeral trusted roots (#119)
 )
 
-// configChip is one row in the `chips` config array. context must be "default"
-// or "tickets". autosend=true sends the expanded text immediately; false fills
-// the input field and focuses it.
+// configChip is one row in the `chips` config array — a single flat set applied
+// to every session (ticket-backed or not). Every chip sends its expanded text
+// immediately on tap (#110 removed the former fill-only `autosend` flag). Ticket
+// sessions get their stage-aware and close/re-open chips from runtime logic in
+// the apps, not from this config (see #101 — the former per-context chip sets
+// were removed).
 type configChip struct {
-	Context  string `json:"context"`
 	Label    string `json:"label"`
 	Expanded string `json:"expanded"`
-	AutoSend bool   `json:"autosend"`
 }
 
 // defaultChipsJSON is the compact JSON written to config on first daemon start.
-const defaultChipsJSON = `[{"context":"default","label":"Yes","expanded":"Yes","autosend":true},{"context":"default","label":"Continue","expanded":"Continue.","autosend":true},{"context":"default","label":"Subagent","expanded":"Launch a subagent to ","autosend":false},{"context":"default","label":"Commit & push","expanded":"Commit the current changes with a descriptive message, then push.","autosend":false},{"context":"default","label":"Spec","expanded":"Write a spec for ","autosend":false},{"context":"tickets","label":"Yes","expanded":"Yes","autosend":true},{"context":"tickets","label":"Subagent","expanded":"Launch a subagent to ","autosend":false},{"context":"tickets","label":"Work this ticket","expanded":"Work this ticket. Read it carefully to understand the acceptance criteria, implement the change on a new branch off main, and open a PR that closes it.","autosend":true},{"context":"tickets","label":"Review the PR","expanded":"Find the open PR for this ticket and review it. Leave review comments with anything that needs to change.","autosend":true},{"context":"tickets","label":"Update the spec","expanded":"Update this ticket's description to reflect the latest decisions.","autosend":true}]`
+// Only the two always-send defaults remain; #110 dropped the prefix-style
+// fill-only chips (Subagent/Commit & push/Spec) since auto-sending a template is
+// nonsense.
+const defaultChipsJSON = `[{"label":"Yes","expanded":"Yes"},{"label":"Continue","expanded":"Continue."}]`
 
 // reservedConfigKeys are daemon-internal keys (written by register/daemon
 // startup) that must never surface in or be writable through the config
@@ -98,6 +104,18 @@ func resolveConfig(project, key string) string {
 		}
 	}
 	return readScoped(scopeHost, "", key)
+}
+
+// scratchAutoEnabled resolves the scratch_auto config knob (#119). Defaults to
+// true (scratch dirs are reported as ephemeral trusted roots); a paranoid user
+// sets it false (off/0/no/false) to keep tmp prompts.
+func scratchAutoEnabled(project string) bool {
+	v := strings.ToLower(strings.TrimSpace(resolveConfig(project, configKeyScratchAuto)))
+	switch v {
+	case "0", "false", "off", "no":
+		return false
+	}
+	return true
 }
 
 // readAllConfig parses the whole config file into a key→value map. Blank lines
@@ -181,11 +199,6 @@ func validateConfigBatch(set map[string]string, unset []string) string {
 			var chips []configChip
 			if json.Unmarshal([]byte(v), &chips) != nil {
 				return "invalid_chips"
-			}
-			for _, c := range chips {
-				if c.Context != "default" && c.Context != "tickets" {
-					return "invalid_chips"
-				}
 			}
 		case configKeyIdleNotifyAfter:
 			if v != "" && v != "0" {
@@ -399,4 +412,80 @@ func writeConfigValue(key, value string) error {
 	}
 	output := strings.Join(lines, "\n") + "\n"
 	return os.WriteFile(path, []byte(output), 0644)
+}
+
+// migrateLegacyChips normalizes the host-scope `chips` config to the flat,
+// flagless single-set form `[{label, expanded}, ...]`. It folds in two
+// historical migrations:
+//   - pre-#101: drops the "tickets"-context entries (superseded by runtime
+//     stage chips) and keeps the "default"/untagged ones, dropping the
+//     now-removed `context` field.
+//   - #110: drops fill-only chips (`autosend: false` — templates meant to be
+//     edited before sending, nonsense to auto-send) and strips the now-removed
+//     `autosend` key from the survivors.
+//
+// The keep rule is "keep unless autosend is explicitly false", so a key-less
+// entry (an already-migrated survivor) is preserved. A config is considered
+// already normalized — and left byte-for-byte untouched — only when every entry
+// is exactly {label, expanded} with no `context` and no `autosend` keys; that
+// exact shape is the one daemon-restart no-op, so this runs once per install.
+// Persists via the no-clobber config write.
+//
+// Only the host-scope `chips` key is normalized (the one the daemon auto-seeds),
+// matching the host-only default-seed above. A project-scoped override
+// (`project.<enc>.chips`) carrying legacy tags is left alone — the apps filter
+// fill-only chips on decode, so it degrades gracefully until that project's
+// chips are re-saved from the editor.
+func migrateLegacyChips() {
+	raw := readConfigValue(configKeyChips)
+	if raw == "" {
+		return
+	}
+	// Parse into maps so we can tell an absent `autosend` from an explicit false
+	// (a struct bool can't) and detect the legacy `context` key by presence.
+	var entries []map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &entries) != nil {
+		return
+	}
+	needsRewrite := false
+	for _, e := range entries {
+		if _, ok := e["context"]; ok {
+			needsRewrite = true
+			break
+		}
+		if _, ok := e["autosend"]; ok {
+			needsRewrite = true
+			break
+		}
+	}
+	if !needsRewrite {
+		return // already flat & flagless — nothing to migrate
+	}
+	flat := make([]configChip, 0, len(entries))
+	for _, e := range entries {
+		if ctx, ok := e["context"]; ok {
+			var s string
+			if json.Unmarshal(ctx, &s) == nil && s == "tickets" {
+				continue // superseded by runtime stage chips
+			}
+		}
+		if auto, ok := e["autosend"]; ok {
+			var b bool
+			if json.Unmarshal(auto, &b) == nil && !b {
+				continue // fill-only template — drop rather than auto-send
+			}
+		}
+		var label, expanded string
+		_ = json.Unmarshal(e["label"], &label)
+		_ = json.Unmarshal(e["expanded"], &expanded)
+		flat = append(flat, configChip{Label: label, Expanded: expanded})
+	}
+	encoded, err := json.Marshal(flat)
+	if err != nil {
+		log.Printf("daemon: could not encode migrated chips: %v", err)
+		return
+	}
+	if err := writeConfigValue(configKeyChips, string(encoded)); err != nil {
+		log.Printf("daemon: could not persist migrated chips: %v", err)
+	}
 }

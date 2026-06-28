@@ -3,6 +3,7 @@ module greenlight
 go 1.25.0
 
 require (
+	github.com/hinshun/vt10x v0.0.0-20220301184237-5011da428d02
 	github.com/mdp/qrterminal/v3 v3.2.1
 	golang.org/x/crypto v0.40.0
 	golang.org/x/term v0.33.0

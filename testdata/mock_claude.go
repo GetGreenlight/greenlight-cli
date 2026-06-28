@@ -38,12 +38,30 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
 
 func main() {
 	fmt.Println("MOCK_CLAUDE_STARTED")
+
+	// MOCK_CLAUDE_ARGS_FILE — write the full argv (newline-joined) to this path
+	// so a test can recover flags the daemon generated (e.g. the random
+	// --session-id), then plant files at the path the streamer will scan.
+	if p := os.Getenv("MOCK_CLAUDE_ARGS_FILE"); p != "" {
+		os.WriteFile(p, []byte(strings.Join(os.Args, "\n")), 0644)
+	}
+
+	// Emit a raw byte sequence to stdout (Go-quoted, so \033, ❯, etc.
+	// work). Used to paint a fake TUI composer for the screen-tap tests (#38).
+	if raw := os.Getenv("MOCK_CLAUDE_RAW"); raw != "" {
+		if s, err := strconv.Unquote(`"` + raw + `"`); err == nil {
+			fmt.Print(s)
+		} else {
+			fmt.Print(raw)
+		}
+	}
 
 	// Read a file to trigger interpose permission request via DYLD_INSERT_LIBRARIES
 	if path := os.Getenv("MOCK_CLAUDE_READ_FILE"); path != "" {

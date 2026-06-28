@@ -54,6 +54,15 @@ type ipcRequest struct {
 
 	// resolve_shim: command name whose active shim resolution to look up.
 	Shim string `json:"shim,omitempty"`
+
+	// await_user: relay_id of the session handing control back to a human.
+	RelayID string `json:"relay_id,omitempty"`
+
+	// ticket_merged: the ticket a greenlight agent just merged, so the server can
+	// tag a reserved `done` (issue #159). Resolved without a provider token.
+	Provider string `json:"provider,omitempty"`
+	RepoKey  string `json:"repo_key,omitempty"`
+	OpaqueID string `json:"opaque_id,omitempty"`
 }
 
 // ipcResponse is the JSON control message sent by the daemon to the client.
@@ -105,7 +114,7 @@ type Daemon struct {
 
 func runDaemon(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "Usage: greenlight daemon <start|stop|status>\n")
+		fmt.Fprintf(os.Stderr, "Usage: greenlight daemon <start|stop|restart|status> [--force]\n")
 		os.Exit(1)
 	}
 
@@ -134,7 +143,25 @@ func runDaemon(args []string) {
 			}
 		}
 	case "stop":
-		stopDaemon()
+		force := false
+		for _, a := range args[1:] {
+			if a == "--force" || a == "-y" {
+				force = true
+			}
+		}
+		stopDaemon(force)
+	case "restart":
+		var deviceIDFlag string
+		force := false
+		for i, a := range args[1:] {
+			if a == "--device-id" && i+1 < len(args[1:]) {
+				deviceIDFlag = args[1:][i+1]
+			}
+			if a == "--force" || a == "-y" {
+				force = true
+			}
+		}
+		restartDaemon(deviceIDFlag, force)
 	case "status":
 		daemonStatus()
 	default:
@@ -311,11 +338,14 @@ func runDaemonForeground() {
 	}
 
 	// Persist default prompt chips on first run so users can customise them via
-	// the Config UI without losing the built-in set.
+	// the Config UI without losing the built-in set. On existing installs, migrate
+	// any pre-#101 context-tagged chip set once to the flat single-set form.
 	if readConfigValue(configKeyChips) == "" {
 		if err := writeConfigValue(configKeyChips, defaultChipsJSON); err != nil {
 			log.Printf("daemon: could not persist default chips: %v", err)
 		}
+	} else {
+		migrateLegacyChips()
 	}
 
 	sockPath := daemonSockPath()
@@ -562,6 +592,10 @@ func (d *Daemon) handleConn(conn net.Conn) {
 		sendControl(conn, ipcResponse{Type: "device_info_response", DeviceID: d.deviceID})
 	case "resolve_shim":
 		d.handleResolveShim(conn, req)
+	case "await_user":
+		d.handleAwaitUser(conn, req)
+	case "ticket_merged":
+		d.handleTicketMerged(conn, req)
 	default:
 		sendControl(conn, ipcResponse{Type: "error", Message: "unknown request type"})
 	}
@@ -598,6 +632,31 @@ func (d *Daemon) handleResolveShim(conn net.Conn, req ipcRequest) {
 		resp.ShimEnv = rs.envName
 	}
 	sendControl(conn, resp)
+}
+
+// handleAwaitUser relays a ticket handoff to the server: the session named by
+// req.RelayID has yielded control back to a human, so the server should derive
+// "waiting" and suppress the idle push until the user re-engages. Fire-and-forget
+// and best-effort — if the daemon WS is down we just ack so the ticket command
+// (whose stage move already happened) still exits 0.
+func (d *Daemon) handleAwaitUser(conn net.Conn, req ipcRequest) {
+	if req.RelayID != "" && d.daemonWS != nil && d.daemonWS.IsConnected() {
+		d.daemonWS.sendSessionAwaitUser(req.RelayID)
+	}
+	sendControl(conn, ipcResponse{Type: "ok"})
+}
+
+// handleTicketMerged relays a merge signal to the server: a greenlight agent ran
+// `greenlight ticket merge`, so the server should tag a reserved `done` on the
+// ticket (issue #159). Device-scoped, fire-and-forget, best-effort — if the
+// daemon WS is down we just ack so the merge command (whose merge already
+// happened) still exits 0.
+func (d *Daemon) handleTicketMerged(conn net.Conn, req ipcRequest) {
+	if req.Provider != "" && req.RepoKey != "" && req.OpaqueID != "" &&
+		d.daemonWS != nil && d.daemonWS.IsConnected() {
+		d.daemonWS.sendTicketMerged(req.Provider, req.RepoKey, req.OpaqueID)
+	}
+	sendControl(conn, ipcResponse{Type: "ok"})
 }
 
 // handleWSRequest forwards a generic message over the daemon WebSocket and
@@ -706,12 +765,26 @@ func readFrame(r io.Reader) (byte, []byte, error) {
 	return frameType, payload, nil
 }
 
-func stopDaemon() {
+func stopDaemon(force bool) {
+	stopDaemonImpl(force)
+}
+
+// stopDaemonImpl stops a running daemon and reports the outcome. It returns
+// false only when the user declined to terminate active sessions; true
+// otherwise (best-effort stop — the two error branches also return true
+// without confirming the daemon actually exited, so callers that need
+// certainty should re-verify via isDaemonRunning).
+//
+// When force is true the active-session confirmation prompt is skipped, so
+// the call never blocks on stdin — required for non-interactive use (deploy
+// scripts, CI). Client reads carry a deadline so a wedged daemon that accepts
+// the connection but never replies can't hang the caller indefinitely.
+func stopDaemonImpl(force bool) bool {
 	// Check for active sessions first
 	conn, err := net.DialTimeout("unix", daemonSockPath(), 2*time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "greenlight: daemon is not running\n")
-		return
+		return true
 	}
 
 	// Query status to check for active sessions
@@ -719,11 +792,12 @@ func stopDaemon() {
 	statusMsg = append(statusMsg, '\n')
 	conn.Write(statusMsg)
 
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	reader := bufio.NewReader(conn)
 	line, err := reader.ReadBytes('\n')
 	conn.Close()
 
-	if err == nil {
+	if err == nil && !force {
 		var status ipcResponse
 		if json.Unmarshal(line, &status) == nil && len(status.Sessions) > 0 {
 			fmt.Fprintf(os.Stderr, "greenlight: %d active session(s) will be terminated:\n", len(status.Sessions))
@@ -735,8 +809,8 @@ func stopDaemon() {
 			var answer string
 			fmt.Scanln(&answer)
 			if answer != "y" && answer != "Y" {
-				fmt.Fprintf(os.Stderr, "greenlight: stop cancelled\n")
-				return
+				fmt.Fprintf(os.Stderr, "greenlight: stop cancelled (use --force to skip this prompt)\n")
+				return false
 			}
 		}
 	}
@@ -745,7 +819,7 @@ func stopDaemon() {
 	conn, err = net.DialTimeout("unix", daemonSockPath(), 2*time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "greenlight: daemon is not running\n")
-		return
+		return true
 	}
 	defer conn.Close()
 
@@ -753,11 +827,12 @@ func stopDaemon() {
 	msg = append(msg, '\n')
 	conn.Write(msg)
 
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	reader = bufio.NewReader(conn)
 	line, err = reader.ReadBytes('\n')
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "greenlight: daemon stopped\n")
-		return
+		return true
 	}
 	var resp ipcResponse
 	json.Unmarshal(line, &resp)
@@ -766,6 +841,73 @@ func stopDaemon() {
 	} else {
 		fmt.Fprintf(os.Stderr, "greenlight: %s\n", resp.Message)
 	}
+	return true
+}
+
+// killDaemonByPid reads the daemon's PID file and sends SIGKILL to the
+// process. Returns true if the signal was delivered. Used as a last resort
+// when a wedged daemon refuses to release its socket.
+func killDaemonByPid() bool {
+	data, err := os.ReadFile(daemonPidPath())
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.SIGKILL) == nil
+}
+
+// waitForDaemonDown polls the socket until the daemon stops accepting
+// connections or the timeout elapses. Returns true if the daemon is down.
+func waitForDaemonDown(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !isDaemonRunning() {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return !isDaemonRunning()
+}
+
+// restartDaemon stops a running daemon (if any) and starts a fresh one,
+// preserving the enrolled device/host. Used to pick up a new binary or
+// recover a wedged daemon without losing the host enrollment. When force is
+// true it skips the active-session confirmation prompt so it can run
+// non-interactively.
+func restartDaemon(deviceIDFlag string, force bool) {
+	if isDaemonRunning() {
+		if !stopDaemonImpl(force) {
+			// User declined to terminate active sessions; leave the
+			// running daemon untouched.
+			return
+		}
+		// Wait for the socket to clear so the new daemon can bind it.
+		if !waitForDaemonDown(5 * time.Second) {
+			// A wedged daemon may have accepted the stop request but never
+			// acted on it. SIGKILL it via the PID file so the restart can
+			// proceed rather than leaving the socket held.
+			if killDaemonByPid() {
+				fmt.Fprintf(os.Stderr, "greenlight: daemon unresponsive, sent SIGKILL\n")
+			}
+			if !waitForDaemonDown(5 * time.Second) {
+				fmt.Fprintf(os.Stderr, "greenlight: daemon did not stop, aborting restart\n")
+				os.Exit(1)
+			}
+		}
+	}
+
+	if err := ensureDaemon(deviceIDFlag); err != nil {
+		fmt.Fprintf(os.Stderr, "greenlight: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "greenlight: daemon restarted\n")
 }
 
 func daemonStatus() {

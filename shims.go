@@ -364,10 +364,18 @@ func lookupActiveShim(cmd string) (resolvedShim, bool) {
 	return rs, ok
 }
 
-// resolveRealBinary finds cmd on PATH, skipping any entry that resolves back to
-// the running greenlight binary (the per-session shim symlink). This is what
-// lets the shim find the real `gh` instead of itself, without depending on the
-// shim dir's location.
+// resolveRealBinary finds cmd on PATH, skipping any greenlight shim so the shim
+// reaches the genuine OS binary (e.g. the real `gh`) instead of looping back
+// into greenlight. Two filters, because either alone is insufficient:
+//
+//   - Any PATH entry living in a per-session shim dir (base name
+//     "greenlight-bin-<relayID>"). This catches a *foreign* greenlight shim —
+//     one pointing at a different greenlight build — which the self check below
+//     cannot, since it resolves to some other binary, not us. Two such shims on
+//     PATH (e.g. a greenlight session nested inside another, or a stale shim
+//     dir) would otherwise exec each other forever (issue #131).
+//   - Any candidate resolving to the running binary itself, kept as a second
+//     guard for an own shim that somehow sits outside a greenlight-bin- dir.
 func resolveRealBinary(cmd string) (string, error) {
 	self, err := os.Executable()
 	if err == nil {
@@ -378,6 +386,10 @@ func resolveRealBinary(cmd string) (string, error) {
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		if dir == "" {
 			dir = "."
+		}
+		// Skip every entry in a greenlight shim dir, whichever build it points at.
+		if strings.HasPrefix(filepath.Base(dir), shimDirPrefix) {
+			continue
 		}
 		cand := filepath.Join(dir, cmd)
 		fi, statErr := os.Stat(cand)

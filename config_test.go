@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -181,6 +182,8 @@ func TestValidateConfigBatch(t *testing.T) {
 		{"bad agent", map[string]string{"agent": "vim"}, nil, "invalid_agent"},
 		{"bad provider", map[string]string{"tickets_provider": "jira"}, nil, "invalid_provider"},
 		{"ok provider", map[string]string{"tickets_provider": "github"}, nil, ""},
+		{"ok flat chips", map[string]string{"chips": `[{"label":"x","expanded":"y","autosend":true}]`}, nil, ""},
+		{"malformed chips", map[string]string{"chips": `[{"label":`}, nil, "invalid_chips"},
 		{"device_id set", map[string]string{"device_id": "x"}, nil, "device_id_forbidden"},
 		{"device_id unset", nil, []string{"device_id"}, "device_id_forbidden"},
 		{"host_id set", map[string]string{"host_id": "x"}, nil, "device_id_forbidden"},
@@ -199,6 +202,117 @@ func TestValidateConfigBatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMigrateLegacyChips(t *testing.T) {
+	t.Run("empty value is a no-op", func(t *testing.T) {
+		withTempConfig(t)
+		migrateLegacyChips()
+		if got := readConfigValue(configKeyChips); got != "" {
+			t.Errorf("chips = %q, want empty (untouched)", got)
+		}
+	})
+
+	t.Run("unparseable value is a no-op", func(t *testing.T) {
+		withTempConfig(t)
+		const garbage = `[{"label":`
+		if err := writeConfigValue(configKeyChips, garbage); err != nil {
+			t.Fatal(err)
+		}
+		migrateLegacyChips()
+		if got := readConfigValue(configKeyChips); got != garbage {
+			t.Errorf("chips = %q, want unchanged %q", got, garbage)
+		}
+	})
+
+	t.Run("already-flat value is not rewritten", func(t *testing.T) {
+		withTempConfig(t)
+		// Already normalized — no context markers and no autosend keys. Must be
+		// left byte-for-byte intact so a daemon restart can't clobber a user's
+		// customised flat set.
+		const flat = `[{"label":"Yes","expanded":"Yes"}]`
+		if err := writeConfigValue(configKeyChips, flat); err != nil {
+			t.Fatal(err)
+		}
+		migrateLegacyChips()
+		if got := readConfigValue(configKeyChips); got != flat {
+			t.Errorf("chips = %q, want unchanged %q", got, flat)
+		}
+	})
+
+	t.Run("context-tagged value is flattened: tickets dropped, fill-only dropped, autosend stripped", func(t *testing.T) {
+		withTempConfig(t)
+		legacy := `[{"context":"default","label":"Yes","expanded":"Yes","autosend":true},` +
+			`{"context":"default","label":"Spec","expanded":"Write a spec for ","autosend":false},` +
+			`{"context":"tickets","label":"Work this ticket","expanded":"Work this ticket.","autosend":true}]`
+		if err := writeConfigValue(configKeyChips, legacy); err != nil {
+			t.Fatal(err)
+		}
+		migrateLegacyChips()
+
+		got := readConfigValue(configKeyChips)
+		// Re-running must be idempotent — the flattened value has no context
+		// markers and no autosend keys, so a second pass is a no-op.
+		migrateLegacyChips()
+		if again := readConfigValue(configKeyChips); again != got {
+			t.Errorf("migration not idempotent: first %q, second %q", got, again)
+		}
+
+		// The tickets entry is gone, the fill-only "Spec" chip is dropped, and
+		// the one surviving "Yes" chip carries neither `context` nor `autosend`.
+		var raw []map[string]any
+		if err := json.Unmarshal([]byte(got), &raw); err != nil {
+			t.Fatalf("migrated chips is not valid JSON: %v (%q)", err, got)
+		}
+		if len(raw) != 1 {
+			t.Fatalf("migrated chips has %d entries, want 1: %q", len(raw), got)
+		}
+		if raw[0]["label"] != "Yes" || raw[0]["expanded"] != "Yes" {
+			t.Errorf("migrated survivor = %v, want {Yes, Yes}", raw[0])
+		}
+		if _, ok := raw[0]["context"]; ok {
+			t.Errorf("migrated chip still carries a context field: %v", raw[0])
+		}
+		if _, ok := raw[0]["autosend"]; ok {
+			t.Errorf("migrated chip still carries an autosend field: %v", raw[0])
+		}
+	})
+
+	t.Run("flat value with autosend keys: fill-only dropped, survivors stripped, idempotent", func(t *testing.T) {
+		withTempConfig(t)
+		// Context-free (post-#101) set still carrying the #110 autosend flag:
+		// the false entries are dropped, the true survivors lose the key.
+		mixed := `[{"label":"Yes","expanded":"Yes","autosend":true},` +
+			`{"label":"Subagent","expanded":"Launch a subagent to ","autosend":false},` +
+			`{"label":"Continue","expanded":"Continue.","autosend":true}]`
+		if err := writeConfigValue(configKeyChips, mixed); err != nil {
+			t.Fatal(err)
+		}
+		migrateLegacyChips()
+		got := readConfigValue(configKeyChips)
+
+		var raw []map[string]any
+		if err := json.Unmarshal([]byte(got), &raw); err != nil {
+			t.Fatalf("migrated chips is not valid JSON: %v (%q)", err, got)
+		}
+		if len(raw) != 2 {
+			t.Fatalf("migrated chips has %d entries, want 2: %q", len(raw), got)
+		}
+		if raw[0]["label"] != "Yes" || raw[1]["label"] != "Continue" {
+			t.Errorf("migrated labels = [%v, %v], want [Yes, Continue]", raw[0]["label"], raw[1]["label"])
+		}
+		for _, c := range raw {
+			if _, ok := c["autosend"]; ok {
+				t.Errorf("migrated chip still carries an autosend field: %v", c)
+			}
+		}
+
+		// Second pass is a no-op — the value is now flat and flagless.
+		migrateLegacyChips()
+		if again := readConfigValue(configKeyChips); again != got {
+			t.Errorf("migration not idempotent: first %q, second %q", got, again)
+		}
+	})
 }
 
 func TestEffectiveConfig(t *testing.T) {

@@ -89,7 +89,10 @@ func runConnect(args []string) {
 
 // startTranscriptStreamer polls for the agent's transcript file to appear,
 // then spawns `greenlight stream --bridge` to tail it into the bridge file.
-func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID, bridgePath, cwd string, notBefore time.Time, convIDOut *string) {
+// addScratchpadRoot, when non-nil, is called once with the running session's
+// Claude scratchpad directory after the transcript path settles (issue #182), so
+// the roots manager can trust it as a session-scoped scratch root.
+func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID, bridgePath, cwd string, notBefore time.Time, convIDOut *string, addScratchpadRoot func(string)) {
 	// Poll until the agent creates its transcript file or the session ends.
 	// Some agents (e.g. Codex) only create the file on first user prompt,
 	// so we poll for the entire session lifetime rather than using a fixed cap.
@@ -136,6 +139,16 @@ func startTranscriptStreamer(ctx context.Context, agent, relayID, agentSessionID
 		}
 	}
 	log.Printf("Transcript: found %s", transcriptPath)
+
+	// Report the Claude scratchpad as a session-scoped trusted root (#182). The
+	// transcript path has settled here, so the derived UUID is final. No-op for
+	// non-Claude agents (claudeScratchpadDir returns "") and when no manager was
+	// passed.
+	if addScratchpadRoot != nil {
+		if sp := claudeScratchpadDir(agent, transcriptPath); sp != "" {
+			addScratchpadRoot(sp)
+		}
+	}
 
 	// Extract conversation ID from transcript path and persist the
 	// conversation→relay mapping so resumed sessions reuse the same relay ID.

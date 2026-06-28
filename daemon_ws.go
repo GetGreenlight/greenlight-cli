@@ -40,17 +40,20 @@ type DaemonWS struct {
 
 // sessionWS is a per-session handle to the shared daemon WebSocket.
 type sessionWS struct {
-	daemon     *DaemonWS
-	relayID    string
-	project    string
-	agent      string // server-side agent name (e.g. "claude-code")
-	localAgent string // local agent name (e.g. "claude") — used for skill discovery paths
-	cwd        string
-	version    string
+	daemon              *DaemonWS
+	relayID             string
+	project             string
+	agent               string // server-side agent name (e.g. "claude-code")
+	localAgent          string // local agent name (e.g. "claude") — used for skill discovery paths
+	cwd                 string
+	version             string
 	ticket              *TicketRef
 	idleNotifyAfterSecs int
+	startedAt           time.Time     // session start time; reported on session_start so the server can order live sessions (#154)
+	roots               []SessionRoot // trusted roots reported at session_start (#119); resent on reconnect
 	injectFunc          func([]byte) error
 	killFunc            func()
+	suggestionFunc      func() string // composer-suggestion tap (#38), nil when no screen / unsupported agent
 
 	// lastTranscriptAt records when this session last sent a transcript frame.
 	// Reported to the server on (re)connect so it can restore the idle-timer
@@ -253,7 +256,7 @@ func (d *DaemonWS) SendRequest(msgType, requestID string, data interface{}, time
 // StartSession sends a session_start message over the daemon WS and waits
 // for the server to acknowledge it. This replaces HTTP enrollment for
 // sessions within an already-enrolled daemon.
-func (d *DaemonWS) StartSession(relayID, project, agent, cwd, version, name string, ticket *TicketRef, idleNotifyAfterSecs int) ([]Skill, error) {
+func (d *DaemonWS) StartSession(relayID, project, agent, cwd, version, name string, ticket *TicketRef, idleNotifyAfterSecs int, startedAt time.Time, roots []SessionRoot) ([]Skill, error) {
 	// Store metadata on the session handle so we can re-register on reconnect.
 	// Use a write lock: reregisterSessions reads these fields after releasing
 	// d.mu, so writing them without the lock is a data race.
@@ -266,18 +269,20 @@ func (d *DaemonWS) StartSession(relayID, project, agent, cwd, version, name stri
 		sw.version = version
 		sw.ticket = ticket
 		sw.idleNotifyAfterSecs = idleNotifyAfterSecs
+		sw.startedAt = startedAt
+		sw.roots = roots
 	}
 	d.mu.Unlock()
 
 	// Initial start has no transcripts yet, so report 0 (omitted on the wire).
-	return d.sendSessionStart(relayID, project, agent, cwd, version, name, ticket, idleNotifyAfterSecs, 0)
+	return d.sendSessionStart(relayID, project, agent, cwd, version, name, ticket, idleNotifyAfterSecs, 0, startedAt, roots)
 }
 
 // sendSessionStart sends a session_start message and waits for ack. Returns
 // the skill bundle the server delivered for this session (may be empty).
 // lastTranscriptUnix, when > 0, tells the server when this session last sent a
 // transcript so it can restore the idle-timer baseline after a restart.
-func (d *DaemonWS) sendSessionStart(relayID, project, agent, cwd, version, name string, ticket *TicketRef, idleNotifyAfterSecs int, lastTranscriptUnix int64) ([]Skill, error) {
+func (d *DaemonWS) sendSessionStart(relayID, project, agent, cwd, version, name string, ticket *TicketRef, idleNotifyAfterSecs int, lastTranscriptUnix int64, startedAt time.Time, roots []SessionRoot) ([]Skill, error) {
 	hostname, _ := os.Hostname()
 	data := map[string]interface{}{
 		"project": project,
@@ -286,11 +291,17 @@ func (d *DaemonWS) sendSessionStart(relayID, project, agent, cwd, version, name 
 		"version": version,
 		"name":    name,
 	}
+	if !startedAt.IsZero() {
+		data["started_at"] = startedAt.UTC().Format(time.RFC3339)
+	}
 	if ticket != nil {
 		data["ticket"] = ticket
 	}
 	if idleNotifyAfterSecs > 0 {
 		data["idle_notify_after_secs"] = idleNotifyAfterSecs
+	}
+	if len(roots) > 0 {
+		data["roots"] = roots
 	}
 	if lastTranscriptUnix > 0 {
 		data["last_transcript_at"] = lastTranscriptUnix
@@ -354,7 +365,7 @@ func (d *DaemonWS) reregisterSessions() {
 		}
 		// Reconnect re-registers existing sessions; skills are installed once
 		// at original session start, so the returned list is discarded here.
-		if _, err := d.sendSessionStart(sw.relayID, sw.project, sw.agent, sw.cwd, sw.version, sw.Name(), sw.ticket, sw.idleNotifyAfterSecs, lastTranscriptUnix); err != nil {
+		if _, err := d.sendSessionStart(sw.relayID, sw.project, sw.agent, sw.cwd, sw.version, sw.Name(), sw.ticket, sw.idleNotifyAfterSecs, lastTranscriptUnix, sw.startedAt, sw.roots); err != nil {
 			log.Printf("daemon-ws: failed to re-register session %s: %v", sw.relayID, err)
 		} else {
 			log.Printf("daemon-ws: re-registered session %s", sw.relayID)
@@ -370,6 +381,31 @@ func (d *DaemonWS) EndSession(relayID string) {
 	}
 	msgBytes, _ := json.Marshal(msg)
 	d.ws.SendText(msgBytes)
+}
+
+// dispatchControlPayload routes a decoded control payload through
+// routeControlFrame, injecting the session's relay_id if the payload omits it
+// (control frames wrapped for a specific session carry relay_id on the
+// envelope, not inside the payload). Unrecognized control types are logged and
+// dropped by routeControlFrame's default case — never injected into the PTY.
+func (d *DaemonWS) dispatchControlPayload(decoded []byte, relayID string) {
+	if len(decoded) == 0 || decoded[0] != '{' {
+		log.Printf("daemon-ws: dropping non-JSON control payload for %s", relayID)
+		return
+	}
+	var full map[string]interface{}
+	if json.Unmarshal(decoded, &full) != nil {
+		log.Printf("daemon-ws: dropping unparseable control payload for %s", relayID)
+		return
+	}
+	if _, ok := full["relay_id"]; !ok {
+		full["relay_id"] = relayID
+	}
+	tagged, err := json.Marshal(full)
+	if err != nil {
+		return
+	}
+	d.routeControlFrame(tagged)
 }
 
 // routeControlFrame handles binary control frames from the server.
@@ -411,8 +447,16 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 		d.handleProjectHistory(data)
 	case "list_skills":
 		d.handleListSkills(data)
+	case "suggestion_get":
+		go d.handleSuggestionGet(data)
 	case "list_tickets":
 		go d.handleListTickets(data)
+	case "read_ticket":
+		go d.handleReadTicket(data)
+	case "create_ticket":
+		go d.handleCreateTicket(data)
+	case "update_ticket":
+		go d.handleUpdateTicket(data)
 	case "config_get":
 		d.handleConfigGet(data)
 	case "config_set":
@@ -449,6 +493,69 @@ func (d *DaemonWS) sendSessionIdleConfig(relayID string, idleNotifyAfterSecs int
 	}
 	msg := map[string]interface{}{
 		"type":     "session_idle_config",
+		"relay_id": relayID,
+		"data":     json.RawMessage(data),
+	}
+	msgBytes, err := json.Marshal(msg)
+	if err != nil {
+		return
+	}
+	d.ws.SendText(msgBytes)
+}
+
+// sendSessionAwaitUser tells the server that a live session has handed control
+// back to a human (a ticket handoff: submit/approve/reject/merge/close). The
+// server marks the session "waiting" and suppresses its idle push until the user
+// re-engages. Session-scoped, fire-and-forget, no reply — modelled on
+// sendSessionIdleConfig.
+func (d *DaemonWS) sendSessionAwaitUser(relayID string) {
+	msg := map[string]interface{}{
+		"type":     "session_await_user",
+		"relay_id": relayID,
+	}
+	msgBytes, err := json.Marshal(msg)
+	if err != nil {
+		return
+	}
+	d.ws.SendText(msgBytes)
+}
+
+// sendTicketMerged tells the server that a greenlight agent merged a ticket via
+// `greenlight ticket merge`, so it can tag a reserved `done` (issue #159).
+// Device-scoped (no relay_id), fire-and-forget, no reply — modelled on
+// sendSessionAwaitUser. Best-effort: the merge already happened, so a send
+// failure must not surface to the user.
+func (d *DaemonWS) sendTicketMerged(provider, repoKey, opaqueID string) {
+	msg := map[string]interface{}{
+		"type":      "ticket_merged",
+		"provider":  provider,
+		"repo_key":  repoKey,
+		"opaque_id": opaqueID,
+	}
+	msgBytes, err := json.Marshal(msg)
+	if err != nil {
+		return
+	}
+	d.ws.SendText(msgBytes)
+}
+
+// SendSessionRoots pushes a mid-session trusted-root update to the server (#119,
+// §4.1). The set fully replaces the session's prior non-cwd roots, so it's
+// idempotent — a missed or duplicated send self-heals on the next one. Also
+// updates the stored set so a later reconnect re-reports the latest roots.
+func (d *DaemonWS) SendSessionRoots(relayID string, roots []SessionRoot) {
+	d.mu.Lock()
+	if sw := d.sessions[relayID]; sw != nil {
+		sw.roots = roots
+	}
+	d.mu.Unlock()
+
+	data, err := json.Marshal(map[string]interface{}{"roots": roots})
+	if err != nil {
+		return
+	}
+	msg := map[string]interface{}{
+		"type":     "session_roots",
 		"relay_id": relayID,
 		"data":     json.RawMessage(data),
 	}
@@ -622,7 +729,7 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 	// Device-scoped control frames have no relay_id (no session yet).
 	// Dispatch them directly to routeControlFrame.
 	if msg.RelayID == "" {
-		if msg.Type == "new_session" || msg.Type == "list_tickets" || msg.Type == "config_get" || msg.Type == "config_set" {
+		if msg.Type == "new_session" || msg.Type == "list_tickets" || msg.Type == "read_ticket" || msg.Type == "create_ticket" || msg.Type == "update_ticket" || msg.Type == "config_get" || msg.Type == "config_set" {
 			d.routeControlFrame(data)
 			return true
 		}
@@ -655,55 +762,89 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 		decoded = []byte(content)
 	}
 
-	// The server wraps both input and control messages as type "binary".
-	// After decoding, check if the payload is a known control message
-	// (e.g. {"type":"kill"}) and route it instead of injecting as text.
-	if len(decoded) > 0 && decoded[0] == '{' {
-		var ctrl struct{ Type string `json:"type"` }
-		if json.Unmarshal(decoded, &ctrl) == nil {
-			switch ctrl.Type {
-			case "kill", "wake", "session_history", "session_transcript", "delete_session", "list_skills":
-				var full map[string]interface{}
-				if json.Unmarshal(decoded, &full) == nil {
-					if _, ok := full["relay_id"]; !ok {
-						full["relay_id"] = msg.RelayID
-					}
-					if tagged, err := json.Marshal(full); err == nil {
-						d.routeControlFrame(tagged)
-						return true
-					}
-				}
+	// Disambiguate PTY input from control frames. The server tags the envelope
+	// by frame kind (msg.Type): "input" is verbatim PTY input — inject it even
+	// when the user's own message happens to be JSON; "control" is a control
+	// frame — route it, never inject. routeControlFrame's default case safely
+	// logs+drops anything this build doesn't recognize, so a control message
+	// from a newer server can never be typed into the agent as keystrokes.
+	switch msg.Type {
+	case "control":
+		d.dispatchControlPayload(decoded, msg.RelayID)
+		return true
+	case "input":
+		// fall through to injection below — no content inspection.
+	default:
+		// Legacy servers tag both input and control as "binary", so they are
+		// indistinguishable at the envelope level. Fall back to content
+		// inspection: a JSON object with a non-empty top-level "type" is a
+		// control frame; anything else is input. This preserves the keystroke
+		// safety net against older servers, at the cost of dropping the rare
+		// phone message that is itself a {"type":...} object.
+		if len(decoded) > 0 && decoded[0] == '{' {
+			var ctrl struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(decoded, &ctrl) == nil && ctrl.Type != "" {
+				d.dispatchControlPayload(decoded, msg.RelayID)
+				return true
 			}
 		}
 	}
 
+	log.Printf("daemon-ws: inject %d bytes to %s: %q",
+		len(decoded), msg.RelayID, previewBytes(decoded, 60))
+
+	// Deliver through the shared submit path so phone messages and the autopilot
+	// initial prompt are typed into the PTY identically.
+	if err := submitInput(sw.injectFunc, decoded); err != nil {
+		log.Printf("daemon-ws: inject error for %s: %v", msg.RelayID, err)
+	}
+
+	return true
+}
+
+// submitGap is the delay between injecting a message's text and the separate
+// Enter keystroke, so TUIs register a submit rather than a paste.
+const submitGap = 50 * time.Millisecond
+
+// submitInput injects raw bytes into a PTY as a user message using the default
+// steady-state Enter gap (submitGap). It is the path for phone relay_input
+// messages (handleRelayMessage). The autopilot initial prompt uses
+// submitInputGap directly with a wider gap (see injectInitialPrompt).
+func submitInput(inject func([]byte) error, raw []byte) error {
+	return submitInputGap(inject, raw, submitGap)
+}
+
+// submitInputGap injects raw bytes into a PTY as a user message: it converts
+// newlines to carriage returns (raw PTY mode treats Enter as \r), strips the
+// trailing \r, injects the text, then injects a separate \r after gap so TUIs
+// treat it as a submit and not a paste. It returns the first inject error. The
+// gap is caller-tunable because a freshly rendered TUI composer needs a longer
+// beat before the Enter than a session already idling at the prompt.
+func submitInputGap(inject func([]byte) error, raw []byte, gap time.Duration) error {
 	// Convert \n to \r for raw PTY mode (Enter = \r, not \n).
-	input := bytes.ReplaceAll(decoded, []byte{'\n'}, []byte{'\r'})
+	input := bytes.ReplaceAll(raw, []byte{'\n'}, []byte{'\r'})
 
 	// Strip trailing \r — send it separately after a brief delay so TUI
 	// apps don't treat the whole thing as a paste.
 	text := bytes.TrimRight(input, "\r")
 	needsSubmit := len(text) < len(input) || len(text) > 0
 
-	log.Printf("daemon-ws: inject %d bytes to %s%s: %q",
-		len(text), msg.RelayID,
-		map[bool]string{true: " +<CR>", false: ""}[needsSubmit],
-		previewBytes(text, 60))
-
 	if len(text) > 0 {
-		if err := sw.injectFunc(text); err != nil {
-			log.Printf("daemon-ws: inject error for %s: %v", msg.RelayID, err)
+		if err := inject(text); err != nil {
+			return err
 		}
 	}
 
 	if needsSubmit {
-		time.Sleep(50 * time.Millisecond)
-		if err := sw.injectFunc([]byte{'\r'}); err != nil {
-			log.Printf("daemon-ws: inject error for %s: %v", msg.RelayID, err)
+		time.Sleep(gap)
+		if err := inject([]byte{'\r'}); err != nil {
+			return err
 		}
 	}
 
-	return true
+	return nil
 }
 
 // previewBytes returns a short, log-friendly preview of `b` for
@@ -797,6 +938,48 @@ func (d *DaemonWS) handleListSkills(data []byte) {
 	out, err := json.Marshal(resp)
 	if err != nil {
 		log.Printf("daemon-ws: marshal skills_listed: %v", err)
+		return
+	}
+	d.ws.SendText(out)
+}
+
+// handleSuggestionGet greps the live PTY composer line for the agent's
+// ghost-suggestion text on demand (experimental, issue #38) and replies
+// suggested_prompt. Runs in its own goroutine because the tap samples over
+// ~120ms. Replies with empty text when the session has no tap (feature off) or
+// is unknown, so a caller is never left waiting. The app polls this while on
+// the session transcript screen and offers any non-empty text as an
+// autocomplete chip.
+func (d *DaemonWS) handleSuggestionGet(data []byte) {
+	var msg struct {
+		RelayID string `json:"relay_id"`
+	}
+	if json.Unmarshal(data, &msg) != nil || msg.RelayID == "" {
+		log.Printf("daemon-ws: suggestion_get missing relay_id")
+		return
+	}
+	d.mu.RLock()
+	sw := d.sessions[msg.RelayID]
+	d.mu.RUnlock()
+
+	text := ""
+	if sw == nil {
+		log.Printf("daemon-ws: suggestion_get for unknown session %s", msg.RelayID)
+	} else if sw.suggestionFunc != nil {
+		// Sessions without a tap (non-claude / unsupported agent) silently
+		// return empty; only log an actual extracted suggestion.
+		if text = sw.suggestionFunc(); text != "" {
+			log.Printf("daemon-ws: suggestion_get %s -> %q", msg.RelayID, text)
+		}
+	}
+	resp := map[string]interface{}{
+		"type":     "suggested_prompt",
+		"relay_id": msg.RelayID,
+		"text":     text,
+	}
+	out, err := json.Marshal(resp)
+	if err != nil {
+		log.Printf("daemon-ws: marshal suggested_prompt: %v", err)
 		return
 	}
 	d.ws.SendText(out)

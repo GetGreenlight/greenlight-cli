@@ -3,10 +3,15 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 )
+
+// shimDirPrefix is the base-name prefix of every per-session CLI shim dir
+// ($TMPDIR/greenlight-bin-<relayID>). resolveRealBinary keys off it to skip
+// *any* greenlight shim on PATH — including ones from a different greenlight
+// build, which the self-symlink check can't catch.
+const shimDirPrefix = "greenlight-bin-"
 
 // buildID isolates daemon state per server target. Empty = prod (default,
 // preserves the existing ~/.greenlight + /tmp/greenlight-daemon.sock layout).
@@ -62,7 +67,7 @@ func setupCLIShim(relayID string) (string, func()) {
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
 	}
-	dir := filepath.Join(os.TempDir(), fmt.Sprintf("greenlight-bin-%s", relayID))
+	dir := filepath.Join(os.TempDir(), shimDirPrefix+relayID)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", nil
 	}

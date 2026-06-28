@@ -129,6 +129,16 @@ type Server struct {
 	// secrets is the set of secret key names returned for device-scoped
 	// secrets_list requests. Empty by default; set via SetSecrets.
 	secrets []string
+
+	// ticketStages is an in-memory stand-in for the real server's ticket_stages
+	// table (one scalar stage per ticket), keyed by "repo_key\x00opaque_id".
+	// Backs the device-scoped ticket_stage_get / ticket_stage_set daemon-WS ops.
+	ticketStages map[string]string
+
+	// ticketTags is an in-memory stand-in for the real server's ticket_tags
+	// table, keyed by "repo_key\x00opaque_id". Backs the device-scoped
+	// ticket_tags_get / ticket_tags_set daemon-WS ops.
+	ticketTags map[string][]string
 }
 
 // SetSecrets sets the secret key names the mock returns for secrets_list
@@ -313,6 +323,82 @@ func (s *Server) defaultWS(w http.ResponseWriter, r *http.Request) {
 				"type":       "secrets_get_response",
 				"request_id": env.Data.RequestID,
 				"error":      "not_found",
+			})
+			conn.Write(ctx, websocket.MessageText, resp)
+		}
+
+		// Device-scoped ticket-stage ops: a small in-memory scalar store
+		// standing in for the real server's ticket_stages table. An empty
+		// stage on a set clears it.
+		if hdr.Type == "ticket_stage_get" || hdr.Type == "ticket_stage_set" {
+			var env struct {
+				Data struct {
+					RequestID string `json:"request_id"`
+					RepoKey   string `json:"repo_key"`
+					OpaqueID  string `json:"opaque_id"`
+					Stage     string `json:"stage"`
+				} `json:"data"`
+			}
+			json.Unmarshal(data, &env)
+			key := env.Data.RepoKey + "\x00" + env.Data.OpaqueID
+			respType := "ticket_stage_get_response"
+			s.mu.Lock()
+			if s.ticketStages == nil {
+				s.ticketStages = map[string]string{}
+			}
+			if hdr.Type == "ticket_stage_set" {
+				respType = "ticket_stage_set_response"
+				if env.Data.Stage == "" {
+					delete(s.ticketStages, key)
+				} else {
+					s.ticketStages[key] = env.Data.Stage
+				}
+			}
+			stage := s.ticketStages[key]
+			s.mu.Unlock()
+			resp, _ := json.Marshal(map[string]any{
+				"type":       respType,
+				"request_id": env.Data.RequestID,
+				"stage":      stage,
+			})
+			conn.Write(ctx, websocket.MessageText, resp)
+		}
+
+		// Device-scoped ticket-tag ops: a small in-memory replace-set store
+		// standing in for the real server's ticket_tags table.
+		if hdr.Type == "ticket_tags_get" || hdr.Type == "ticket_tags_set" {
+			var env struct {
+				Data struct {
+					RequestID string   `json:"request_id"`
+					RepoKey   string   `json:"repo_key"`
+					OpaqueID  string   `json:"opaque_id"`
+					Tags      []string `json:"tags"`
+				} `json:"data"`
+			}
+			json.Unmarshal(data, &env)
+			key := env.Data.RepoKey + "\x00" + env.Data.OpaqueID
+			respType := "ticket_tags_get_response"
+			s.mu.Lock()
+			if s.ticketTags == nil {
+				s.ticketTags = map[string][]string{}
+			}
+			if hdr.Type == "ticket_tags_set" {
+				respType = "ticket_tags_set_response"
+				tags := env.Data.Tags
+				if tags == nil {
+					tags = []string{}
+				}
+				s.ticketTags[key] = tags
+			}
+			tags := s.ticketTags[key]
+			if tags == nil {
+				tags = []string{}
+			}
+			s.mu.Unlock()
+			resp, _ := json.Marshal(map[string]any{
+				"type":       respType,
+				"request_id": env.Data.RequestID,
+				"tags":       tags,
 			})
 			conn.Write(ctx, websocket.MessageText, resp)
 		}

@@ -48,12 +48,47 @@ type interposeResponse struct {
 type interposeRelay struct {
 	mu sync.Mutex
 	r  *Relay
+	// onWorktreeCmd, when set, is invoked after an approved `git worktree
+	// add/remove/move` so the session can re-report its trusted roots (#119).
+	onWorktreeCmd func(cmd string)
+	// onFileReconcile, when set, is invoked with a file op's target path before
+	// the request is forwarded; it lazily re-reports trusted roots when the path
+	// falls in a mid-session worktree trigger 2 missed (#119 trigger 3 / #148).
+	onFileReconcile func(path string) bool
 }
 
 func (ir *interposeRelay) SetRelay(r *Relay) {
 	ir.mu.Lock()
 	ir.r = r
 	ir.mu.Unlock()
+}
+
+// SetWorktreeHandler registers the callback fired after an approved git-worktree
+// mutation (issue #119, trigger 2).
+func (ir *interposeRelay) SetWorktreeHandler(fn func(cmd string)) {
+	ir.mu.Lock()
+	ir.onWorktreeCmd = fn
+	ir.mu.Unlock()
+}
+
+func (ir *interposeRelay) worktreeHandler() func(cmd string) {
+	ir.mu.Lock()
+	defer ir.mu.Unlock()
+	return ir.onWorktreeCmd
+}
+
+// SetReconcileHandler registers the callback fired before a file-op permission
+// request to lazily reconcile trusted roots (issue #119, trigger 3 / #148).
+func (ir *interposeRelay) SetReconcileHandler(fn func(path string) bool) {
+	ir.mu.Lock()
+	ir.onFileReconcile = fn
+	ir.mu.Unlock()
+}
+
+func (ir *interposeRelay) reconcileHandler() func(path string) bool {
+	ir.mu.Lock()
+	defer ir.mu.Unlock()
+	return ir.onFileReconcile
 }
 
 func (ir *interposeRelay) ClearRelay(r *Relay) {
@@ -392,6 +427,21 @@ func handleInterposeConn(conn net.Conn, agent string, ir *interposeRelay) {
 		return
 	}
 
+	// Trigger 3 (#119 / #148): before forwarding a file op whose absolute path
+	// is outside every root we currently track, re-enumerate worktrees and push
+	// session_roots synchronously. This is the durable safety net for a worktree
+	// created mid-session that trigger 2's optimistic argv parse missed (ran from
+	// a subdir, lost the race, mis-parsed). By the time the edit happens the
+	// worktree provably exists, so git reports it authoritatively; the
+	// synchronous push lands the new root on the server before this request does.
+	if p := fileToolReconcilePath(toolName, toolInput); p != "" {
+		if reconcile := ir.reconcileHandler(); reconcile != nil {
+			if reconcile(p) {
+				log.Printf("Interpose: reconciled trusted roots for %s %s", toolName, p)
+			}
+		}
+	}
+
 	// Hook requests (AskUserQuestion, ExitPlanMode) must not show a terminal
 	// prompt — Claude Code already displays the question/plan in its own window.
 	// Send straight to the phone and wait, no terminal fallback.
@@ -415,6 +465,21 @@ func handleInterposeConn(conn net.Conn, agent string, ir *interposeRelay) {
 	// real binary so it doesn't prompt again.
 	if resp.Allow && len(shimKeys) > 0 {
 		rememberShimReexec(shimKeys)
+	}
+	// On approval of a `git worktree add/remove/move`, re-report the session's
+	// trusted roots so the new worktree is trusted before the agent edits in it
+	// (issue #119, trigger 2). Optimistic: the add destination is registered
+	// before the command executes. Run SYNCHRONOUSLY before respond() — both the
+	// session_roots push and (later) the edit's permission_request ride the same
+	// ordered daemon WS, so completing the push before we return the approval
+	// guarantees the server has the new root before the worktree-add even runs,
+	// hence before any edit. Previously a `go` here raced the first edit (#148).
+	if resp.Allow && toolName == "Bash" {
+		if cmd, ok := toolInput["command"].(string); ok && isWorktreeMutationCommand(cmd) {
+			if handler := ir.worktreeHandler(); handler != nil {
+				handler(cmd)
+			}
+		}
 	}
 	respond(conn, resp)
 }
@@ -578,6 +643,26 @@ func respond(conn net.Conn, r interposeResponse) {
 	data = append(data, '\n')
 	conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 	conn.Write(data)
+}
+
+// fileToolReconcilePath returns the absolute path a file tool acts on, for the
+// trigger-3 root reconcile. Returns "" for non-file tools or a relative/missing
+// operand (relative paths resolve against the cwd, which is always in the root
+// set, so they never need a reconcile).
+func fileToolReconcilePath(toolName string, toolInput map[string]interface{}) string {
+	var key string
+	switch toolName {
+	case "Read", "Write", "Edit":
+		key = "file_path"
+	case "Glob", "Grep", "ListDirectory":
+		key = "path"
+	default:
+		return ""
+	}
+	if v, ok := toolInput[key].(string); ok && filepath.IsAbs(v) {
+		return v
+	}
+	return ""
 }
 
 // translateInterposeRequest converts an interpose event to the server's

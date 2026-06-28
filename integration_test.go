@@ -689,3 +689,41 @@ func enrollTestHost(t *testing.T, deviceID string) string {
 	}
 	return hostID
 }
+
+// TestIntegration_TicketMerge_Dispatch covers `ticket merge` flag parsing and the
+// usage/validation exits that fire before any provider call (no token needed).
+func TestIntegration_TicketMerge_Dispatch(t *testing.T) {
+	cases := []struct {
+		name       string
+		args       []string
+		wantSubstr string
+	}{
+		{
+			name:       "invalid method",
+			args:       []string{"ticket", "merge", "114", "--method", "foo", "--project", "test"},
+			wantSubstr: "--method must be merge, squash, or rebase",
+		},
+		{
+			name:       "non-numeric pr",
+			args:       []string{"ticket", "merge", "--pr", "abc", "--project", "test"},
+			wantSubstr: "--pr must be a positive number",
+		},
+		{
+			name:       "no id and no in-scope ticket",
+			args:       []string{"ticket", "merge", "--project", "test"},
+			wantSubstr: "Usage: greenlight ticket merge",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// Ensure no in-scope ticket leaks in from the environment.
+			r := run(t, c.args, []string{"GREENLIGHT_TICKET_JSON="}, "")
+			if r.ExitCode != 1 {
+				t.Errorf("exit = %d, want 1; stderr=%q", r.ExitCode, r.Stderr)
+			}
+			if !strings.Contains(r.Stderr, c.wantSubstr) {
+				t.Errorf("stderr = %q, want substring %q", r.Stderr, c.wantSubstr)
+			}
+		})
+	}
+}
