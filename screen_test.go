@@ -106,13 +106,13 @@ func TestComposerSuggestion_FaintSplitWrites(t *testing.T) {
 // faint param is swapped, and non-SGR / non-faint sequences pass through.
 func TestRewriteFaintToGrey(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"\033[2m", "\033[38;5;240m"},           // bare faint
-		{"\033[0;2m", "\033[0;38;5;240m"},       // reset + faint
-		{"\033[1;2;4m", "\033[1;38;5;240;4m"},   // faint among others
-		{"\033[22m", "\033[22m"},                // normal-intensity, not faint
-		{"\033[2J", "\033[2J"},                  // erase display — not SGR
-		{"\033[38;5;105m", "\033[38;5;105m"},    // explicit colour untouched
-		{"plain text", "plain text"},            // no escape
+		{"\033[2m", "\033[38;5;240m"},         // bare faint
+		{"\033[0;2m", "\033[0;38;5;240m"},     // reset + faint
+		{"\033[1;2;4m", "\033[1;38;5;240;4m"}, // faint among others
+		{"\033[22m", "\033[22m"},              // normal-intensity, not faint
+		{"\033[2J", "\033[2J"},                // erase display — not SGR
+		{"\033[38;5;105m", "\033[38;5;105m"},  // explicit colour untouched
+		{"plain text", "plain text"},          // no escape
 	}
 	for _, c := range cases {
 		out, carry := rewriteFaintToGrey(nil, []byte(c.in))
@@ -122,5 +122,78 @@ func TestRewriteFaintToGrey(t *testing.T) {
 		if string(out) != c.want {
 			t.Errorf("rewrite %q = %q, want %q", c.in, out, c.want)
 		}
+	}
+}
+
+// TestComposerText_Typed reads the user-typed (default-styled) run after the ❯
+// marker — the read the #221 closed-loop injector uses to confirm its prompt
+// landed. markerSeen must be true since a composer is present.
+func TestComposerText_Typed(t *testing.T) {
+	s := newScreenTap(60, 8)
+	s.Write([]byte(clearScreen + cup(8, 1) + "❯ implement the parser fix"))
+	got, seen := s.composerText()
+	if !seen {
+		t.Fatal("expected a composer marker to be seen")
+	}
+	if got != "implement the parser fix" {
+		t.Fatalf("typed text: got %q", got)
+	}
+}
+
+// TestComposerText_GhostOnly is the discrimination that makes this useful: a
+// composer showing only a ghost suggestion (faint) holds no user text, so
+// composerText must return "" (with markerSeen true) — i.e. "still empty".
+func TestComposerText_GhostOnly(t *testing.T) {
+	s := newScreenTap(60, 8)
+	s.Write([]byte(clearScreen + cup(8, 1) + "❯ " + dim + "Try \"add a test\"" + sgrReset))
+	got, seen := s.composerText()
+	if !seen {
+		t.Fatal("expected a composer marker to be seen")
+	}
+	if got != "" {
+		t.Fatalf("ghost-only composer should yield no typed text, got %q", got)
+	}
+}
+
+// TestComposerText_Empty: a bare marker with nothing after it is an empty
+// composer — marker seen, no text.
+func TestComposerText_Empty(t *testing.T) {
+	s := newScreenTap(60, 8)
+	s.Write([]byte(clearScreen + cup(8, 1) + "❯ "))
+	got, seen := s.composerText()
+	if !seen {
+		t.Fatal("expected a composer marker to be seen")
+	}
+	if got != "" {
+		t.Fatalf("empty composer should yield no typed text, got %q", got)
+	}
+}
+
+// TestComposerText_MixedTypedAndGhost: when the line carries typed text followed
+// by a ghost completion, only the typed run is returned (the ghost is dropped).
+func TestComposerText_MixedTypedAndGhost(t *testing.T) {
+	s := newScreenTap(60, 8)
+	s.Write([]byte(clearScreen + cup(8, 1) + "❯ fix the " + fg256grey + "login bug" + sgrReset))
+	got, seen := s.composerText()
+	if !seen {
+		t.Fatal("expected a composer marker to be seen")
+	}
+	if got != "fix the" {
+		t.Fatalf("expected only the typed run, got %q", got)
+	}
+}
+
+// TestComposerText_NoMarker: a screen with no composer marker at all (the
+// mock_claude / non-claude case) reports markerSeen==false, which the injector
+// uses to fall back to open-loop delivery rather than spin in a retry loop.
+func TestComposerText_NoMarker(t *testing.T) {
+	s := newScreenTap(60, 8)
+	s.Write([]byte(clearScreen + cup(1, 1) + "just some transcript output, no composer"))
+	got, seen := s.composerText()
+	if seen {
+		t.Fatalf("expected no composer marker, got text %q", got)
+	}
+	if got != "" {
+		t.Fatalf("no-marker read should yield empty text, got %q", got)
 	}
 }

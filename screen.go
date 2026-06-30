@@ -292,6 +292,123 @@ func suggestionFromRow(runes []rune, styled []bool, marker int) string {
 	return text
 }
 
+// composerTextOnce scans the screen from the bottom up for the agent's composer
+// input line and returns the user-typed (default-styled, *non*-ghost) text on
+// it, plus whether a composer marker was found at all. This is the mirror of
+// composerSuggestion: where that returns the ghost-styled suffix, this returns
+// the default-styled run — what the user (or, for the autopilot injector, the
+// daemon) has typed. The composer is the bottom-most marked line, so we stop at
+// the first marker found scanning up; an empty composer (or one showing only a
+// ghost suggestion) yields ("", true), and no composer at all yields ("", false)
+// — the distinction the injector needs to tell "composer empty" from "composer
+// unreadable".
+func (s *screenTap) composerTextOnce() (string, bool) {
+	if s == nil {
+		return "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.term.Lock()
+	defer s.term.Unlock()
+	cols, rows := s.term.Size()
+
+	for y := rows - 1; y >= 0; y-- {
+		runes := make([]rune, cols)
+		ghost := make([]bool, cols)
+		marker := -1
+		for x := 0; x < cols; x++ {
+			g := s.term.Cell(x, y)
+			ch := g.Char
+			if ch == 0 {
+				ch = ' '
+			}
+			runes[x] = ch
+			ghost[x] = ghostStyled(g)
+			if marker < 0 && isComposerMarker(ch) {
+				marker = x
+			}
+		}
+		if marker < 0 {
+			continue
+		}
+		return textFromRow(runes, ghost, marker), true
+	}
+	return "", false
+}
+
+// textFromRow extracts the user-typed (default-styled) run from a composer row:
+// the span from the first to the last default-styled, non-space cell after the
+// marker. Ghost-styled cells (the suggestion) are excluded, so a line carrying
+// both typed text and a trailing ghost completion yields only the typed part.
+// Returns "" when there is no default-styled content (empty / ghost-only).
+func textFromRow(runes []rune, ghost []bool, marker int) string {
+	first, last := -1, -1
+	for x := marker + 1; x < len(runes); x++ {
+		if ghost[x] || runes[x] == ' ' || runes[x] == 0 {
+			continue
+		}
+		if first < 0 {
+			first = x
+		}
+		last = x
+	}
+	if first < 0 {
+		return ""
+	}
+	var b strings.Builder
+	for x := first; x <= last; x++ {
+		if ghost[x] {
+			continue // drop a ghost cell that falls within the typed span
+		}
+		ch := runes[x]
+		if ch == 0 {
+			ch = ' '
+		}
+		b.WriteRune(ch)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// composerText returns the user-typed composer content, voted across a few rapid
+// samples so a mid-repaint frame doesn't yield a partial or missing result, plus
+// whether a composer marker was seen in any sample. markerSeen==false means no
+// composer was found (unreadable / non-claude TUI), distinct from ("", true)
+// which means the composer is genuinely empty. Mirrors suggestion(): blocks
+// ~120ms, so run it off the hot path. Ties in the text vote break toward the
+// most recent sample.
+func (s *screenTap) composerText() (string, bool) {
+	if s == nil {
+		return "", false
+	}
+	counts := map[string]int{}
+	recent := map[string]int{}
+	markerSeen := false
+	for i := 0; i < 4; i++ {
+		if i > 0 {
+			time.Sleep(40 * time.Millisecond)
+		}
+		text, seen := s.composerTextOnce()
+		if !seen {
+			continue
+		}
+		markerSeen = true
+		counts[text]++
+		recent[text] = i
+	}
+	if !markerSeen {
+		return "", false
+	}
+	best := ""
+	bestCount, bestRecent := -1, -1
+	for v, c := range counts {
+		if c > bestCount || (c == bestCount && recent[v] > bestRecent) {
+			best, bestCount, bestRecent = v, c, recent[v]
+		}
+	}
+	return best, true
+}
+
 func hasLetter(s string) bool {
 	for _, r := range s {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
@@ -330,4 +447,3 @@ func (s *screenTap) suggestion() string {
 	}
 	return best
 }
-

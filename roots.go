@@ -88,33 +88,55 @@ func worktreeRoots(cwd string) []string {
 	return paths
 }
 
-// scratchRoots resolves $TMPDIR, $TMP and /tmp to canonical ephemeral roots,
-// validated and de-duplicated. A candidate is included only if it canonicalizes
-// under a known ephemeral prefix and does not contain the project cwd (so a
-// project living under /tmp can't have its whole tree become ephemeral).
+// scratchRoots resolves $TMPDIR, $TMP and /tmp to ephemeral roots, validated and
+// de-duplicated. Each candidate is reported in BOTH its symlink-resolved form
+// (e.g. /private/tmp on macOS, today's behavior) and its lexically-cleaned,
+// non-resolved form (e.g. /tmp) — because the server matches operands lexically
+// and cannot resolve the user's symlinks, so an agent that writes a bare /tmp
+// path only matches if /tmp itself is a reported root (issue #208). On Linux the
+// two forms coincide and the seen-dedup collapses them to one entry. A form is
+// included only if it sits under a known ephemeral prefix and does not contain
+// (or equal) the project cwd, so a project living under /tmp can't have its whole
+// tree become ephemeral.
 func scratchRoots(cwd string) []SessionRoot {
-	canonCwd := canonicalizePath(cwd)
+	canonCwd := canonicalizePath(cwd) // resolved space
+	lexCwd := lexicalAbs(cwd)         // literal space
 	var roots []SessionRoot
 	seen := map[string]bool{}
+	add := func(p string) {
+		if p == "" || seen[p] || !isEphemeralRoot(p) {
+			return
+		}
+		// Never let a scratch root contain (or equal) the project tree. p may be
+		// a literal form while the cwd is only known resolved (or vice versa), so
+		// check against the cwd in BOTH normalization spaces — a single-space
+		// prefix check silently fails to exclude the cross-space form.
+		for _, c := range []string{canonCwd, lexCwd} {
+			if c != "" && (p == c || strings.HasPrefix(c, p+"/") || strings.HasPrefix(p, c+"/")) {
+				return
+			}
+		}
+		seen[p] = true
+		roots = append(roots, SessionRoot{Path: p, Kind: cliRootKindScratch})
+	}
 	for _, cand := range []string{os.Getenv("TMPDIR"), os.Getenv("TMP"), "/tmp"} {
 		if cand == "" {
 			continue
 		}
-		canon := canonicalizePath(cand)
-		if canon == "" || seen[canon] {
-			continue
-		}
-		if !isEphemeralRoot(canon) {
-			continue
-		}
-		// Never let a scratch root contain (or equal) the project tree.
-		if canonCwd != "" && (canon == canonCwd || strings.HasPrefix(canonCwd, canon+"/") || strings.HasPrefix(canon, canonCwd+"/")) {
-			continue
-		}
-		seen[canon] = true
-		roots = append(roots, SessionRoot{Path: canon, Kind: cliRootKindScratch})
+		add(canonicalizePath(cand)) // resolved: /private/tmp
+		add(lexicalAbs(cand))       // literal:  /tmp  (no-op dup on Linux)
 	}
 	return roots
+}
+
+// lexicalAbs cleans an absolute path without resolving symlinks, returning "" for
+// a non-absolute (or empty) path. The counterpart to canonicalizePath for cases
+// where the literal, un-resolved form of a path must also be reported (#208).
+func lexicalAbs(p string) string {
+	if p == "" || !filepath.IsAbs(p) {
+		return ""
+	}
+	return filepath.Clean(p)
 }
 
 // isEphemeralRoot reports whether a canonical path sits under a known ephemeral

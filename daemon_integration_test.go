@@ -505,7 +505,11 @@ func TestIntegration_Daemon_InitialPromptInjection(t *testing.T) {
 	// soon as it scans a full line, i.e. once the prompt + submit arrive.
 	select {
 	case <-done:
-	case <-time.After(20 * time.Second):
+	// 30s outer window: the markerless mock_claude exercises the open-loop
+	// fallback, which now polls up to markerWait (8s) for a composer marker that
+	// never comes before delivering — so allow generous headroom over that wait
+	// plus the mock's own read timeout (#221).
+	case <-time.After(30 * time.Second):
 		client.Process.Kill()
 		t.Fatal("client timed out waiting for initial-prompt injection")
 	}
@@ -597,7 +601,8 @@ func TestIntegration_Daemon_InitialPromptFileInjection(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(20 * time.Second):
+	// 30s outer window — see the open-loop fallback note above (#221 marker poll).
+	case <-time.After(30 * time.Second):
 		client.Process.Kill()
 		t.Fatal("client timed out waiting for initial-prompt-file injection")
 	}
@@ -615,6 +620,58 @@ func TestIntegration_Daemon_InitialPromptFileInjection(t *testing.T) {
 	// The daemon must unlink the prompt file once it has read it.
 	if _, err := os.Stat(promptFile); !os.IsNotExist(err) {
 		t.Errorf("prompt file %q was not unlinked after consumption (err=%v)", promptFile, err)
+	}
+}
+
+// TestIntegration_Daemon_InitialPromptVerifiedLoop exercises the #221
+// closed-loop injector against a mock agent that DOES paint a readable composer
+// (a ❯ marker plus echoed typed text). It also simulates both race failures the
+// loop must recover from: MOCK_CLAUDE_DROP_TEXT drops the first text inject (the
+// "blank composer" case) and MOCK_CLAUDE_DROP_ENTER swallows the first submit
+// Enter (the "typed-but-not-submitted" case). The composer mock only writes its
+// output file once it sees a real submit with the full text present, so a passing
+// run proves the injector observed the empty composer and re-injected, then
+// observed the un-submitted text and re-sent Enter.
+func TestIntegration_Daemon_InitialPromptVerifiedLoop(t *testing.T) {
+	testServerURL.ClearHandlers()
+
+	const initialPrompt = "VERIFY_LOOP_PROMPT recover from drops"
+	outputFile := filepath.Join(t.TempDir(), "composer-submitted.txt")
+
+	cs, cleanup := startConnectSession(t, connectOpts{
+		SkipMockClaudeOutput: true,
+		AgentEnv: []string{
+			"MOCK_CLAUDE_COMPOSER=" + outputFile,
+			"MOCK_CLAUDE_DROP_TEXT=1",
+			"MOCK_CLAUDE_DROP_ENTER=1",
+			"GREENLIGHT_INITIAL_PROMPT=" + initialPrompt,
+		},
+	})
+	defer cleanup()
+
+	// Drain the client PTY so its stdout writes never block while the injector
+	// works (the daemon feeds its own PTY screen tap independently).
+	go io.Copy(io.Discard, cs.Master)
+
+	// Poll the output file: the composer mock writes the submitted line only
+	// after the verify/retry loop recovers the dropped text and dropped Enter.
+	deadline := time.Now().Add(30 * time.Second)
+	var got string
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(outputFile); err == nil && len(data) > 0 {
+			got = string(data)
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if got == "" {
+		t.Fatalf("composer mock never recorded a submit within deadline (output %q)", readFileOrEmpty(outputFile))
+	}
+	if strings.Contains(got, "TIMEOUT") {
+		t.Fatalf("composer mock timed out waiting for a recovered submit: %q", got)
+	}
+	if got != initialPrompt {
+		t.Fatalf("submitted line mismatch: got %q want %q (a duplicate would indicate double-typing)", got, initialPrompt)
 	}
 }
 

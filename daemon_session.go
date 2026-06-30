@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -315,14 +316,22 @@ func (s *Session) runRelay() {
 // as the first user message. Typing into the composer before the agent's TUI is
 // interactive is the cause of the "prompt typed but never submitted" failure
 // (#145): the first PTY bytes are terminal-setup escapes, not a ready input box,
-// so a fixed settle after them is unreliable. Instead we wait for the agent to
+// so a fixed settle after them is unreliable. We first wait for the agent to
 // start producing output (relay.readyCh) and then for that output to go quiet —
 // the TUI has finished its initial paint and is waiting for input. This adapts
-// to fast and slow starts alike. Both waits are bounded so a pathological start
-// still delivers rather than hanging. Delivery uses the shared submitInput path,
-// but with a wider Enter gap than steady-state phone input because a
-// just-rendered composer needs a longer beat to register the submit and not
-// fold the trailing Enter into the pasted text.
+// to fast and slow starts alike, and both waits are bounded so a pathological
+// start still delivers rather than hanging.
+//
+// Even after settling, a single fire-and-forget inject+Enter races the composer
+// (#221): the typed bytes can be dropped before the box is interactive (blank
+// composer), or the trailing Enter can fold into the paste instead of submitting
+// (typed-but-not-submitted). When the agent exposes a readable composer (the
+// claude screen tap, with an observable ❯ marker) we close the loop —
+// inject → verify-landed → Enter → verify-cleared, with bounded retries on each
+// half (see deliverInitialPromptVerified). When the composer is unreadable
+// (non-claude agent with no screen tap, or a TUI that paints no marker — e.g.
+// the mock_claude test agent) we fall back to today's open-loop single
+// inject+Enter, so we never spin in a retry loop we can't observe.
 func (s *Session) injectInitialPrompt() {
 	// Wait for the agent to begin painting; safety net for a no-output start.
 	const firstOutputTimeout = 10 * time.Second
@@ -356,11 +365,154 @@ func (s *Session) injectInitialPrompt() {
 		time.Sleep(quietPeriod - quietFor)
 	}
 
+	// Closed-loop delivery requires a readable composer: the screen tap must be
+	// present (claude only) AND an actual ❯ marker observed. The settle heuristic
+	// above waits for PTY output to fall quiet, but claude can go quiet for longer
+	// than quietPeriod *before* its composer is painted (a startup lull) — so a
+	// single probe here misses the not-yet-rendered marker ~1/4 of the time and
+	// wrongly degrades to the open-loop path the closed loop is meant to replace
+	// (#221). Poll for the marker, bounded, before deciding: a slow paint then
+	// still enters the verified loop; only a genuinely unreadable composer
+	// (non-claude TUI, or the markerless mock_claude test agent) falls through.
+	if s.relay.screen != nil {
+		const markerWait = 8 * time.Second
+		if s.waitForComposerMarker(time.Now().Add(markerWait)) {
+			s.deliverInitialPromptVerified()
+			return
+		}
+		log.Printf("daemon: autopilot composer marker never appeared (relay %s); open-loop delivery", s.relayID)
+	}
+
 	if err := submitInputGap(s.relay.Inject, []byte(s.initialPrompt), initialSubmitGap); err != nil {
 		log.Printf("daemon: autopilot prompt delivery failed (relay %s): %v", s.relayID, err)
 		return
 	}
-	log.Printf("daemon: autopilot injected initial prompt into relay %s (%d bytes)", s.relayID, len(s.initialPrompt))
+	log.Printf("daemon: autopilot injected initial prompt into relay %s (%d bytes, open-loop)", s.relayID, len(s.initialPrompt))
+}
+
+// deliverInitialPromptVerified is the closed-loop delivery used when the agent's
+// composer is readable (#221). It runs two verified phases against the screen
+// tap:
+//
+//  1. Inject the prompt text (no Enter) and poll the composer until it holds
+//     typed content. If it stays empty past a short timeout, re-inject — this
+//     recovers the "blank composer" failure. Crucially we only ever re-inject
+//     into an *empty* composer, so a successful inject is never double-typed.
+//  2. Send Enter and poll the composer until it clears (the submit registered).
+//     If the text is still sitting there past a timeout, re-send Enter — this
+//     recovers the "typed-but-not-submitted" failure.
+//
+// Best-effort throughout: every phase is bounded by per-attempt timeouts, an
+// attempt cap, and an overall wall-clock deadline; on exhaustion it logs and
+// gives up cleanly rather than spinning.
+func (s *Session) deliverInitialPromptVerified() {
+	const (
+		maxInjectAttempts = 4
+		maxSubmitAttempts = 4
+		landTimeout       = 2500 * time.Millisecond // per inject attempt
+		clearTimeout      = 2500 * time.Millisecond // per submit attempt
+		pollInterval      = 120 * time.Millisecond
+		overallDeadline   = 25 * time.Second
+		submitGap         = 200 * time.Millisecond
+	)
+	deadline := time.Now().Add(overallDeadline)
+
+	// Same transform submitInputGap applies, but the text and the Enter are
+	// injected separately here so each half can be verified independently.
+	input := bytes.ReplaceAll([]byte(s.initialPrompt), []byte{'\n'}, []byte{'\r'})
+	text := bytes.TrimRight(input, "\r")
+	needsSubmit := len(text) < len(input) || len(text) > 0
+
+	// Phase 1: inject text, confirm it landed; re-inject only while the composer
+	// is empty (blank-composer recovery, never a double-type).
+	landed := false
+	for attempt := 1; attempt <= maxInjectAttempts && time.Now().Before(deadline); attempt++ {
+		if len(text) > 0 {
+			if err := s.relay.Inject(text); err != nil {
+				log.Printf("daemon: autopilot prompt inject failed (relay %s): %v", s.relayID, err)
+				return
+			}
+		}
+		if s.pollComposer(deadline, landTimeout, pollInterval, func(c string, _ bool) bool {
+			return c != "" // any typed content means it landed (composer is exclusively ours)
+		}) {
+			landed = true
+			break
+		}
+		log.Printf("daemon: autopilot prompt not in composer (relay %s, inject attempt %d/%d); re-injecting", s.relayID, attempt, maxInjectAttempts)
+	}
+	if !landed {
+		// Verification never saw the text. Still send the submit best-effort so a
+		// verification miss on a working composer doesn't strand a typed prompt.
+		log.Printf("daemon: autopilot prompt never confirmed in composer (relay %s); submitting best-effort", s.relayID)
+	}
+
+	if !needsSubmit {
+		return
+	}
+
+	// Phase 2: send Enter, confirm the composer cleared; re-send Enter while the
+	// text is still sitting there (typed-but-not-submitted recovery).
+	for attempt := 1; attempt <= maxSubmitAttempts && time.Now().Before(deadline); attempt++ {
+		time.Sleep(submitGap)
+		if err := s.relay.Inject([]byte{'\r'}); err != nil {
+			log.Printf("daemon: autopilot submit inject failed (relay %s): %v", s.relayID, err)
+			return
+		}
+		if s.pollComposer(deadline, clearTimeout, pollInterval, func(c string, seen bool) bool {
+			return seen && c == "" // composer cleared → submit registered
+		}) {
+			log.Printf("daemon: autopilot submitted initial prompt into relay %s (%d bytes, %d submit attempt(s))", s.relayID, len(s.initialPrompt), attempt)
+			return
+		}
+		log.Printf("daemon: autopilot prompt still in composer after Enter (relay %s, submit attempt %d/%d); re-sending Enter", s.relayID, attempt, maxSubmitAttempts)
+	}
+	log.Printf("daemon: autopilot prompt submit unconfirmed after %d attempts (relay %s); giving up", maxSubmitAttempts, s.relayID)
+}
+
+// waitForComposerMarker polls the screen tap until the agent's composer marker
+// (❯) is observed or the deadline elapses, returning whether it appeared. The
+// marker not being present the instant the settle wait completes is the normal
+// slow-start case (#221): claude can print a startup banner, fall quiet long
+// enough to trip the quiet-period heuristic, and only then render the composer.
+// A single probe loses that race and degrades to the open-loop path; polling
+// closes it so the verified loop is used whenever the composer is observable at
+// all. Bails early if the session ends so it never outlives the agent.
+func (s *Session) waitForComposerMarker(deadline time.Time) bool {
+	for {
+		// composerText votes over ~120ms; markerSeen is true if any sample saw
+		// the marker, so a mid-repaint frame doesn't cause a false negative.
+		if _, markerSeen := s.relay.screen.composerText(); markerSeen {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-s.relay.shutdownCh:
+			return false
+		case <-time.After(150 * time.Millisecond):
+		}
+	}
+}
+
+// pollComposer reads the composer (voted, ~120ms per read) until pred is
+// satisfied or the per-phase timeout / overall deadline elapses. Returns whether
+// pred was satisfied. pred receives the voted composer text and whether a marker
+// was seen; a transient !markerSeen mid-repaint is just a non-match, not a bail,
+// since the caller already confirmed the composer is readable.
+func (s *Session) pollComposer(deadline time.Time, timeout, interval time.Duration, pred func(text string, markerSeen bool) bool) bool {
+	phaseEnd := time.Now().Add(timeout)
+	for {
+		text, seen := s.relay.screen.composerText()
+		if pred(text, seen) {
+			return true
+		}
+		if time.Now().After(phaseEnd) || time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(interval)
+	}
 }
 
 // finishRelay carries out the post-exit bookkeeping for a relay that has stopped.

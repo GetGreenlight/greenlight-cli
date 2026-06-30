@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -120,6 +121,50 @@ func TestScratchRoots_ValidatesTMPDIR(t *testing.T) {
 	}
 }
 
+// TestScratchRoots_BothFormsReported locks in issue #208: each ephemeral
+// candidate is reported in BOTH its symlink-resolved and literal forms so a bare
+// /tmp path an agent types matches the server's lexically-cleaned operand. On
+// macOS /tmp → /private/tmp, so both must appear; on Linux /tmp is a real dir, so
+// the dedup collapses it to a single entry (no duplicate).
+func TestScratchRoots_BothFormsReported(t *testing.T) {
+	t.Setenv("TMPDIR", "")
+	t.Setenv("TMP", "")
+	roots := scratchRoots("/Users/x/repo")
+
+	has := func(p string) bool {
+		for _, r := range roots {
+			if r.Path == p {
+				return true
+			}
+		}
+		return false
+	}
+	count := func(p string) int {
+		n := 0
+		for _, r := range roots {
+			if r.Path == p {
+				n++
+			}
+		}
+		return n
+	}
+
+	if !has("/tmp") {
+		t.Errorf("expected literal /tmp among scratch roots, got %v", roots)
+	}
+	if runtime.GOOS == "darwin" {
+		if !has("/private/tmp") {
+			t.Errorf("expected resolved /private/tmp among scratch roots on darwin, got %v", roots)
+		}
+	}
+	// No form should ever be reported twice.
+	for _, r := range roots {
+		if count(r.Path) != 1 {
+			t.Errorf("scratch root %q reported %d times (want 1): %v", r.Path, count(r.Path), roots)
+		}
+	}
+}
+
 func TestScratchRoots_SkipsRootContainingProject(t *testing.T) {
 	// A project living under a real temp dir must not have the whole temp tree
 	// reported as ephemeral.
@@ -132,10 +177,18 @@ func TestScratchRoots_SkipsRootContainingProject(t *testing.T) {
 	t.Setenv("TMPDIR", tmp)
 	t.Setenv("TMP", "")
 	roots := scratchRoots(proj)
+	// Both the resolved and the literal temp-root forms must be excluded — the
+	// dual-space containment guard (issue #208) compares each candidate against
+	// the cwd in both normalization spaces. Checking only canonTmp would miss the
+	// literal form leaking as a root that contains the project tree.
 	canonTmp := canonicalizePath(tmp)
+	lexTmp := lexicalAbs(tmp)
 	for _, r := range roots {
 		if r.Path == canonTmp {
-			t.Errorf("scratch root %q contains the project %q — should be skipped", r.Path, proj)
+			t.Errorf("resolved scratch root %q contains the project %q — should be skipped", r.Path, proj)
+		}
+		if lexTmp != "" && r.Path == lexTmp {
+			t.Errorf("literal scratch root %q contains the project %q — should be skipped", r.Path, proj)
 		}
 	}
 }
@@ -446,5 +499,105 @@ func TestAddScratchpadRoot(t *testing.T) {
 	m2.addScratchpadRoot(sp) // canonSp sits under canonTmp
 	if got := scratchPaths(m2); len(got) != 1 || got[0] != canonTmp {
 		t.Fatalf("scratchpad under blanket root should not be added; scratch = %v", got)
+	}
+}
+
+// serverEnsureTrailingSlash / serverNormalizeFirmlink / serverPathInside /
+// serverPathStrictlyUnder are VERBATIM copies of the server's path matchers in
+// cmd/permit-cloud/roots.go. The cli and server are separate Go modules, so the
+// CLI cannot import them; reproducing them here is the contract — if either side
+// changes, this test is the place the two halves are pinned together. Keep these
+// byte-identical to the server definitions.
+var serverMacosFirmlinks = map[string]string{
+	"tmp": "/private/tmp",
+	"var": "/private/var",
+	"etc": "/private/etc",
+}
+
+func serverEnsureTrailingSlash(s string) string {
+	if strings.HasSuffix(s, "/") {
+		return s
+	}
+	return s + "/"
+}
+
+func serverNormalizeFirmlink(p string) string {
+	if len(p) < 2 || p[0] != '/' {
+		return p
+	}
+	rest := p[1:]
+	first := rest
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		first = rest[:i]
+	}
+	target, ok := serverMacosFirmlinks[first]
+	if !ok {
+		return p
+	}
+	return target + p[1+len(first):]
+}
+
+func serverPathInside(root, p string) bool {
+	if root == "" || p == "" {
+		return false
+	}
+	root = serverNormalizeFirmlink(root)
+	p = serverNormalizeFirmlink(p)
+	if p == root {
+		return true
+	}
+	return strings.HasPrefix(p, serverEnsureTrailingSlash(root))
+}
+
+func serverPathStrictlyUnder(root, p string) bool {
+	root = serverNormalizeFirmlink(root)
+	p = serverNormalizeFirmlink(p)
+	if root == "" || p == "" || p == root {
+		return false
+	}
+	return strings.HasPrefix(p, serverEnsureTrailingSlash(root))
+}
+
+// TestScratchpadServerMatcherContract is the CLI↔server contract for issue #224:
+// the scratchpad path the CLI derives (and reports as a scratch root) must be
+// accepted by the server's path matchers for a write strictly under it, so a
+// scratchpad write/redirect/cp auto-approves end-to-end. Asserts the CLI's
+// derivation against the reproduced server predicates and confirms the CLI's own
+// production mirror (rootContains) agrees — so the two halves can't silently
+// drift into rejecting a write the other side would accept.
+func TestScratchpadServerMatcherContract(t *testing.T) {
+	const slug = "-Users-davidfarrell-permit"
+	const uuid = "b65648d2-1234-4abc-9def-0123456789ab"
+	transcript := filepath.Join(os.Getenv("HOME"), ".claude", "projects", slug, uuid+".jsonl")
+
+	root := claudeScratchpadDir("claude", transcript)
+	if root == "" {
+		t.Fatal("claudeScratchpadDir returned empty")
+	}
+	write := root + "/probe_test.go" // a heredoc/redirect/cp target under the scratchpad
+
+	// Server pathInside: plain file write under the scratchpad root auto-approves.
+	if !serverPathInside(root, write) {
+		t.Errorf("serverPathInside(%q, %q) = false; server would reject a scratchpad write", root, write)
+	}
+	// Server pathStrictlyUnder: scratch destructive/redirect (#224 composition)
+	// requires strictly-under.
+	if !serverPathStrictlyUnder(root, write) {
+		t.Errorf("serverPathStrictlyUnder(%q, %q) = false; server would reject scratch redirect/cp/rm", root, write)
+	}
+	// The CLI's production mirror must agree with the server predicate.
+	if rootContains(root, write) != serverPathInside(root, write) {
+		t.Errorf("CLI rootContains disagrees with server pathInside for %q under %q", write, root)
+	}
+	// The bare root is inside-but-not-strictly-under (deleting the root prompts).
+	if serverPathStrictlyUnder(root, root) {
+		t.Error("bare scratchpad root must not be strictly under itself")
+	}
+
+	// Firmlink: the agent may emit the literal /tmp form while the CLI reports
+	// /private/tmp. The server normalizes both, so a /tmp write matches a
+	// /private/tmp scratchpad root.
+	if !serverPathStrictlyUnder("/private/tmp/claude-1/x/scratchpad", "/tmp/claude-1/x/scratchpad/probe.go") {
+		t.Error("literal /tmp write must match a /private/tmp scratchpad root (firmlink normalization)")
 	}
 }

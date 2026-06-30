@@ -21,6 +21,15 @@
 // socket. The exit status is written to MOCK_CLAUDE_EXEC_RESULT (if set)
 // as "ok" / "err: <message>".
 //
+// MOCK_CLAUDE_COMPOSER — Paint a fake claude-style composer (a ❯ marker plus
+// the user-typed text in default styling), echoing injected keystrokes back to
+// the screen so the daemon's screen tap can read the composer state. On submit
+// (a lone \r once typed text is present) the composed line is written to this
+// file and the process exits. This exercises the #221 closed-loop initial-prompt
+// injector (inject → verify-landed → Enter → verify-cleared). Companion flags
+// MOCK_CLAUDE_DROP_TEXT / MOCK_CLAUDE_DROP_ENTER simulate the two race failures
+// the loop must recover from (see runComposerMode).
+//
 // MOCK_CLAUDE_WRITE_FILE — Open this path for writing. On Linux this
 // triggers the seccomp supervisor for paths outside the auto-allow
 // zones (tmp, system, dotfile, agent-internal). The result is written
@@ -41,6 +50,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 )
 
 func main() {
@@ -104,6 +115,13 @@ func main() {
 		}
 	}
 
+	if path := os.Getenv("MOCK_CLAUDE_COMPOSER"); path != "" {
+		runComposerMode(path,
+			os.Getenv("MOCK_CLAUDE_DROP_TEXT") != "",
+			os.Getenv("MOCK_CLAUDE_DROP_ENTER") != "")
+		return
+	}
+
 	if path := os.Getenv("MOCK_CLAUDE_OUTPUT"); path != "" {
 		readStdinToFile(path)
 		return
@@ -132,9 +150,104 @@ func readStdinToFile(outputPath string) {
 	select {
 	case line := <-lineCh:
 		os.WriteFile(outputPath, []byte(line), 0644)
-	case <-time.After(10 * time.Second):
+	case <-time.After(18 * time.Second):
 		os.WriteFile(outputPath, []byte("TIMEOUT: no input received"), 0644)
 	}
+}
+
+// runComposerMode paints a claude-style composer and echoes injected keystrokes
+// so the daemon's screen tap can observe the composer's true state, then writes
+// the submitted line and exits. dropText drops the first text inject (no echo),
+// simulating the "blank composer" race; dropEnter ignores the first submit \r,
+// simulating "typed-but-not-submitted". Both must be recovered by the injector's
+// verify/retry loop for this to terminate with the full prompt.
+func runComposerMode(outputPath string, dropText, dropEnter bool) {
+	// Raw mode like the real claude TUI: without it the PTY line discipline
+	// buffers input until Enter and echoes keystrokes itself, which would both
+	// merge the injector's text and submit \r into one canonical line AND paint
+	// the composer via the driver's echo rather than our repaint. Raw mode gives
+	// us byte-at-a-time delivery and makes our repaint the sole painter, so the
+	// drop simulation and the text/Enter classification work.
+	if restore, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
+		defer term.Restore(int(os.Stdin.Fd()), restore)
+	}
+
+	repaint := func(buf string) {
+		// Clear screen, home, draw the ❯ marker with the typed buffer in default
+		// styling — exactly the shape composerText() reads (marker + non-ghost run).
+		fmt.Printf("\033[2J\033[1;1H❯ %s", buf)
+	}
+	repaint("") // empty composer with a visible marker
+
+	readCh := make(chan []byte, 16)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if n > 0 {
+				b := make([]byte, n)
+				copy(b, buf[:n])
+				readCh <- b
+			}
+			if err != nil {
+				close(readCh)
+				return
+			}
+		}
+	}()
+
+	var composed []byte
+	timeout := time.After(25 * time.Second)
+	for {
+		select {
+		case <-timeout:
+			os.WriteFile(outputPath, []byte("TIMEOUT: composer never submitted"), 0644)
+			return
+		case chunk, ok := <-readCh:
+			if !ok {
+				os.WriteFile(outputPath, append([]byte("EOF: "), composed...), 0644)
+				return
+			}
+			// The injector sends text and the submit \r as separate writes, so a
+			// chunk is either typed text or a lone Enter. Classify by content.
+			text := stripCR(chunk)
+			if len(text) > 0 {
+				if dropText {
+					dropText = false // drop the first text inject: no echo, composer stays empty
+					continue
+				}
+				composed = append(composed, text...)
+				repaint(string(composed))
+				continue
+			}
+			// Pure \r/\n — a submit.
+			if dropEnter {
+				dropEnter = false // ignore the first Enter: composer keeps its text
+				continue
+			}
+			// Real submit: clear the composer (text moves to the transcript) so
+			// the injector's verify-cleared poll succeeds, record the line, then
+			// linger briefly so the daemon reads the cleared composer before we
+			// exit.
+			repaint("")
+			os.WriteFile(outputPath, composed, 0644)
+			time.Sleep(1500 * time.Millisecond)
+			return
+		}
+	}
+}
+
+// stripCR returns chunk with all \r and \n bytes removed — the printable text
+// of an injected keystroke chunk.
+func stripCR(chunk []byte) []byte {
+	out := chunk[:0:0]
+	for _, b := range chunk {
+		if b == '\r' || b == '\n' {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
 }
 
 func runTranscriptTest(transcriptPath string) {
