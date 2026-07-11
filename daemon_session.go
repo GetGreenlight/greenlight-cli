@@ -56,6 +56,12 @@ type Session struct {
 	cliShimDir   string
 	cliShimClean func()
 
+	// Per-session ssh-agent socket (#250), non-empty only when the session
+	// resolved ssh_isolation=on with ≥1 servable key. Closed + removed in
+	// cleanup (same lifecycle as the CLI shim dir).
+	sshAgentSock  string
+	sshAgentClean func()
+
 	// Client connection (nil if detached)
 	client   net.Conn
 	clientMu sync.Mutex
@@ -147,8 +153,21 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		activeShim = activeShims(present, configuredShimOverrides(proj, present))
 	}
 
+	// Resolve ssh_isolation + ssh_keys once at session start (#249/#250),
+	// same rule as the shims above: a mid-session config flip has no effect
+	// on live sessions — restart picks it up. The one resolved struct drives
+	// the env strip, the session ssh-agent socket, the system prompt, and the
+	// instruction files, so they can't diverge. Isolated with zero resolvable
+	// keys = strip only, no socket (fail closed). The presentSecretNames call
+	// degrades to nil if the daemon WS is unavailable, which also fails
+	// closed to zero keys.
+	sshState := sshSession{isolated: sshIsolationEnabled(proj)}
+	if sshState.isolated && len(sshConfiguredKeys(proj)) > 0 {
+		sshState = resolveSSHSession(proj, d.presentSecretNames())
+	}
+
 	// Build agent command with session IDs and flags
-	setup, err := buildAgentCommand(agent, req.Resume, ticket, activeShim)
+	setup, err := buildAgentCommand(agent, req.Resume, ticket, activeShim, sshState)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +193,7 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		return nil, fmt.Errorf("session start failed: %w", err)
 	}
 
-	installAgentFiles(agent, relayID, cwd, ticket, activeShim)
+	installAgentFiles(agent, relayID, cwd, ticket, activeShim, sshState)
 	installSkills(agent, cwd, skills)
 
 	s := &Session{
@@ -188,6 +207,20 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		daemon:        d,
 		ticket:        ticket,
 		initialPrompt: initialPrompt,
+	}
+
+	// Session ssh-agent (#250): serve the resolved keys on a per-session
+	// socket. Best-effort with fail-closed semantics: a listen failure logs
+	// and leaves the session identity-less (never falls back to the user's
+	// inherited agent, never fails the session).
+	if sshState.serving() {
+		if sock, cleanFn, err := startSessionSSHAgent(relayID, sshState.keys, d.sshSecretPlaintext); err == nil {
+			s.sshAgentSock = sock
+			s.sshAgentClean = cleanFn
+			log.Printf("ssh-agent: serving %d key(s) for session %s on %s", len(sshState.keys), relayID, sock)
+		} else {
+			log.Printf("ssh-agent: %v — session %s starts with no SSH identity", err, relayID)
+		}
 	}
 
 	// Write connect PID file
@@ -209,6 +242,24 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 		}
 	}
 	exportEnvs := buildExportEnvs(devID, relayID, proj, s.bridgePath, agent, ticketJSON)
+	// SSH scoped keys (#250): re-point SSH_AUTH_SOCK at the session's
+	// ssh-agent via the exportEnvs overlay — the #249 strip in NewDaemon runs
+	// before this overlay is applied, so the child sees exactly one agent
+	// socket: ours. Isolation off ⇒ sshAgentSock is empty and the env stays
+	// byte-for-byte what it is today.
+	if s.sshAgentSock != "" {
+		exportEnvs["SSH_AUTH_SOCK"] = s.sshAgentSock
+		// Force git to actually try our agent's key (issue #292): with a plain
+		// SSH_AUTH_SOCK swap, a pre-existing ~/.ssh/config entry for the remote
+		// host (IdentityFile + IdentitiesOnly yes — common from a prior manual
+		// setup) makes OpenSSH never even ask the agent for a key, so isolation
+		// "worked" but auth silently fell through to nothing. -o flags on the
+		// command line win over config-file settings, so this always wins
+		// regardless of the user's config. $SSH_AUTH_SOCK is expanded by the
+		// shell GIT_SSH_COMMAND runs under, from the same child env, so this
+		// never embeds the session socket path literally.
+		exportEnvs["GIT_SSH_COMMAND"] = `ssh -o IdentityAgent="$SSH_AUTH_SOCK" -o IdentitiesOnly=no`
+	}
 	if shimDir, cleanup := setupCLIShim(relayID); shimDir != "" {
 		s.cliShimDir = shimDir
 		s.cliShimClean = cleanup
@@ -234,7 +285,7 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 	s.interposeRelay = interpose.Relay
 
 	// Create the relay (PTY only, no per-session WebSocket) in daemon mode
-	r, err := NewDaemon(command, cmdArgs, exportEnvs, cwd, req.Winsize, req.Env, s.cliShimDir, agent)
+	r, err := NewDaemon(command, cmdArgs, exportEnvs, cwd, req.Winsize, req.Env, s.cliShimDir, agent, sshState.isolated)
 	if err != nil {
 		s.cleanup()
 		return nil, fmt.Errorf("failed to create relay: %w", err)
@@ -243,7 +294,7 @@ func (d *Daemon) newSession(req ipcRequest) (*Session, error) {
 
 	// Register this session with the daemon's shared WebSocket
 	killFunc := func() {
-		r.killed = true
+		r.killed.Store(true)
 		s.Stop()
 	}
 	if d.daemonWS != nil {
@@ -325,12 +376,12 @@ func (s *Session) runRelay() {
 // Even after settling, a single fire-and-forget inject+Enter races the composer
 // (#221): the typed bytes can be dropped before the box is interactive (blank
 // composer), or the trailing Enter can fold into the paste instead of submitting
-// (typed-but-not-submitted). When the agent exposes a readable composer (the
-// claude screen tap, with an observable ❯ marker) we close the loop —
-// inject → verify-landed → Enter → verify-cleared, with bounded retries on each
-// half (see deliverInitialPromptVerified). When the composer is unreadable
-// (non-claude agent with no screen tap, or a TUI that paints no marker — e.g.
-// the mock_claude test agent) we fall back to today's open-loop single
+// (typed-but-not-submitted). When the agent exposes a readable composer (a
+// screen tap with an observable marker — claude's ❯, codex's ›) we close the
+// loop — inject → verify-landed → Enter → verify-cleared, with bounded retries
+// on each half (see deliverInitialPromptVerified). When the composer is
+// unreadable (an agent with no screen tap, or a TUI that paints no marker —
+// e.g. the mock_claude test agent) we fall back to today's open-loop single
 // inject+Enter, so we never spin in a retry loop we can't observe.
 func (s *Session) injectInitialPrompt() {
 	// Wait for the agent to begin painting; safety net for a no-output start.
@@ -366,15 +417,28 @@ func (s *Session) injectInitialPrompt() {
 	}
 
 	// Closed-loop delivery requires a readable composer: the screen tap must be
-	// present (claude only) AND an actual ❯ marker observed. The settle heuristic
-	// above waits for PTY output to fall quiet, but claude can go quiet for longer
-	// than quietPeriod *before* its composer is painted (a startup lull) — so a
+	// present AND an actual marker observed. The settle heuristic above waits
+	// for PTY output to fall quiet, but an agent can go quiet for longer than
+	// quietPeriod *before* its composer is painted (a startup lull) — so a
 	// single probe here misses the not-yet-rendered marker ~1/4 of the time and
-	// wrongly degrades to the open-loop path the closed loop is meant to replace
-	// (#221). Poll for the marker, bounded, before deciding: a slow paint then
-	// still enters the verified loop; only a genuinely unreadable composer
-	// (non-claude TUI, or the markerless mock_claude test agent) falls through.
+	// wrongly degrades to the open-loop path the closed loop is meant to
+	// replace (#221). Poll for the marker, bounded, before deciding: a slow
+	// paint then still enters the verified loop; only a genuinely unreadable
+	// composer (non-supported TUI, or the markerless mock_claude test agent)
+	// falls through.
+	//
+	// Codex is a deliberate exception (#269): its composer marker is never
+	// painted while the composer is empty — it only appears once the composer
+	// is made dirty by the very injection this wait exists to gate, so waiting
+	// for it up front is a deadlock that always times out. agentIdleMarkerVisible
+	// reports this per agent (composerConfigs in screen.go); when false, skip
+	// straight to the verified loop and let deliverInitialPromptVerified's own
+	// post-inject poll do the confirming instead.
 	if s.relay.screen != nil {
+		if !agentIdleMarkerVisible(s.agent) {
+			s.deliverInitialPromptVerified()
+			return
+		}
 		const markerWait = 8 * time.Second
 		if s.waitForComposerMarker(time.Now().Add(markerWait)) {
 			s.deliverInitialPromptVerified()
@@ -471,13 +535,17 @@ func (s *Session) deliverInitialPromptVerified() {
 }
 
 // waitForComposerMarker polls the screen tap until the agent's composer marker
-// (❯) is observed or the deadline elapses, returning whether it appeared. The
+// is observed or the deadline elapses, returning whether it appeared. The
 // marker not being present the instant the settle wait completes is the normal
-// slow-start case (#221): claude can print a startup banner, fall quiet long
+// slow-start case (#221): the agent can print a startup banner, fall quiet long
 // enough to trip the quiet-period heuristic, and only then render the composer.
 // A single probe loses that race and degrades to the open-loop path; polling
 // closes it so the verified loop is used whenever the composer is observable at
 // all. Bails early if the session ends so it never outlives the agent.
+//
+// Only called for agents with agentIdleMarkerVisible true (see
+// injectInitialPrompt) — an agent whose idle composer never paints a marker
+// would just spin here to the deadline every time.
 func (s *Session) waitForComposerMarker(deadline time.Time) bool {
 	for {
 		// composerText votes over ~120ms; markerSeen is true if any sample saw
@@ -540,10 +608,12 @@ func (s *Session) finishRelay(err error) {
 			Code           int    `json:"code"`
 			ConversationID string `json:"conversation_id,omitempty"`
 			Agent          string `json:"agent,omitempty"`
+			Killed         bool   `json:"killed,omitempty"`
 		}{
 			Code:           exitCode,
 			ConversationID: convID,
 			Agent:          s.agent,
+			Killed:         s.relay.killed.Load(),
 		}
 		exitData, _ := json.Marshal(exitMsg)
 		writeFrame(client, frameExit, exitData)
@@ -654,6 +724,9 @@ func (s *Session) cleanup() {
 	if s.cliShimClean != nil {
 		s.cliShimClean()
 	}
+	if s.sshAgentClean != nil {
+		s.sshAgentClean()
+	}
 	if s.connectPidFile != "" {
 		os.Remove(s.connectPidFile)
 		cleanupAgentFiles(s.agent, s.cwd)
@@ -675,8 +748,9 @@ func (s *Session) cleanup() {
 
 // NewDaemon creates a Relay configured for daemon mode. The PTY is created
 // but terminal raw mode is NOT set (the client handles that). The child
-// process's working directory is set to cwd.
-func NewDaemon(command string, args []string, exportEnvs map[string]string, cwd string, winsize *ipcWinsize, clientEnv map[string]string, cliShimDir string, agent string) (*Relay, error) {
+// process's working directory is set to cwd. sshIsolated strips the inherited
+// ssh-agent identity from the child env (#249).
+func NewDaemon(command string, args []string, exportEnvs map[string]string, cwd string, winsize *ipcWinsize, clientEnv map[string]string, cliShimDir string, agent string, sshIsolated bool) (*Relay, error) {
 	master, slave, err := openPTY()
 	if err != nil {
 		return nil, fmt.Errorf("openPTY: %w", err)
@@ -703,6 +777,16 @@ func NewDaemon(command string, args []string, exportEnvs map[string]string, cwd 
 		}
 	} else {
 		childEnv = os.Environ()
+	}
+	// SSH isolation (#249): drop the inherited ssh-agent identity from the
+	// child env, whichever base branch built it. SSH_AGENT_PID goes with the
+	// socket var so a stale pid can't be used to locate/signal the user's
+	// agent; no other SSH_* vars are touched. Runs before the exportEnvs
+	// overlay (Phase 1b will re-point SSH_AUTH_SOCK at the session socket via
+	// that overlay; in 1a nothing re-adds it). When off this path is not
+	// reached and the env is byte-for-byte what it is today.
+	if sshIsolated {
+		childEnv = stripSSHIdentity(childEnv)
 	}
 	// Prepend the per-session CLI shim dir to PATH so that any `greenlight`
 	// invocation by the agent resolves to *this* binary, regardless of what
@@ -757,16 +841,17 @@ func NewDaemon(command string, args []string, exportEnvs map[string]string, cwd 
 
 	// PTY screen tap (issue #38): a virtual terminal fed every PTY byte so the
 	// composer ghost-suggestion can be read on demand. Created only for agents
-	// that support extraction (claude today) — the model can't be reconstructed
-	// retroactively so it must observe from session start, but feeding vt10x +
-	// the per-Write faint rewrite for an agent that can never produce a
-	// suggestion is pure overhead on the hot output path.
+	// that support extraction (claude, codex — see composerConfigs in
+	// screen.go) — the model can't be reconstructed retroactively so it must
+	// observe from session start, but feeding vt10x + the per-Write faint
+	// rewrite for an agent that can never produce a suggestion is pure
+	// overhead on the hot output path.
 	if agentSupportsSuggestions(agent) {
 		cols, rows := 80, 24
 		if ws, err := getWinsize(master.Fd()); err == nil {
 			cols, rows = int(ws.Col), int(ws.Row)
 		}
-		r.screen = newScreenTap(cols, rows)
+		r.screen = newScreenTap(agent, cols, rows)
 	}
 
 	return r, nil
@@ -864,6 +949,20 @@ func (r *Relay) setDaemonWriter(w io.Writer) {
 	r.daemonMu.Lock()
 	r.daemonWriter = w
 	r.daemonMu.Unlock()
+}
+
+// stripSSHIdentity returns env with SSH_AUTH_SOCK and SSH_AGENT_PID removed
+// (#249). Every occurrence is dropped, not just the first, since a k=v env
+// slice can carry duplicates and the last one wins at exec time.
+func stripSSHIdentity(env []string) []string {
+	out := env[:0]
+	for _, e := range env {
+		if k, _, ok := strings.Cut(e, "="); ok && (k == "SSH_AUTH_SOCK" || k == "SSH_AGENT_PID") {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // newAgentCmd wraps exec.Command — exists to allow Cursor workarounds etc.

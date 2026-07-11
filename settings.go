@@ -13,9 +13,10 @@ import (
 // installGreenlightInstructions creates an agent-specific instruction file
 // that teaches the agent how to interpret [GREENLIGHT] permission denial messages.
 // If ticket is non-nil, a one-line note pointing at the ticket URL is appended.
-// shims names any active command shims so the instruction file matches the
-// --append-system-prompt path (issue #198).
-func installGreenlightInstructions(agent, relayID, cwd string, ticket *TicketRef, shims []resolvedShim) error {
+// shims names any active command shims and sshState the session-start
+// ssh_isolation + ssh_keys resolution, so the instruction file matches the
+// --append-system-prompt path (issues #198, #249, #250).
+func installGreenlightInstructions(agent, relayID, cwd string, ticket *TicketRef, shims []resolvedShim, sshState sshSession) error {
 	var instrPath string
 	switch agent {
 	case "gemini":
@@ -47,7 +48,7 @@ func installGreenlightInstructions(agent, relayID, cwd string, ticket *TicketRef
 		}
 	}
 
-	content := "<!-- Greenlight -->\n" + greenlightSystemPrompt(ticket, shims) + "\n"
+	content := "<!-- Greenlight -->\n" + greenlightSystemPrompt(ticket, shims, sshState) + "\n"
 	if err := os.WriteFile(instrPath, []byte(content), 0644); err != nil {
 		return err
 	}

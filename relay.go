@@ -15,9 +15,9 @@ type Relay struct {
 	cmd    *exec.Cmd
 	master *os.File
 	slave  *os.File
-	mu     sync.Mutex // serializes writes to master
-	wsConn WSConn     // WebSocket interface
-	killed bool       // true if the child was killed (not normal exit)
+	mu     sync.Mutex  // serializes writes to master
+	wsConn WSConn      // WebSocket interface
+	killed atomic.Bool // true if the child was killed (not normal exit)
 
 	// Shutdown coordination — closed when the child process exits.
 	shutdownCh chan struct{}

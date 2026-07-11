@@ -145,23 +145,74 @@ const greenlightSystemPromptBase = `Tool calls are managed by a permission syste
 	`(6) To read or filter JSON, use "jq" — it is auto-approved. Avoid parsing JSON with interpreter one-liners (python3 -c, node -e, perl -e, ruby -e): they run arbitrary code, can't be auto-approved, and will prompt every time. ` +
 	`(7) For text substitutions, prefer "sed" or "awk" (read-only, auto-approved) over perl/python one-liners, which run arbitrary code and always prompt; to change a file in place, use the Edit tool rather than perl -i / sed -i.`
 
+// sshNoIdentityLine is appended to the system prompt when ssh_isolation is on,
+// no ssh_keys are configured at all, and the session serves no keys (#249):
+// the inherited SSH_AUTH_SOCK/SSH_AGENT_PID were stripped from the child env
+// and nothing serves keys, so the agent should report rather than flail when
+// ssh fails.
+const sshNoIdentityLine = "This session has no SSH identity; ssh to remote hosts will fail — tell the user if you need one."
+
+// sshSkippedKeysLine is appended instead of sshNoIdentityLine when ssh_keys
+// named at least one entry but none of them resolved to a live agent key
+// (issue #292): the generic "no identity" line reads identically whether the
+// user never configured a key or configured one that silently failed to
+// load, so the agent (and, via the request log, the user) had no way to tell
+// the two apart short of the daemon log. Naming the configured-but-unusable
+// secrets here makes the failure mode explicit instead of "ssh just fails".
+func sshSkippedKeysLine(skipped []string) string {
+	return "This session has no SSH identity even though ssh_keys names " +
+		strings.Join(skipped, ", ") +
+		" — none of them resolved (missing stored secret or missing/unparseable " +
+		"local ~/.greenlight/ssh/<name>.pub). ssh to remote hosts will fail; tell " +
+		"the user their configured SSH key(s) did not load rather than assuming " +
+		"none were ever set up."
+}
+
+// sshManagedAgentLine is the system-prompt line for an isolated session whose
+// ssh-agent serves keys (#250): names the short key names so the agent runs
+// ssh/git/scp normally instead of hunting for key files. git already forces
+// this agent's identity via GIT_SSH_COMMAND regardless of the user's own
+// ~/.ssh/config (issue #292 — an IdentitiesOnly/IdentityFile entry for the
+// remote host would otherwise make OpenSSH never even offer our agent's key);
+// bare ssh isn't wrapped, so the agent is told the explicit override flags.
+func sshManagedAgentLine(names []string) string {
+	return "SSH is pre-configured via a managed ssh-agent (keys: " +
+		strings.Join(names, ", ") +
+		"). Run ssh/git/scp normally; do not look for key files or configure " +
+		"identities. git already forces this agent's key via GIT_SSH_COMMAND, " +
+		"overriding any local ~/.ssh/config identity settings for the remote host. " +
+		"For bare ssh (not through git), add the same override explicitly: " +
+		`ssh -o IdentityAgent="$SSH_AUTH_SOCK" -o IdentitiesOnly=no <host>.`
+}
+
 // greenlightSystemPrompt returns the system-prompt injection for this
 // session. When command shims are active at session start, a line names the
 // pre-authenticated commands so the agent runs them bare instead of
 // hand-rolling `greenlight run` with manual token plumbing (issue #198).
-// When the session was launched against a specific ticket, a single neutral
-// line is appended pointing the agent at the URL — what to do with it (read /
-// update / close / stage moves) is left to the user's prompt (the app's
-// stage-aware launch chips drive this).
+// When ssh_isolation resolved on at session start, a line either names the
+// keys the managed ssh-agent serves (#250) or warns that the session has no
+// SSH identity (#249). When the session was launched against a specific
+// ticket, a single neutral line is appended pointing the agent at the URL —
+// what to do with it (read / update / close / stage moves) is left to the
+// user's prompt (the app's stage-aware launch chips drive this).
 //
-// shims is the same []resolvedShim the PATH shim is installed from, so the
-// prompt and the actual shim can't diverge: an empty list leaves the prompt
-// byte-for-byte unchanged, never claiming a CLI is pre-authenticated when it
-// would fall through to its own ambient auth.
-func greenlightSystemPrompt(ticket *TicketRef, shims []resolvedShim) string {
+// shims is the same []resolvedShim the PATH shim is installed from, and
+// sshState the same session-start resolution the env strip and session
+// ssh-agent are built from, so the prompt and the actual session env can't
+// diverge: shims empty and isolation off leave the prompt byte-for-byte
+// unchanged, never claiming a CLI is pre-authenticated or an SSH identity
+// missing when the session behaves as today.
+func greenlightSystemPrompt(ticket *TicketRef, shims []resolvedShim, sshState sshSession) string {
 	prompt := greenlightSystemPromptBase
 	if line := shimPreauthLine(shims); line != "" {
 		prompt += "\n\n" + line
+	}
+	if sshState.serving() {
+		prompt += "\n\n" + sshManagedAgentLine(sshState.keyNames())
+	} else if sshState.isolated && len(sshState.skipped) > 0 {
+		prompt += "\n\n" + sshSkippedKeysLine(sshState.skipped)
+	} else if sshState.isolated {
+		prompt += "\n\n" + sshNoIdentityLine
 	}
 	if ticket != nil && ticket.URL != "" {
 		prompt += "\n\nA ticket is in scope for this session: " + ticket.URL

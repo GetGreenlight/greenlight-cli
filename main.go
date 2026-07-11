@@ -70,10 +70,17 @@ func main() {
 		runDaemon(os.Args[2:])
 	case "secrets":
 		runSecrets(os.Args[2:])
+	case "ssh":
+		runSSH(os.Args[2:])
 	case "hook":
 		runHook(os.Args[2:])
 	case "run":
 		runRun(os.Args[2:])
+	case "internal-close-terminal":
+		// Hidden: detached helper entry point spawned by
+		// spawnTerminalCloseHelper (issue #273). Not part of the public CLI
+		// surface — deliberately absent from printUsage.
+		runInternalCloseTerminal(os.Args[2:])
 	case "update":
 		runUpdate(os.Args[2:])
 	case "version", "--version", "-v":
@@ -119,6 +126,7 @@ Commands:
   config     Get, set, unset, or list config values (get, set, unset, list)
   daemon     Manage the background daemon (start, stop, restart, status)
   secrets    Manage encrypted secrets (init, list, set, rm)
+  ssh        Manage scoped SSH keys for isolated agent sessions (keygen, pubkey, list, rm)
   run        Run a command with secrets injected into its environment
   update     Update greenlight to the latest version
   version    Print version and build settings

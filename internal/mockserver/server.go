@@ -327,6 +327,49 @@ func (s *Server) defaultWS(w http.ResponseWriter, r *http.Request) {
 			conn.Write(ctx, websocket.MessageText, resp)
 		}
 
+		// Device-scoped secrets_put / secrets_delete: maintain the in-memory
+		// name set (the same one secrets_list serves) so command tests can
+		// round-trip keygen/set → list → rm. Ciphertext is not retained.
+		if hdr.Type == "secrets_put" || hdr.Type == "secrets_delete" {
+			var env struct {
+				Data struct {
+					RequestID string `json:"request_id"`
+					Key       string `json:"key"`
+				} `json:"data"`
+			}
+			json.Unmarshal(data, &env)
+			respType := "secrets_put_response"
+			s.mu.Lock()
+			if hdr.Type == "secrets_put" {
+				found := false
+				for _, n := range s.secrets {
+					if n == env.Data.Key {
+						found = true
+						break
+					}
+				}
+				if !found {
+					s.secrets = append(s.secrets, env.Data.Key)
+				}
+			} else {
+				respType = "secrets_delete_response"
+				kept := s.secrets[:0]
+				for _, n := range s.secrets {
+					if n != env.Data.Key {
+						kept = append(kept, n)
+					}
+				}
+				s.secrets = kept
+			}
+			s.mu.Unlock()
+			resp, _ := json.Marshal(map[string]any{
+				"type":       respType,
+				"request_id": env.Data.RequestID,
+				"status":     "ok",
+			})
+			conn.Write(ctx, websocket.MessageText, resp)
+		}
+
 		// Device-scoped ticket-stage ops: a small in-memory scalar store
 		// standing in for the real server's ticket_stages table. An empty
 		// stage on a set clears it.

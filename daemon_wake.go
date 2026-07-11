@@ -333,7 +333,12 @@ func resolveSessionEnv() []string {
 // Uses Run() with a short timeout to detect quick failures (e.g. D-Bus
 // errors from gnome-terminal when launched from a background daemon).
 func openTerminalLinux(cmd string) error {
-	shellCmd := cmd + "; exec bash"
+	// On a normal exit the window stays open at a shell prompt (exec bash).
+	// On an app-initiated kill (issue #273) the client exits with the
+	// reserved killedExitCode instead, and this wrapper exits with that same
+	// code — rather than exec'ing bash — so the terminal emulator's window
+	// closes when its sole child process exits.
+	shellCmd := fmt.Sprintf("%s; code=$?; [ $code -eq %d ] && exit $code; exec bash", cmd, killedExitCode)
 	// All entries use "bash -c" explicitly so the shell command is
 	// interpreted correctly regardless of how each terminal handles -e.
 	terminals := []struct {

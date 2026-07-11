@@ -28,6 +28,8 @@ const (
 	configKeyChips           = "chips"             // JSON array of prompt chip rules (see configChip)
 	configKeyIdleNotifyAfter = "idle_notify_after" // duration after which to send idle push notification (e.g. "5m", "1h")
 	configKeyScratchAuto     = "scratch_auto"      // bool (default on): report OS scratch dirs as ephemeral trusted roots (#119)
+	configKeySSHIsolation    = "ssh_isolation"     // bool (default off): strip inherited SSH_AUTH_SOCK/SSH_AGENT_PID from the child env (#249)
+	configKeySSHKeys         = "ssh_keys"          // comma-separated secret names (SSH_KEY_*) the session ssh-agent serves; only consulted when ssh_isolation=on (#250)
 )
 
 // configChip is one row in the `chips` config array — a single flat set applied
@@ -118,6 +120,59 @@ func scratchAutoEnabled(project string) bool {
 	return true
 }
 
+// sshIsolationEnabled resolves the ssh_isolation config knob (#249). Mirrors
+// scratchAutoEnabled but defaults FALSE: isolation is opt-in, so only an
+// explicit truthy value (1/true/on/yes) turns it on — empty/unset or anything
+// else leaves the child env passthrough behavior unchanged.
+func sshIsolationEnabled(project string) bool {
+	v := strings.ToLower(strings.TrimSpace(resolveConfig(project, configKeySSHIsolation)))
+	switch v {
+	case "1", "true", "on", "yes":
+		return true
+	}
+	return false
+}
+
+// validSSHIsolationValues are the accepted spellings for the ssh_isolation
+// bool, checked case-insensitively after trim. Stricter than scratch_auto
+// (which coerces any string) because the default is off — a typo like "onn"
+// must be rejected loudly rather than silently leaving isolation disabled.
+var validSSHIsolationValues = map[string]bool{
+	"on": true, "off": true, "true": true, "false": true,
+	"1": true, "0": true, "yes": true, "no": true,
+}
+
+// validSSHKeysValue validates an ssh_keys config value (#250): empty (no keys)
+// or a comma-separated list where every trimmed entry is a valid secret key
+// name. Existence is deliberately NOT checked — the secret may be created
+// after the config is written; an unresolvable entry at session start is
+// skipped with a log line instead (see resolveSSHSession).
+func validSSHKeysValue(v string) bool {
+	if strings.TrimSpace(v) == "" {
+		return true
+	}
+	for _, part := range strings.Split(v, ",") {
+		if !validSecretKey(strings.TrimSpace(part)) {
+			return false
+		}
+	}
+	return true
+}
+
+// sshConfiguredKeys parses the resolved ssh_keys value for a project into the
+// list of configured secret names, dropping empty entries. Only meaningful
+// when ssh_isolation is on; callers gate on that.
+func sshConfiguredKeys(project string) []string {
+	v := resolveConfig(project, configKeySSHKeys)
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // readAllConfig parses the whole config file into a key→value map. Blank lines
 // and #-comments are skipped. Returns an empty map if the file is absent.
 func readAllConfig() map[string]string {
@@ -206,6 +261,14 @@ func validateConfigBatch(set map[string]string, unset []string) string {
 				if err != nil || d < time.Minute {
 					return "invalid_value"
 				}
+			}
+		case configKeySSHIsolation:
+			if !validSSHIsolationValues[strings.ToLower(strings.TrimSpace(v))] {
+				return "invalid_value"
+			}
+		case configKeySSHKeys:
+			if !validSSHKeysValue(v) {
+				return "invalid_value"
 			}
 		}
 	}

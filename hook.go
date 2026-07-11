@@ -5,6 +5,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"os"
 	"time"
@@ -29,26 +31,39 @@ import (
 // and the hookEventName MUST match the registered event, or Claude silently
 // ignores the output and falls back to its own prompt.
 func runHook(args []string) {
+	runHookCore(os.Stdin, os.Stdout)
+	os.Exit(0)
+}
+
+// runHookCore is runHook's testable body: it never calls os.Exit itself, so
+// tests can assert on the log lines each bail-out reason produces without
+// spawning a subprocess. runHook is the real entry point; it just adds the
+// os.Exit(0) required to signal "no opinion" to Claude Code on every path.
+func runHookCore(stdin io.Reader, stdout io.Writer) {
 	if os.Getenv("GREENLIGHT_DEVICE_ID") == "" {
-		os.Exit(0)
+		log.Printf("hook: bail reason=no_device_id")
+		return
 	}
 
 	sockPath := os.Getenv("GREENLIGHT_INTERPOSE_SOCK")
 	if sockPath == "" {
-		os.Exit(0)
+		log.Printf("hook: bail reason=no_sock_env")
+		return
 	}
 
 	var hookPayload struct {
 		ToolName  string                 `json:"tool_name"`
 		ToolInput map[string]interface{} `json:"tool_input"`
 	}
-	if err := json.NewDecoder(os.Stdin).Decode(&hookPayload); err != nil || hookPayload.ToolName == "" {
-		os.Exit(0)
+	if err := json.NewDecoder(stdin).Decode(&hookPayload); err != nil || hookPayload.ToolName == "" {
+		log.Printf("hook: bail reason=decode_stdin_failed err=%v tool_name=%q", err, hookPayload.ToolName)
+		return
 	}
 
 	conn, err := net.DialTimeout("unix", sockPath, 3*time.Second)
 	if err != nil {
-		os.Exit(0)
+		log.Printf("hook: bail reason=dial_failed tool_name=%s err=%v", hookPayload.ToolName, err)
+		return
 	}
 	defer conn.Close()
 
@@ -62,13 +77,15 @@ func runHook(args []string) {
 
 	conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 	if _, err := conn.Write(data); err != nil {
-		os.Exit(0)
+		log.Printf("hook: bail reason=write_failed tool_name=%s err=%v", hookPayload.ToolName, err)
+		return
 	}
 
 	conn.SetReadDeadline(time.Now().Add(10 * time.Minute))
 	var resp interposeResponse
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		os.Exit(0)
+		log.Printf("hook: bail reason=decode_response_failed tool_name=%s err=%v", hookPayload.ToolName, err)
+		return
 	}
 
 	decision := map[string]interface{}{}
@@ -82,7 +99,7 @@ func runHook(args []string) {
 			if ui := buildAskUpdatedInput(hookPayload.ToolInput, resp.UpdatedInput); ui != nil {
 				decision["updatedInput"] = ui
 			} else {
-				hookLog("buildAskUpdatedInput returned nil, updatedInput=%s", string(resp.UpdatedInput))
+				log.Printf("hook: buildAskUpdatedInput returned nil, updatedInput=%s", string(resp.UpdatedInput))
 			}
 		}
 	} else {
@@ -101,20 +118,9 @@ func runHook(args []string) {
 		},
 	}
 	encoded, err := json.Marshal(out)
-	hookLog("stdout output err=%v json=%s", err, string(encoded))
-	os.Stdout.Write(encoded)
-	os.Stdout.Write([]byte("\n"))
-
-	os.Exit(0)
-}
-
-func hookLog(format string, args ...interface{}) {
-	f, err := os.OpenFile("/tmp/greenlight-hook.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	fmt.Fprintf(f, format+"\n", args...)
+	log.Printf("hook: stdout output tool_name=%s err=%v json=%s", hookPayload.ToolName, err, string(encoded))
+	stdout.Write(encoded)
+	stdout.Write([]byte("\n"))
 }
 
 // buildAskUpdatedInput builds the updatedInput object for an AskUserQuestion

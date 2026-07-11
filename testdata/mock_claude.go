@@ -64,6 +64,13 @@ func main() {
 		os.WriteFile(p, []byte(strings.Join(os.Args, "\n")), 0644)
 	}
 
+	// MOCK_CLAUDE_ENV_FILE — dump the full environ (newline-joined k=v) to this
+	// path so a test can verify what the daemon's child-env assembly produced
+	// (e.g. the ssh_isolation strip, #249).
+	if p := os.Getenv("MOCK_CLAUDE_ENV_FILE"); p != "" {
+		os.WriteFile(p, []byte(strings.Join(os.Environ(), "\n")), 0644)
+	}
+
 	// Emit a raw byte sequence to stdout (Go-quoted, so \033, ❯, etc.
 	// work). Used to paint a fake TUI composer for the screen-tap tests (#38).
 	if raw := os.Getenv("MOCK_CLAUDE_RAW"); raw != "" {

@@ -204,6 +204,146 @@ func TestValidateConfigBatch(t *testing.T) {
 	}
 }
 
+func TestValidateConfigBatchSSHIsolation(t *testing.T) {
+	// All eight bool spellings, plus case and whitespace variants, are valid.
+	valid := []string{
+		"on", "off", "true", "false", "1", "0", "yes", "no",
+		"ON", "Off", "TRUE", "False", "YES", "No",
+		" on ", "\ttrue", "off ",
+	}
+	for _, v := range valid {
+		if got := validateConfigBatch(map[string]string{"ssh_isolation": v}, nil); got != "" {
+			t.Errorf("ssh_isolation=%q rejected with %q, want valid", v, got)
+		}
+	}
+	// Garbage is rejected loudly — the default is off, so a typo must never
+	// silently leave isolation disabled (#249).
+	invalid := []string{"", "maybe", "onn", "2", "enabled", "on off", "on=off"}
+	for _, v := range invalid {
+		if got := validateConfigBatch(map[string]string{"ssh_isolation": v}, nil); got != "invalid_value" {
+			t.Errorf("ssh_isolation=%q = %q, want invalid_value", v, got)
+		}
+	}
+}
+
+func TestValidateConfigBatchSSHKeys(t *testing.T) {
+	// Empty (no keys) and comma-separated valid secret names — with
+	// whitespace around entries — are accepted.
+	valid := []string{
+		"",
+		"SSH_KEY_STAGING",
+		"SSH_KEY_STAGING,SSH_KEY_CI",
+		" SSH_KEY_STAGING , SSH_KEY_CI ",
+		"my.key-1,other_key",
+	}
+	for _, v := range valid {
+		if got := validateConfigBatch(map[string]string{"ssh_keys": v}, nil); got != "" {
+			t.Errorf("ssh_keys=%q rejected with %q, want valid", v, got)
+		}
+	}
+	// Any entry that isn't a valid secret key name — including an empty one
+	// from a doubled or trailing comma — is invalid_value (#250).
+	invalid := []string{
+		"SSH KEY",
+		"SSH_KEY_A,bad=name",
+		"SSH_KEY_A,,SSH_KEY_B",
+		"SSH_KEY_A,",
+		",",
+	}
+	for _, v := range invalid {
+		if got := validateConfigBatch(map[string]string{"ssh_keys": v}, nil); got != "invalid_value" {
+			t.Errorf("ssh_keys=%q = %q, want invalid_value", v, got)
+		}
+	}
+}
+
+func TestSSHConfiguredKeys(t *testing.T) {
+	withTempConfig(t)
+	if got := sshConfiguredKeys("permit"); len(got) != 0 {
+		t.Errorf("unset ssh_keys = %v, want empty", got)
+	}
+	if err := applyConfigBatch(scopeHost, "", map[string]string{configKeySSHKeys: " SSH_KEY_A , SSH_KEY_B "}, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := sshConfiguredKeys("permit")
+	if len(got) != 2 || got[0] != "SSH_KEY_A" || got[1] != "SSH_KEY_B" {
+		t.Errorf("sshConfiguredKeys = %v, want trimmed [SSH_KEY_A SSH_KEY_B]", got)
+	}
+	// Project override shadows the host list.
+	if err := applyConfigBatch(scopeProject, "permit", map[string]string{configKeySSHKeys: "SSH_KEY_C"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	got = sshConfiguredKeys("permit")
+	if len(got) != 1 || got[0] != "SSH_KEY_C" {
+		t.Errorf("project-scoped sshConfiguredKeys = %v, want [SSH_KEY_C]", got)
+	}
+}
+
+func TestSSHIsolationEnabled(t *testing.T) {
+	// Truth table on the host-scope value: default-false, true only on
+	// explicit 1/true/on/yes (case-insensitive, trimmed).
+	cases := []struct {
+		value string
+		want  bool
+	}{
+		{"", false}, // unset — the default-off promise
+		{"on", true},
+		{"true", true},
+		{"1", true},
+		{"yes", true},
+		{"ON", true},
+		{" On ", true},
+		{"off", false},
+		{"false", false},
+		{"0", false},
+		{"no", false},
+		{"maybe", false}, // unparseable degrades to off, never on
+	}
+	for _, c := range cases {
+		t.Run("value="+c.value, func(t *testing.T) {
+			withTempConfig(t)
+			if c.value != "" {
+				if err := applyConfigBatch(scopeHost, "", map[string]string{configKeySSHIsolation: c.value}, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := sshIsolationEnabled("permit"); got != c.want {
+				t.Errorf("sshIsolationEnabled(%q) = %v, want %v", c.value, got, c.want)
+			}
+		})
+	}
+}
+
+func TestSSHIsolationEnabledProjectShadowsHost(t *testing.T) {
+	// host on / project off ⇒ isolated everywhere except that project ("off"
+	// is a non-empty value, so it shadows via resolveConfig).
+	withTempConfig(t)
+	if err := applyConfigBatch(scopeHost, "", map[string]string{configKeySSHIsolation: "on"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyConfigBatch(scopeProject, "permit", map[string]string{configKeySSHIsolation: "off"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if sshIsolationEnabled("permit") {
+		t.Error("project off should shadow host on")
+	}
+	if !sshIsolationEnabled("other") {
+		t.Error("host on should apply to projects without an override")
+	}
+
+	// host unset / project on ⇒ isolated only there.
+	withTempConfig(t)
+	if err := applyConfigBatch(scopeProject, "permit", map[string]string{configKeySSHIsolation: "on"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !sshIsolationEnabled("permit") {
+		t.Error("project on should enable isolation with host unset")
+	}
+	if sshIsolationEnabled("other") {
+		t.Error("other projects must stay at the default (off)")
+	}
+}
+
 func TestMigrateLegacyChips(t *testing.T) {
 	t.Run("empty value is a no-op", func(t *testing.T) {
 		withTempConfig(t)

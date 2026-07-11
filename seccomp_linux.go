@@ -170,16 +170,28 @@ func handleSeccompOpenat(notifFd int, notif *seccompNotif, agent string, ir *int
 		}
 	}
 
+	// Canonicalize before classifying (issue #241) — resolves ".." and
+	// symlinks so a raw prefix trick (e.g. "/tmp/../Users/me/.ssh/...")
+	// can't spoof seccompIsTempPath/seccompIsSystemPath/etc. Failure fails
+	// closed: skip the auto-allow short-circuit below and always fall
+	// through to a permission prompt.
+	classifyPath := path
+	canonOk := false
+	if canon, ok := seccompCanonicalize(pid, path); ok {
+		classifyPath = canon
+		canonOk = true
+	}
+
 	// Quick classification — auto-allow paths that don't need permission
-	if !seccompNeedsWritePermission(path, flags) {
+	if canonOk && !seccompNeedsWritePermission(classifyPath, flags) {
 		return true
 	}
 
 	// Resolve .tmp intermediate to real target path.
 	// Pattern: "<real-path>.tmp.<pid>.<timestamp>"
-	displayPath := path
-	if idx := strings.Index(path, ".tmp."); idx >= 0 {
-		displayPath = path[:idx]
+	displayPath := classifyPath
+	if idx := strings.Index(displayPath, ".tmp."); idx >= 0 {
+		displayPath = displayPath[:idx]
 	}
 
 	// Check permission cache — avoid re-prompting for the same file
@@ -227,7 +239,17 @@ func handleSeccompRename(notifFd int, notif *seccompNotif, agent string, ir *int
 		}
 	}
 
-	if !seccompNeedsRenamePermission(newPath) {
+	// Canonicalize the target before classifying (issue #241) — see
+	// handleSeccompOpenat. oldPath below is display/diff-only, not gating,
+	// so it's left uncanonicalized.
+	classifyPath := newPath
+	canonOk := false
+	if canon, ok := seccompCanonicalize(pid, newPath); ok {
+		classifyPath = canon
+		canonOk = true
+	}
+
+	if canonOk && !seccompNeedsRenamePermission(classifyPath) {
 		return true
 	}
 
@@ -253,11 +275,11 @@ func handleSeccompRename(notifFd int, notif *seccompNotif, agent string, ir *int
 
 	// Determine tool name (edit if target exists, write if new)
 	toolName := "Write"
-	toolInput := map[string]interface{}{"file_path": newPath}
-	if _, err := os.Stat(newPath); err == nil {
+	toolInput := map[string]interface{}{"file_path": classifyPath}
+	if _, err := os.Stat(classifyPath); err == nil {
 		toolName = "Edit"
 		if oldPath != "" {
-			oldStr, newStr := computeRenameEdit(newPath, oldPath)
+			oldStr, newStr := computeRenameEdit(classifyPath, oldPath)
 			if oldStr != "" || newStr != "" {
 				toolInput["old_string"] = oldStr
 				toolInput["new_string"] = newStr
@@ -265,9 +287,9 @@ func handleSeccompRename(notifFd int, notif *seccompNotif, agent string, ir *int
 		}
 	}
 
-	log.Printf("Seccomp: rename → %s %s (pid %d)", toolName, newPath, pid)
+	log.Printf("Seccomp: rename → %s %s (pid %d)", toolName, classifyPath, pid)
 
-	return seccompRequestPermission(toolName, toolInput, newPath, agent, ir)
+	return seccompRequestPermission(toolName, toolInput, classifyPath, agent, ir)
 }
 
 // seccompRequestPermission sends a permission request through the same
@@ -336,6 +358,22 @@ func readStringFromProc(pid uint32, addr uint64) (string, error) {
 		}
 	}
 	return string(buf[:n]), nil
+}
+
+// seccompCanonicalize resolves ".." traversal and symlinks in an absolute
+// path as seen from pid's filesystem view, so a raw prefix trick (e.g.
+// "/tmp/../Users/me/.ssh/id_rsa") can't spoof seccompIsTempPath/
+// seccompIsSystemPath/etc (issue #241). Returns ("", false) on failure.
+// Callers MUST fail closed (always require a permission prompt) rather
+// than classifying the raw path. The actual resolution logic
+// (seccompCanonicalizeUnderRoot) lives in pathcanon.go, a build-tag-free
+// file, so it's directly unit-testable on any platform.
+func seccompCanonicalize(pid uint32, rawPath string) (string, bool) {
+	if rawPath == "" || !filepath.IsAbs(rawPath) {
+		return "", false
+	}
+	root := fmt.Sprintf("/proc/%d/root", pid)
+	return seccompCanonicalizeUnderRoot(root, rawPath)
 }
 
 // --- Path classification (mirrors C-side logic) ---

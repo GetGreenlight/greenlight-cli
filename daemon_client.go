@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -88,6 +89,12 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 
 	// These are set by the frame loop and read by the defer to print resume instructions.
 	var exitConvID, exitAgent string
+	// exitKilled is set from the frameExit payload when the session was
+	// terminated via the phone's "pull the plug" action (kill_session), as
+	// opposed to a normal agent exit. Gates the terminal window/tab close
+	// (issue #273) — never set on a normal exit, which must stay byte-for-byte
+	// unchanged (resume instructions printed, window left open).
+	var exitKilled bool
 
 	// Enter raw mode on the local terminal
 	origTermios, err := setRawTerminal()
@@ -310,11 +317,13 @@ func connectViaDaemon(agent, deviceID, project, resume, cwd string) {
 				Code           int    `json:"code"`
 				ConversationID string `json:"conversation_id"`
 				Agent          string `json:"agent"`
+				Killed         bool   `json:"killed"`
 			}
 			json.Unmarshal(payload, &exit)
 			exitCode = exit.Code
 			exitConvID = exit.ConversationID
 			exitAgent = exit.Agent
+			exitKilled = exit.Killed
 			goto done
 		}
 	}
@@ -322,6 +331,24 @@ done:
 
 	signal.Stop(winchCh)
 	signal.Stop(sigCh)
+
+	if exitKilled {
+		// App-initiated kill (issue #273): skip the resume print (the window is
+		// closing) and trigger the platform-specific window/tab close instead of
+		// a plain exit. Restore terminal explicitly here since os.Exit skips defers.
+		stdoutMu.Lock()
+		resetScrollRegionLocked()
+		resetTerminalModesLocked()
+		stdoutMu.Unlock()
+		restoreTerminal(origTermios)
+		spawnTerminalCloseHelper()
+		if runtime.GOOS == "linux" {
+			// Reserved exit code the daemon-spawned shell wrapper checks for
+			// (openTerminalLinux) to close the window instead of exec'ing bash.
+			os.Exit(killedExitCode)
+		}
+		os.Exit(exitCode)
+	}
 
 	if exitCode != 0 {
 		// Restore terminal explicitly here since os.Exit skips defers.

@@ -11,8 +11,8 @@ package main
 //
 // The tap is observe-only. The screen model can't be reconstructed
 // retroactively, so it must observe from session start — but it's only created
-// for agents in agentSupportsSuggestions (claude today), so non-claude sessions
-// carry no emulation cost.
+// for agents in agentSupportsSuggestions (claude, codex — see composerConfigs
+// below), so other agents' sessions carry no emulation cost.
 
 import (
 	"strings"
@@ -22,27 +22,85 @@ import (
 	"github.com/hinshun/vt10x"
 )
 
+// composerAgentConfig captures an agent's composer rendering quirks, keyed the
+// same way agent.go's knownAgents map is (#269). Add an entry here — plus the
+// marker/ghost-styling bytes confirmed by a real PTY capture, never a guess —
+// to bring a new agent's composer under the screen tap.
+type composerAgentConfig struct {
+	// markers are the glyphs this agent uses to mark its input line. Kept
+	// deliberately narrow: a bare '>' would also match non-composer rows (e.g.
+	// a faint markdown blockquote in the transcript), which rewriteFaintToGrey
+	// makes ghost-styled.
+	markers []rune
+
+	// idleMarkerVisible reports whether waitForComposerMarker may safely require
+	// an idle marker before injection. Claude does. Codex has varied across
+	// releases, and the verified injector can still confirm it after typing, so
+	// we skip the pre-injection marker gate for Codex.
+	idleMarkerVisible bool
+
+	// exactFaintGhostOnly narrows suggestion styling to the exact colour used by
+	// rewriteFaintToGrey. Codex can paint typed text as black/dark text, so the
+	// broader Claude dim-colour heuristic would misclassify typed input there.
+	exactFaintGhostOnly bool
+
+	// suggestionAfterCursorOnly treats text before the active cursor as typed
+	// input when extracting suggestions. Codex repaints typed input over the
+	// placeholder, so cursor position is the reliable boundary between typed
+	// text and any remaining ghost suffix.
+	suggestionAfterCursorOnly bool
+}
+
+// composerConfigs is the per-agent table backing agentSupportsSuggestions and
+// the screen tap's marker matching. Add agents here as they're confirmed —
+// other agents render the composer differently and would yield stray styled
+// text, so we leave the tap observe-only for them until each is validated.
+var composerConfigs = map[string]composerAgentConfig{
+	"claude": {markers: []rune{'❯'}, idleMarkerVisible: true},
+	// Codex's marker is '›' (U+203A), rendered bold+faint in captured PTY output
+	// (#269). Current Codex also paints a faint placeholder, which the shared
+	// faint rewrite makes readable as ghost text, but we still skip the
+	// pre-injection marker gate for compatibility with markerless-idle captures.
+	"codex": {
+		markers:                   []rune{'›'},
+		idleMarkerVisible:         false,
+		exactFaintGhostOnly:       true,
+		suggestionAfterCursorOnly: true,
+	},
+}
+
 // agentSupportsSuggestions reports whether composer-suggestion extraction (#38)
-// is enabled for an agent runtime. Claude-only for now: other agents render the
-// composer differently and would yield stray styled text, so we leave the tap
-// observe-only for them until each is validated. Add agents here as they're
-// confirmed.
+// is enabled for an agent runtime.
 func agentSupportsSuggestions(agent string) bool {
-	return agent == "claude"
+	_, ok := composerConfigs[agent]
+	return ok
+}
+
+// agentIdleMarkerVisible reports whether agent paints its composer marker
+// while empty. Agents outside composerConfigs (no screen tap) default true —
+// callers only consult this when a screen tap already exists.
+func agentIdleMarkerVisible(agent string) bool {
+	cfg, ok := composerConfigs[agent]
+	return !ok || cfg.idleMarkerVisible
 }
 
 // screenTap maintains a virtual terminal screen model fed by the raw PTY byte
 // stream. Safe for concurrent Write/render/resize.
 type screenTap struct {
-	mu    sync.Mutex
-	term  vt10x.Terminal
-	carry []byte // incomplete trailing escape sequence held for the faint rewrite
+	mu                        sync.Mutex
+	term                      vt10x.Terminal
+	carry                     []byte // incomplete trailing escape sequence held for the faint rewrite
+	markers                   []rune // this session's agent's composer markers (see composerConfigs)
+	exactFaintGhostOnly       bool
+	suggestionAfterCursorOnly bool
 }
 
 // greyFaintReplacement is the SGR foreground vt10x DOES track, substituted for
-// the faint (SGR 2) parameter it ignores. 240 is in the 256-colour greyscale
-// ramp, so colorIsDim recognises it as ghost styling.
+// the faint (SGR 2) parameter it ignores. Codex keys ghost-style detection to
+// this exact colour so ordinary dark/black typed text is never mistaken for a
+// suggestion.
 const greyFaintReplacement = "38;5;240"
+const ghostFaintColor vt10x.Color = 240
 
 // maxEscCarry caps the held incomplete-escape buffer so a never-terminating
 // sequence can't grow it without bound. Any real SGR/CSI is far shorter.
@@ -130,14 +188,24 @@ func rewriteSGRFaint(params []byte) []byte {
 	return []byte(strings.Join(parts, ";"))
 }
 
-func newScreenTap(cols, rows int) *screenTap {
+// newScreenTap creates a screen tap for the given agent's composer markers
+// (composerConfigs). Callers must only create one when agentSupportsSuggestions
+// reports true, so a missing table entry here would be a caller bug — falls
+// back to no markers (matches nothing) rather than panicking.
+func newScreenTap(agent string, cols, rows int) *screenTap {
 	if cols <= 0 {
 		cols = 80
 	}
 	if rows <= 0 {
 		rows = 24
 	}
-	return &screenTap{term: vt10x.New(vt10x.WithSize(cols, rows))}
+	cfg := composerConfigs[agent]
+	return &screenTap{
+		term:                      vt10x.New(vt10x.WithSize(cols, rows)),
+		markers:                   cfg.markers,
+		exactFaintGhostOnly:       cfg.exactFaintGhostOnly,
+		suggestionAfterCursorOnly: cfg.suggestionAfterCursorOnly,
+	}
 }
 
 // Write feeds raw PTY bytes into the screen model. Observe-only: it never
@@ -167,13 +235,6 @@ func (s *screenTap) resize(cols, rows int) {
 // the one place that assumption lives.
 const vtAttrItalic int16 = 1 << 4
 
-// composerMarkers are the glyphs an agent uses to mark its input line. Claude
-// Code uses ❯ (U+276F). Kept deliberately narrow: a bare '>' would also match
-// non-composer rows (e.g. a faint markdown blockquote in the transcript), which
-// rewriteFaintToGrey makes ghost-styled. Add other agents' markers alongside
-// their entry in agentSupportsSuggestions, once validated.
-var composerMarkers = []rune{'❯'}
-
 // ghostStyled reports whether a cell carries the "ghost suggestion" styling —
 // italic, or a dim/grey foreground — as opposed to the default styling of
 // user-typed text. This is the grep predicate: the suggestion is the styled
@@ -181,21 +242,25 @@ var composerMarkers = []rune{'❯'}
 //
 // Claude renders the suggestion with SGR 2 (faint), which vt10x has no handler
 // for and would drop. rewriteFaintToGrey (run in Write, before bytes hit the
-// grid) rewrites faint → grey 240, which colorIsDim then recognises — so by the
-// time a cell reaches here, faint already reads as a dim foreground.
-func ghostStyled(g vt10x.Glyph) bool {
+// grid) rewrites faint → grey 240. Claude keeps the historical dim-colour
+// heuristic; Codex narrows to the exact rewrite colour to avoid confusing
+// ordinary black/dark typed text with a suggestion.
+func (s *screenTap) ghostStyled(g vt10x.Glyph) bool {
 	if g.Char == ' ' || g.Char == 0 {
 		return false
 	}
 	if g.Mode&vtAttrItalic != 0 {
 		return true
 	}
+	if s != nil && s.exactFaintGhostOnly {
+		return g.FG == ghostFaintColor
+	}
 	return colorIsDim(g.FG)
 }
 
 // colorIsDim reports whether a vt10x foreground colour reads as a dim grey —
-// the usual ghost-text colour. Covers ANSI bright-black (8), the 256-colour
-// greyscale ramp (232–255), and low-luminance packed RGB.
+// the historical Claude ghost-text heuristic. Covers ANSI bright-black (8), the
+// 256-colour greyscale ramp (232–255), and low-luminance packed RGB.
 func colorIsDim(c vt10x.Color) bool {
 	if c == vt10x.DefaultFG || c == vt10x.DefaultBG {
 		return false
@@ -231,35 +296,51 @@ func (s *screenTap) composerSuggestion() string {
 	s.term.Lock()
 	defer s.term.Unlock()
 	cols, rows := s.term.Size()
+	cursor := s.term.Cursor()
 
+	if s.suggestionAfterCursorOnly && cursor.Y >= 0 && cursor.Y < rows {
+		sug, _ := s.composerSuggestionFromRow(cols, cursor.Y, cursor.X)
+		return sug
+	}
 	for y := rows - 1; y >= 0; y-- {
-		runes := make([]rune, cols)
-		styled := make([]bool, cols)
-		marker := -1
-		for x := 0; x < cols; x++ {
-			g := s.term.Cell(x, y)
-			ch := g.Char
-			if ch == 0 {
-				ch = ' '
-			}
-			runes[x] = ch
-			styled[x] = ghostStyled(g)
-			if marker < 0 && isComposerMarker(ch) {
-				marker = x
-			}
-		}
-		if marker < 0 {
-			continue
-		}
-		if sug := suggestionFromRow(runes, styled, marker); sug != "" {
+		if sug, markerSeen := s.composerSuggestionFromRow(cols, y, -1); markerSeen {
 			return sug
 		}
 	}
 	return ""
 }
 
-func isComposerMarker(ch rune) bool {
-	for _, m := range composerMarkers {
+func (s *screenTap) composerSuggestionFromRow(cols, y, minX int) (string, bool) {
+	runes := make([]rune, cols)
+	styled := make([]bool, cols)
+	marker := -1
+	for x := 0; x < cols; x++ {
+		g := s.term.Cell(x, y)
+		ch := g.Char
+		if ch == 0 {
+			ch = ' '
+		}
+		runes[x] = ch
+		styled[x] = s.ghostStyled(g)
+		if marker < 0 && s.isComposerMarker(ch) {
+			marker = x
+		}
+	}
+	if marker < 0 {
+		return "", false
+	}
+	start := marker + 1
+	if minX > start {
+		start = minX
+	}
+	return suggestionFromRow(runes, styled, start), true
+}
+
+// isComposerMarker reports whether ch is one of this session's agent's
+// composer markers (composerConfigs). markers is set once at construction and
+// never mutated, so this needs no locking of its own.
+func (s *screenTap) isComposerMarker(ch rune) bool {
+	for _, m := range s.markers {
 		if ch == m {
 			return true
 		}
@@ -268,13 +349,13 @@ func isComposerMarker(ch rune) bool {
 }
 
 // suggestionFromRow extracts the ghost suggestion from a single composer row:
-// the text spanning the first to the last ghost-styled cell after the marker.
+// the text spanning the first to the last ghost-styled cell at/after start.
 // Interior spaces are not themselves "styled" but fall within the span, so
 // multi-word suggestions stay intact. Returns "" if the span has no letters
 // (avoids matching stray styling).
-func suggestionFromRow(runes []rune, styled []bool, marker int) string {
+func suggestionFromRow(runes []rune, styled []bool, start int) string {
 	first, last := -1, -1
-	for x := marker + 1; x < len(runes); x++ {
+	for x := start; x < len(runes); x++ {
 		if styled[x] {
 			if first < 0 {
 				first = x
@@ -324,8 +405,8 @@ func (s *screenTap) composerTextOnce() (string, bool) {
 				ch = ' '
 			}
 			runes[x] = ch
-			ghost[x] = ghostStyled(g)
-			if marker < 0 && isComposerMarker(ch) {
+			ghost[x] = s.ghostStyled(g)
+			if marker < 0 && s.isComposerMarker(ch) {
 				marker = x
 			}
 		}

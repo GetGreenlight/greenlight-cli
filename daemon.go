@@ -316,6 +316,13 @@ func ensureDaemon(deviceIDFlag string) error {
 	return fmt.Errorf("daemon started but socket not ready")
 }
 
+// daemonLogPath is the daemon's actual active log destination, set by
+// runDaemonForeground alongside its log.SetOutput call. Session setup
+// (buildExportEnvs) reuses this value for GREENLIGHT_LOG so the hook
+// subprocess Claude Code spawns inherits the session's real log file
+// (daemon.log) instead of an independently recomputed default.
+var daemonLogPath string
+
 // runDaemonForeground runs the daemon in the foreground (used by background start).
 func runDaemonForeground() {
 	// Set up logging
@@ -326,6 +333,7 @@ func runDaemonForeground() {
 	logPath := filepath.Join(logDir, "daemon.log")
 	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
 		log.SetOutput(f)
+		daemonLogPath = logPath
 	}
 
 	// Persist a concrete default agent if none is configured, so the host config

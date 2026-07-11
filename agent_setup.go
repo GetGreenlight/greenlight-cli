@@ -32,8 +32,11 @@ type InterposeSetup struct {
 // If ticket is non-nil, agents that use --append-system-prompt get a line
 // pointing at the ticket URL. shims is the active command-shim set (resolved
 // at session start); when non-empty the system prompt names those commands as
-// pre-authenticated (issue #198).
-func buildAgentCommand(agent, resume string, ticket *TicketRef, shims []resolvedShim) (*AgentSetup, error) {
+// pre-authenticated (issue #198). sshState is the session-start resolution
+// of ssh_isolation + ssh_keys (#249/#250); when isolated the prompt either
+// names the managed ssh-agent's keys or warns the session has no SSH
+// identity.
+func buildAgentCommand(agent, resume string, ticket *TicketRef, shims []resolvedShim, sshState sshSession) (*AgentSetup, error) {
 	command := agentBinary(agent)
 	var cmdArgs []string
 
@@ -76,12 +79,12 @@ func buildAgentCommand(agent, resume string, ticket *TicketRef, shims []resolved
 	case "codex":
 		cmdArgs = append(cmdArgs, "--dangerously-bypass-approvals-and-sandbox")
 	case "claude":
-		cmdArgs = append(cmdArgs, "--dangerously-skip-permissions", "--append-system-prompt", greenlightSystemPrompt(ticket, shims))
+		cmdArgs = append(cmdArgs, "--dangerously-skip-permissions", "--disallowedTools", "Task", "--append-system-prompt", greenlightSystemPrompt(ticket, shims, sshState))
 		if resume == "" && agentSessionID != "" {
 			cmdArgs = append(cmdArgs, "--session-id", agentSessionID)
 		}
 	case "pi":
-		cmdArgs = append(cmdArgs, "--append-system-prompt", greenlightSystemPrompt(ticket, shims))
+		cmdArgs = append(cmdArgs, "--append-system-prompt", greenlightSystemPrompt(ticket, shims, sshState))
 		if agentSessionID != "" {
 			sessPath := piSessionPath(agentSessionID, "")
 			if sessPath != "" {
@@ -139,9 +142,9 @@ func resolveDeviceAndProject(deviceID, project, cwd string) (string, string, err
 }
 
 // installAgentFiles installs agent-specific instruction files and hooks.
-func installAgentFiles(agent, relayID, cwd string, ticket *TicketRef, shims []resolvedShim) {
+func installAgentFiles(agent, relayID, cwd string, ticket *TicketRef, shims []resolvedShim, sshState sshSession) {
 	if agent == "gemini" || agent == "copilot" || agent == "cursor" || agent == "codex" {
-		if err := installGreenlightInstructions(agent, relayID, cwd, ticket, shims); err != nil {
+		if err := installGreenlightInstructions(agent, relayID, cwd, ticket, shims, sshState); err != nil {
 			log.Printf("Warning: failed to install agent instructions: %v", err)
 		}
 	}
@@ -161,6 +164,9 @@ func buildExportEnvs(devID, relayID, proj, bridgePath, agent, ticketJSON string)
 	}
 	if ticketJSON != "" {
 		envs["GREENLIGHT_TICKET_JSON"] = ticketJSON
+	}
+	if daemonLogPath != "" {
+		envs["GREENLIGHT_LOG"] = daemonLogPath
 	}
 	return envs
 }

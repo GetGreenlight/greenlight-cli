@@ -232,10 +232,15 @@ func splitCompoundCommand(cmd string) []string {
 	return segments
 }
 
-// isSafeSimpleCommand checks a single (non-compound) command.
-func isSafeSimpleCommand(cmd string) bool {
-	// Check for output redirects: any unquoted > means the command can
-	// write to a file, even if the binary itself is read-only.
+// hasUnsafeShellMetachar scans cmd for shell metacharacters that the
+// whitespace-tokenized safe-binary checks below don't account for: output
+// redirects, ;, a raw newline, a lone &, and process substitution <(, all
+// outside quotes only (inert literal text inside double quotes, and
+// unquoted-only for process substitution). Command substitution ($( and
+// backtick) is flagged whenever not inside single quotes, since bash still
+// performs it inside double quotes. Mirrors the C-side check in
+// interpose.c::has_unsafe_shell_metachar (issue #240).
+func hasUnsafeShellMetachar(cmd string) bool {
 	inSingle := false
 	inDouble := false
 	for i := 0; i < len(cmd); i++ {
@@ -252,9 +257,35 @@ func isSafeSimpleCommand(cmd string) bool {
 			i++ // skip escaped char
 			continue
 		}
-		if c == '>' && !inSingle && !inDouble {
-			return false
+		if !inSingle {
+			if c == '$' && i+1 < len(cmd) && cmd[i+1] == '(' {
+				return true
+			}
+			if c == '`' {
+				return true
+			}
 		}
+		if !inSingle && !inDouble {
+			if c == '>' || c == ';' || c == '\n' || c == '&' {
+				return true
+			}
+			if c == '<' && i+1 < len(cmd) && cmd[i+1] == '(' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isSafeSimpleCommand checks a single (non-compound) command.
+func isSafeSimpleCommand(cmd string) bool {
+	// Reject any unquoted (or double-quoted, for substitution) shell
+	// metacharacter that could write files or run other commands, even
+	// if the leading binary is read-only. Runs over the whole segment
+	// before any dispatch below, so it also gates the greenlight
+	// subcommand branch (e.g. "greenlight secrets list; rm -rf ~").
+	if hasUnsafeShellMetachar(cmd) {
+		return false
 	}
 
 	// Extract the base command name (skip env assignments like VAR=val)

@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	sshagent "golang.org/x/crypto/ssh/agent"
+
 	"greenlight/internal/mockserver"
 )
 
@@ -1086,6 +1088,181 @@ func TestIntegration_Daemon_Kill(t *testing.T) {
 	}
 }
 
+// exitFramePayload mirrors the JSON payload Session.finishRelay writes into
+// the frameExit frame.
+type exitFramePayload struct {
+	Code           int    `json:"code"`
+	ConversationID string `json:"conversation_id"`
+	Agent          string `json:"agent"`
+	Killed         bool   `json:"killed"`
+}
+
+// rawIPCFrame is a single frame read off a rawIPCClient's connection.
+type rawIPCFrame struct {
+	frameType byte
+	payload   []byte
+}
+
+// rawIPCClient is a minimal test double for the real client's daemon-attach
+// protocol (connectViaDaemon) — it dials the daemon socket directly and reads
+// the same binary-framed protocol, but never processes a frameExit's Killed
+// field the way the real client does (terminal restore, window-close
+// side-effects, issue #273). Used when a test only needs to inspect what the
+// daemon sent, not exercise the client's reaction to it. All frames read off
+// the connection are streamed to a channel by a background goroutine so
+// waiting for a stdout marker and then a later frameExit share one reader.
+type rawIPCClient struct {
+	conn   net.Conn
+	frames chan rawIPCFrame
+}
+
+func dialRawIPCClient(t *testing.T, sockPath string, req ipcRequest) *rawIPCClient {
+	t.Helper()
+	conn, err := net.DialTimeout("unix", sockPath, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial daemon: %v", err)
+	}
+	req.Type = "connect"
+	data, _ := json.Marshal(req)
+	data = append(data, '\n')
+	if _, err := conn.Write(data); err != nil {
+		conn.Close()
+		t.Fatalf("send connect request: %v", err)
+	}
+
+	reader := bufio.NewReader(conn)
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		conn.Close()
+		t.Fatalf("read daemon response: %v", err)
+	}
+	var resp ipcResponse
+	if err := json.Unmarshal(line, &resp); err != nil {
+		conn.Close()
+		t.Fatalf("invalid daemon response: %v", err)
+	}
+	if resp.Type != "session_started" {
+		conn.Close()
+		t.Fatalf("unexpected daemon response: %+v", resp)
+	}
+
+	rc := &rawIPCClient{conn: conn, frames: make(chan rawIPCFrame, 256)}
+	go func() {
+		defer close(rc.frames)
+		for {
+			frameType, payload, err := readFrame(reader)
+			if err != nil {
+				return
+			}
+			rc.frames <- rawIPCFrame{frameType, payload}
+		}
+	}()
+	return rc
+}
+
+// waitForStdoutMarker blocks until frameStdout payloads concatenate to
+// contain marker, or the timeout elapses.
+func (c *rawIPCClient) waitForStdoutMarker(t *testing.T, marker string, timeout time.Duration) {
+	t.Helper()
+	var buf bytes.Buffer
+	deadline := time.After(timeout)
+	for {
+		select {
+		case f, ok := <-c.frames:
+			if !ok {
+				t.Fatalf("connection closed waiting for marker %q; got %q", marker, buf.String())
+			}
+			if f.frameType == frameStdout {
+				buf.Write(f.payload)
+				if strings.Contains(buf.String(), marker) {
+					return
+				}
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for marker %q; got %q", marker, buf.String())
+		}
+	}
+}
+
+// waitForExitFrame reads frames until frameExit, returning its decoded
+// payload. Fails the test on a closed connection or timeout.
+func (c *rawIPCClient) waitForExitFrame(t *testing.T, timeout time.Duration) exitFramePayload {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case f, ok := <-c.frames:
+			if !ok {
+				t.Fatalf("connection closed before frameExit")
+			}
+			if f.frameType == frameExit {
+				var p exitFramePayload
+				json.Unmarshal(f.payload, &p)
+				return p
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for frameExit")
+		}
+	}
+}
+
+// TestIntegration_Daemon_Kill_SetsKilledFrame verifies that killing an
+// attached daemon session sets Killed on the frameExit frame — the signal
+// that lets the client distinguish an app-initiated kill from a normal agent
+// exit and close the hosting terminal window/tab (issue #273). Uses a raw
+// IPC client (not the real greenlight binary) so the test only observes what
+// the daemon sends, without triggering the client's own window-close
+// side-effects.
+func TestIntegration_Daemon_Kill_SetsKilledFrame(t *testing.T) {
+	testServerURL.ClearHandlers()
+
+	hostID := enrollTestHost(t, "test-dev")
+	daemonEnv := []string{
+		"GREENLIGHT_DEVICE_ID=test-dev",
+		"GREENLIGHT_DAEMON_SESSION_ID=" + hostID,
+		"GREENLIGHT_DISABLE_INTERPOSE=1",
+	}
+	sockPath, tmpDir, _, daemonCleanup := startTestDaemonWithHome(t, t.TempDir(), daemonEnv...)
+	defer daemonCleanup()
+
+	workDir := t.TempDir()
+	pathWithMock := filepath.Dir(mockClaudeBin) + ":" + os.Getenv("PATH")
+
+	rc := dialRawIPCClient(t, sockPath, ipcRequest{
+		DeviceID: "test-dev",
+		Project:  "test-proj",
+		Cwd:      workDir,
+		Winsize:  &ipcWinsize{Rows: 24, Cols: 80},
+		Env: map[string]string{
+			"HOME":               t.TempDir(),
+			"PATH":               pathWithMock,
+			"TMPDIR":             tmpDir,
+			"TERM":               "xterm-256color",
+			"MOCK_CLAUDE_OUTPUT": filepath.Join(workDir, "claude-stdin.txt"),
+		},
+	})
+	defer rc.conn.Close()
+
+	sess := waitForOneSession(t, testServerURL, 5*time.Second)
+
+	// Wait for the child to actually be running before killing it — session
+	// registration (above) happens before the child process is spawned, and
+	// killing before it starts would set Killed with nothing to terminate.
+	rc.waitForStdoutMarker(t, "MOCK_CLAUDE_STARTED", 10*time.Second)
+
+	if err := sess.SendBinary(map[string]any{
+		"type":     "kill",
+		"relay_id": sess.RelayID,
+	}); err != nil {
+		t.Fatalf("send kill: %v", err)
+	}
+
+	exit := rc.waitForExitFrame(t, 10*time.Second)
+	if !exit.Killed {
+		t.Errorf("frameExit Killed = false, want true after kill_session")
+	}
+}
+
 // TestIntegration_Daemon_Permission_Allow exercises the full
 // interpose→daemon→server permission round-trip with an "allow"
 // decision. mock_claude exec()s a non-safe-list binary, the C library
@@ -2033,6 +2210,10 @@ type connectOpts struct {
 	// ConfigSeed writes key=value entries into the daemon's ~/.greenlight/config
 	// before the connect session starts (e.g. tickets_secret for shim tests).
 	ConfigSeed map[string]string
+	// HomeSeed, if set, runs against the daemon's HOME after the daemon
+	// starts and before the connect session does — for pre-populating paths
+	// the session setup reads (e.g. ~/.greenlight/ssh/<name>.pub).
+	HomeSeed func(daemonHome string)
 	// DaemonEnv is appended to the daemon process's env (e.g. to enable
 	// experimental features gated behind an env var).
 	DaemonEnv []string
@@ -2066,6 +2247,9 @@ func startConnectSession(t *testing.T, opts ...connectOpts) (*connectSession, fu
 
 	if len(opt.ConfigSeed) > 0 {
 		seedDaemonConfig(t, daemonHome, opt.ConfigSeed)
+	}
+	if opt.HomeSeed != nil {
+		opt.HomeSeed(daemonHome)
 	}
 
 	workDir := t.TempDir()
@@ -2405,5 +2589,388 @@ func TestIntegration_Daemon_TicketRejectTag(t *testing.T) {
 	}
 	if out := run("tag", "8"); strings.TrimSpace(out) != "" {
 		t.Fatalf("no-op reject should add no tag, got: %q", out)
+	}
+}
+
+// waitForFileContent polls until the file at path exists and is non-empty,
+// returning its content. Fails the test on timeout.
+func waitForFileContent(t *testing.T, path string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+			return string(data)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("file %s never appeared", path)
+	return ""
+}
+
+// envFileHas reports whether the newline-joined k=v environ dump carries the
+// named variable.
+func envFileHas(dump, name string) bool {
+	for _, line := range strings.Split(dump, "\n") {
+		if k, _, ok := strings.Cut(line, "="); ok && k == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestIntegration_Daemon_SSHIsolationOff is the regression guard for the
+// opt-in promise (#249): with ssh_isolation unset, the inherited ssh-agent
+// vars pass through to the child untouched and the system prompt carries no
+// no-identity line.
+func TestIntegration_Daemon_SSHIsolationOff(t *testing.T) {
+	testServerURL.ClearHandlers()
+	envFile := filepath.Join(t.TempDir(), "claude-env.txt")
+	argsFile := filepath.Join(t.TempDir(), "claude-args.txt")
+	_, cleanup := startConnectSession(t, connectOpts{
+		AgentEnv: []string{
+			"SSH_AUTH_SOCK=/tmp/fake-agent.sock",
+			"SSH_AGENT_PID=54321",
+			"MOCK_CLAUDE_ENV_FILE=" + envFile,
+			"MOCK_CLAUDE_ARGS_FILE=" + argsFile,
+		},
+	})
+	defer cleanup()
+
+	dump := waitForFileContent(t, envFile, 10*time.Second)
+	if !envFileHas(dump, "SSH_AUTH_SOCK") {
+		t.Error("isolation unset must pass SSH_AUTH_SOCK through to the child")
+	}
+	if !envFileHas(dump, "SSH_AGENT_PID") {
+		t.Error("isolation unset must pass SSH_AGENT_PID through to the child")
+	}
+	args := waitForFileContent(t, argsFile, 10*time.Second)
+	if strings.Contains(args, sshNoIdentityLine) {
+		t.Error("isolation unset must not add the no-identity prompt line")
+	}
+}
+
+// TestIntegration_SSHCmd drives the `greenlight ssh` verbs end-to-end against
+// a live daemon + mock server (#250): keygen stores the secret and writes the
+// .pub, prints a restrict-hardened authorized_keys line, and refuses invalid
+// or duplicate names; pubkey re-prints; list round-trips; rm removes both
+// halves.
+func TestIntegration_SSHCmd(t *testing.T) {
+	testServerURL.ClearHandlers()
+	testServerURL.SetSecrets()
+	defer testServerURL.SetSecrets()
+
+	hostID := enrollTestHost(t, "test-dev")
+	sockPath, _, daemonHome, cleanup := startTestDaemonWithHome(t, t.TempDir(),
+		"GREENLIGHT_DEVICE_ID=test-dev",
+		"GREENLIGHT_DAEMON_SESSION_ID="+hostID,
+	)
+	defer cleanup()
+
+	// keygen encrypts to the local X25519 pubkey — seed the key file the way
+	// `secrets init` would have.
+	glKey, err := generateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyFile := filepath.Join(daemonHome, ".greenlight", "key")
+	if err := os.WriteFile(keyFile, []byte(base64.StdEncoding.EncodeToString(glKey.Bytes())), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := append(os.Environ(),
+		"HOME="+daemonHome,
+		"GREENLIGHT_DAEMON_SOCK="+sockPath,
+	)
+	runSSHCmd := func(args ...string) (string, string, error) {
+		cmd := exec.Command(greenlightBin, append([]string{"ssh"}, args...)...)
+		cmd.Env = env
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		return stdout.String(), stderr.String(), err
+	}
+
+	// Invalid name is rejected before anything is stored.
+	if _, stderr, err := runSSHCmd("keygen", "bad*name"); err == nil {
+		t.Error("keygen with an invalid name must fail")
+	} else if !strings.Contains(stderr, "invalid key name") {
+		t.Errorf("invalid-name error = %q", stderr)
+	}
+
+	// keygen: restrict-hardened line on stdout, .pub on disk, secret stored.
+	stdout, stderr, err := runSSHCmd("keygen", "staging")
+	if err != nil {
+		t.Fatalf("keygen: %v\nstderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "restrict ssh-ed25519 ") {
+		t.Errorf("keygen stdout missing restrict-hardened line:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "greenlight:staging@") {
+		t.Errorf("keygen stdout missing audit comment:\n%s", stdout)
+	}
+	if strings.Contains(stdout+stderr, "PRIVATE KEY") {
+		t.Fatal("keygen output leaked private key material")
+	}
+	pubPath := filepath.Join(daemonHome, ".greenlight", "ssh", "staging.pub")
+	pubData, err := os.ReadFile(pubPath)
+	if err != nil {
+		t.Fatalf("read .pub: %v", err)
+	}
+	if info, _ := os.Stat(pubPath); info.Mode().Perm() != 0644 {
+		t.Errorf(".pub mode = %o, want 0644", info.Mode().Perm())
+	}
+
+	// The same name is refused — no silent rotation.
+	if _, stderr, err := runSSHCmd("keygen", "staging"); err == nil {
+		t.Error("keygen with an existing name must fail")
+	} else if !strings.Contains(stderr, "already exists") {
+		t.Errorf("duplicate-name error = %q", stderr)
+	}
+
+	// pubkey re-prints the authorized_keys line for the stored .pub.
+	stdout, stderr, err = runSSHCmd("pubkey", "staging")
+	if err != nil {
+		t.Fatalf("pubkey: %v\nstderr: %s", err, stderr)
+	}
+	if strings.TrimSpace(stdout) != "restrict "+strings.TrimSpace(string(pubData)) {
+		t.Errorf("pubkey = %q, want restrict + .pub content", strings.TrimSpace(stdout))
+	}
+
+	// list shows the key with its secret, no orphan flags.
+	stdout, stderr, err = runSSHCmd("list")
+	if err != nil {
+		t.Fatalf("list: %v\nstderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "staging") || !strings.Contains(stdout, "SSH_KEY_STAGING") {
+		t.Errorf("list missing key row:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "missing") {
+		t.Errorf("list flagged a healthy key as orphaned:\n%s", stdout)
+	}
+
+	// rm removes the secret and the .pub.
+	if _, stderr, err := runSSHCmd("rm", "staging"); err != nil {
+		t.Fatalf("rm: %v\nstderr: %s", err, stderr)
+	}
+	if _, err := os.Stat(pubPath); !os.IsNotExist(err) {
+		t.Error("rm must remove the .pub")
+	}
+	if _, stderr, err := runSSHCmd("list"); err != nil {
+		t.Fatalf("list after rm: %v", err)
+	} else if !strings.Contains(stderr, "no ssh keys") {
+		t.Errorf("list after rm should be empty, stderr=%q", stderr)
+	}
+}
+
+// envFileValue returns the value of the named variable in the newline-joined
+// k=v environ dump, or "" if absent.
+func envFileValue(dump, name string) string {
+	for _, line := range strings.Split(dump, "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok && k == name {
+			return v
+		}
+	}
+	return ""
+}
+
+// TestIntegration_Daemon_SSHKeysServed: ssh_isolation=on with a resolvable
+// ssh_keys entry (stored secret + on-disk .pub) serves a per-session
+// ssh-agent — SSH_AUTH_SOCK points at a live 0600 socket answering List over
+// the real agent protocol, and the prompt carries the managed-agent line
+// naming the key (#250).
+func TestIntegration_Daemon_SSHKeysServed(t *testing.T) {
+	testServerURL.ClearHandlers()
+	testServerURL.SetSecrets("SSH_KEY_STAGING")
+	defer testServerURL.SetSecrets()
+
+	_, pubLine, err := generateSSHKeyMaterial("greenlight:staging@test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	envFile := filepath.Join(t.TempDir(), "claude-env.txt")
+	argsFile := filepath.Join(t.TempDir(), "claude-args.txt")
+	_, cleanup := startConnectSession(t, connectOpts{
+		ConfigSeed: map[string]string{
+			"ssh_isolation": "on",
+			"ssh_keys":      "SSH_KEY_STAGING",
+		},
+		HomeSeed: func(home string) {
+			dir := filepath.Join(home, ".greenlight", "ssh")
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "staging.pub"), []byte(pubLine+"\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		AgentEnv: []string{
+			"SSH_AUTH_SOCK=/tmp/fake-agent.sock",
+			"SSH_AGENT_PID=54321",
+			"MOCK_CLAUDE_ENV_FILE=" + envFile,
+			"MOCK_CLAUDE_ARGS_FILE=" + argsFile,
+		},
+	})
+	defer cleanup()
+
+	dump := waitForFileContent(t, envFile, 10*time.Second)
+	sock := envFileValue(dump, "SSH_AUTH_SOCK")
+	if sock == "" {
+		t.Fatal("serving session must set SSH_AUTH_SOCK")
+	}
+	if sock == "/tmp/fake-agent.sock" {
+		t.Fatal("SSH_AUTH_SOCK must point at the session agent, not the inherited one")
+	}
+	if envFileHas(dump, "SSH_AGENT_PID") {
+		t.Error("SSH_AGENT_PID must stay stripped")
+	}
+	// #292: git must be forced onto the session agent's key regardless of any
+	// pre-existing ~/.ssh/config identity for the remote host.
+	gitSSHCmd := envFileValue(dump, "GIT_SSH_COMMAND")
+	if !strings.Contains(gitSSHCmd, "IdentityAgent") || !strings.Contains(gitSSHCmd, "IdentitiesOnly=no") {
+		t.Errorf("GIT_SSH_COMMAND = %q, want IdentityAgent + IdentitiesOnly=no override", gitSSHCmd)
+	}
+
+	info, err := os.Stat(sock)
+	if err != nil {
+		t.Fatalf("session agent socket %s: %v", sock, err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		t.Errorf("%s is not a socket", sock)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("socket mode = %o, want 0600", perm)
+	}
+
+	// Drive the live socket with a real ssh-agent client.
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial session agent: %v", err)
+	}
+	defer conn.Close()
+	keys, err := sshagent.NewClient(conn).List()
+	if err != nil {
+		t.Fatalf("List over session socket: %v", err)
+	}
+	if len(keys) != 1 || keys[0].Comment != "greenlight:staging@test" {
+		t.Fatalf("List = %+v, want the staging key", keys)
+	}
+
+	args := waitForFileContent(t, argsFile, 10*time.Second)
+	if !strings.Contains(args, "managed ssh-agent (keys: staging)") {
+		t.Errorf("prompt must carry the managed-agent line naming the key:\n%s", args)
+	}
+	if strings.Contains(args, sshNoIdentityLine) {
+		t.Error("serving session must not carry the no-identity line")
+	}
+}
+
+// TestIntegration_Daemon_SSHKeysUnresolvable: ssh_isolation=on with an
+// ssh_keys entry whose secret is missing skips the entry with a log line —
+// the session still starts, identity-less: no SSH_AUTH_SOCK, no-identity
+// prompt line (#250 fail-closed).
+func TestIntegration_Daemon_SSHKeysUnresolvable(t *testing.T) {
+	testServerURL.ClearHandlers()
+	testServerURL.SetSecrets() // no stored secrets
+
+	envFile := filepath.Join(t.TempDir(), "claude-env.txt")
+	argsFile := filepath.Join(t.TempDir(), "claude-args.txt")
+	_, cleanup := startConnectSession(t, connectOpts{
+		ConfigSeed: map[string]string{
+			"ssh_isolation": "on",
+			"ssh_keys":      "SSH_KEY_MISSING",
+		},
+		AgentEnv: []string{
+			"SSH_AUTH_SOCK=/tmp/fake-agent.sock",
+			"MOCK_CLAUDE_ENV_FILE=" + envFile,
+			"MOCK_CLAUDE_ARGS_FILE=" + argsFile,
+		},
+	})
+	defer cleanup()
+
+	// The session came up (env file written) — the unresolvable entry never
+	// fails the session.
+	dump := waitForFileContent(t, envFile, 10*time.Second)
+	if envFileHas(dump, "SSH_AUTH_SOCK") {
+		t.Error("session with no resolvable keys must not set SSH_AUTH_SOCK")
+	}
+	if envFileHas(dump, "GIT_SSH_COMMAND") {
+		t.Error("session with no resolvable keys must not set GIT_SSH_COMMAND")
+	}
+	args := waitForFileContent(t, argsFile, 10*time.Second)
+	// #292: ssh_keys named a real entry that failed to resolve, so the prompt
+	// must say so explicitly rather than fall back to the generic
+	// never-configured line — the two used to read identically.
+	if !strings.Contains(args, "SSH_KEY_MISSING") {
+		t.Error("identity-less session with a configured-but-unresolved key must name it in the prompt")
+	}
+	if strings.Contains(args, sshNoIdentityLine) {
+		t.Error("session with a named-but-unresolved key must not carry the generic no-identity line")
+	}
+	if strings.Contains(args, "managed ssh-agent") {
+		t.Error("prompt must not claim a managed agent when no keys resolved")
+	}
+}
+
+// TestIntegration_Daemon_SSHIsolationOn: ssh_isolation=on in the daemon's
+// config strips SSH_AUTH_SOCK/SSH_AGENT_PID from the child env and appends
+// the no-identity line to --append-system-prompt (#249).
+func TestIntegration_Daemon_SSHIsolationOn(t *testing.T) {
+	testServerURL.ClearHandlers()
+	envFile := filepath.Join(t.TempDir(), "claude-env.txt")
+	argsFile := filepath.Join(t.TempDir(), "claude-args.txt")
+	_, cleanup := startConnectSession(t, connectOpts{
+		ConfigSeed: map[string]string{"ssh_isolation": "on"},
+		AgentEnv: []string{
+			"SSH_AUTH_SOCK=/tmp/fake-agent.sock",
+			"SSH_AGENT_PID=54321",
+			"MOCK_CLAUDE_ENV_FILE=" + envFile,
+			"MOCK_CLAUDE_ARGS_FILE=" + argsFile,
+		},
+	})
+	defer cleanup()
+
+	dump := waitForFileContent(t, envFile, 10*time.Second)
+	if envFileHas(dump, "SSH_AUTH_SOCK") {
+		t.Error("ssh_isolation=on must strip SSH_AUTH_SOCK from the child env")
+	}
+	if envFileHas(dump, "SSH_AGENT_PID") {
+		t.Error("ssh_isolation=on must strip SSH_AGENT_PID from the child env")
+	}
+	if envFileHas(dump, "GIT_SSH_COMMAND") {
+		t.Error("a non-serving isolated session must not set GIT_SSH_COMMAND")
+	}
+	args := waitForFileContent(t, argsFile, 10*time.Second)
+	if !strings.Contains(args, "--append-system-prompt") {
+		t.Fatalf("agent argv missing --append-system-prompt:\n%s", args)
+	}
+	if !strings.Contains(args, sshNoIdentityLine) {
+		t.Error("ssh_isolation=on must append the no-identity prompt line")
+	}
+}
+
+// TestIntegration_Daemon_ClaudeDisallowsTask: every Claude session spawn
+// unconditionally carries --disallowedTools Task, blocking subagent spawns
+// (#268). Hardcoded, no config gate.
+func TestIntegration_Daemon_ClaudeDisallowsTask(t *testing.T) {
+	testServerURL.ClearHandlers()
+	argsFile := filepath.Join(t.TempDir(), "claude-args.txt")
+	_, cleanup := startConnectSession(t, connectOpts{
+		AgentEnv: []string{"MOCK_CLAUDE_ARGS_FILE=" + argsFile},
+	})
+	defer cleanup()
+
+	args := waitForFileContent(t, argsFile, 10*time.Second)
+	fields := strings.Split(args, "\n")
+	found := false
+	for i, f := range fields {
+		if f == "--disallowedTools" && i+1 < len(fields) && strings.TrimSpace(fields[i+1]) == "Task" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("agent argv missing --disallowedTools Task:\n%s", args)
 	}
 }
